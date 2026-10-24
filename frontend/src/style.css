@@ -283,6 +283,13 @@
   margin: 8px 0;
 }
 
+/* 助手消息用纵向排列：气泡、来源序号、跳转按钮从上往下放。
+   否则它们会作为三个 flex 子项并排挤在气泡右边。 */
+.l2d-msg--assistant {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
 .l2d-msg--user {
   justify-content: flex-end;
 }
@@ -339,45 +346,126 @@
 }
 
 /* ---------- 引用与跳转 ---------- */
+/* 回答下面只有一排 [1] [2]，像脚注；详细内容在悬浮卡片里。 */
 .l2d-cites {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1px 3px;
+  margin: -1px 0 0 3px;
   max-width: 86%;
 }
 
 .l2d-cite {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 7px 10px;
-  border-radius: 11px;
-  border: 1px dashed var(--l2d-sky-300);
-  background: #ffffff;
-  color: var(--l2d-sky-700);
-  font-size: 12px;
-  line-height: 1.4;
-  text-decoration: none;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  appearance: none;
+  border: 0;
+  margin: 0;
+  padding: 1px 3px;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--l2d-sky-600);
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.45;
+  letter-spacing: 0.2px;
+  cursor: pointer;
+  transition: background 0.14s ease, color 0.14s ease;
 }
 
 .l2d-cite:hover {
-  background: var(--l2d-sky-50);
-  border-color: var(--l2d-sky-400);
+  background: var(--l2d-sky-100);
+  color: var(--l2d-sky-700);
 }
 
-.l2d-cite__title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.l2d-cite:focus-visible {
+  outline: 2px solid var(--l2d-sky-300);
+  outline-offset: 1px;
 }
 
-.l2d-cite__go {
-  margin-left: auto;
+/* 悬浮卡片：用 fixed 定位挂到 .l2d-root 上，
+   这样不会被聊天记录的 overflow-y: auto 裁掉。 */
+.l2d-cite-pop {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 20;
+  width: min(272px, calc(100vw - 16px));
+  padding: 10px;
+  border: 1px solid var(--l2d-sky-200);
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 12px 30px rgba(43, 85, 104, 0.18);
+  pointer-events: auto;
+  text-align: left;
+  white-space: normal;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(3px);
+  transition: opacity 0.13s ease, transform 0.13s ease, visibility 0.13s;
+}
+
+.l2d-cite-pop.is-visible {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+}
+
+.l2d-cite-pop__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+/* 没有图片时不渲染这个元素，也就不存在任何图标占位。 */
+.l2d-cite-pop__thumb {
   flex: none;
-  color: var(--l2d-sky-500);
+  width: 64px;
+  height: 64px;
+  border: 1px solid var(--l2d-sky-200);
+  border-radius: 9px;
+  background: var(--l2d-sky-50);
+  object-fit: cover;
+}
+
+.l2d-cite-pop__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.l2d-cite-pop__title {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--l2d-sky-700);
+  font-size: 12.5px;
   font-weight: 600;
+  line-height: 1.45;
+}
+
+.l2d-cite-pop__excerpt {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  margin-top: 4px;
+  color: #5d7f8f;
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.l2d-cite-pop__open {
+  display: inline-block;
+  margin-top: 7px;
+  color: var(--l2d-sky-600);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.l2d-cite-pop__open:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .l2d-action {

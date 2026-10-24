@@ -36,13 +36,21 @@ class ChatRequest(BaseModel):
 
 
 class Citation(BaseModel):
-    """知识库引用的结构（第二阶段使用）。
+    """知识库引用的结构。
 
-    前端已经支持渲染 citations 事件；等知识库接入后，
-    后端把检索结果的元数据填入这个结构即可。
+    这是 `citations` SSE 事件里每一项的形状：
+    - title/url 用来渲染来源卡片、点击跳转；
+    - excerpt 是命中位置的摘要；
+    - image_url 是命中的图片地址，前端把它显示成缩略图；
+    - kind 区分“正文命中”和“图片描述命中”。
+
+    字段使用 snake_case，和 `search_site` 工具返回的字典保持一致，
+    避免在 agent 层来回做无意义的命名转换。
     """
 
     title: str
     url: str
     post_id: int | None = None
     excerpt: str | None = None
+    image_url: str | None = None
+    kind: Literal["article", "image"] | None = None

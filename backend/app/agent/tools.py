@@ -14,16 +14,39 @@
 - Args 里逐个解释参数。
 这些文字是给模型看的，不是给人看的。
 
-本项目当前只放了一个演示工具，用来验证 agent 的工具调用链路。
-后续知识库功能会在这里新增：
-- `search_site(query)`  → 检索站内文章，返回 title/url/post_id
-- `navigate(url)`       → 让前端渲染跳转按钮
+本项目目前有三个工具：
+- `get_current_datetime`：回答“现在几点”；
+- `search_site`：检索本地知识库（文章正文 + 图片描述）；
+- `navigate_to_article`：生成一个前端跳转按钮。
+
+====================================================================
+重点：response_format="content_and_artifact"
+====================================================================
+
+普通工具的返回值会同时给模型和前端看。但检索结果里有很多字段（标题、URL、
+摘要、图片地址、分数）——模型其实只需要读其中一部分，而前端需要结构化的数据。
+
+LangChain 允许工具返回一个二元组：
+    (content, artifact)
+
+- content：字符串，放进 ToolMessage 的正文，**模型**能看到；
+- artifact：任意可序列化对象，**模型看不到**，但会保存在 ToolMessage.artifact 里，
+  我们可以在 core.py 的流式循环里把它取出来，转成 SSE 的 citations/action 事件。
+
+这样模型负责“组织语言”，前端负责“显示来源卡片”，两边互不干扰。
 """
 
+from __future__ import annotations
+
 from datetime import datetime
+from urllib.parse import urljoin, urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from langchain_core.tools import tool
+
+from app.config import get_settings
+from app.kb.search import format_results
+from app.kb.search import search_site as kb_search
 
 
 @tool
@@ -49,38 +72,80 @@ def get_current_datetime(timezone_name: str = "Asia/Shanghai") -> str:
     return f"{now:%Y-%m-%d %H:%M:%S}（星期{weekday}，{timezone_name}）"
 
 
+@tool(response_format="content_and_artifact")
+def search_site(query: str, limit: int = 4) -> tuple[str, list[dict]]:
+    """检索这个博客里已经发布的文章和文章图片。
+
+    什么时候用：
+    - 用户问“站内有没有写过……”“帮我找一篇关于……的文章”；
+    - 用户问某个技术概念，而博客里可能有相关学习笔记；
+    - 用户想找某张图、某个示意图、某段截图。
+    什么时候不用：闲聊、问时间、与博客内容无关的通用问题。
+
+    返回内容包含文章标题、URL 和命中摘要，可以直接据此回答。
+    来源卡片由系统自动附上，**不要在回答里自己编链接**。
+    如果没有结果，就如实告诉用户站内没有找到。
+
+    Args:
+        query: 检索关键词。用用户问题里的核心技术词，不要把整句口语原样塞进来。
+        limit: 最多返回几篇文章，默认 4，范围 1~10。
+    """
+    # 参数来自模型，可能为空、可能超出范围，工具内部要先做一次兜底。
+    query = (query or "").strip()
+    if not query:
+        return ("没有提供检索关键词，无法检索。", [])
+
+    limit = max(1, min(int(limit or 4), 10))
+    try:
+        results = kb_search(query, limit=limit)
+    except Exception as exc:  # noqa: BLE001 - 工具不应把异常抛给 agent
+        # 数据库损坏、索引未建立等都属于“服务端问题”，给模型一句可读的说明。
+        return (f"知识库检索失败（{type(exc).__name__}），请稍后再试。", [])
+
+    # format_results 只保留模型需要读的文字；
+    # results 原样作为 artifact，供 core.py 转成 citations 事件。
+    return (format_results(results), results)
+
+
+@tool(response_format="content_and_artifact")
+def navigate_to_article(url: str, label: str = "") -> tuple[str, dict | None]:
+    """在聊天窗口里生成一个“打开站内文章”的按钮。
+
+    什么时候用：用户明确说“带我去”“打开这篇”“跳转过去”时。
+    什么时候不用：只是询问内容、还没决定要看时，不要主动塞跳转按钮。
+
+    重要：url 必须来自 search_site 的检索结果，**不要自己拼或猜测**。
+    只允许本站地址；外部链接会被拒绝。
+
+    Args:
+        url: 文章完整地址，例如 https://374969782.xyz/archives/152/，
+             也可以传站内路径 /archives/152/。
+        label: 按钮文字，例如“打开 DDS 那篇”。不传就用默认文字。
+    """
+    settings = get_settings()
+    site = settings.wp_site_url.rstrip("/")
+    url = (url or "").strip()
+    if not url:
+        return ("没有提供要跳转的地址。", None)
+
+    parsed = urlparse(url)
+    if parsed.scheme and parsed.netloc:
+        # 完整 URL：只允许和 WP_SITE_URL 同一个站点。
+        site_parsed = urlparse(site)
+        if parsed.netloc.lower() != site_parsed.netloc.lower():
+            return (f"拒绝跳转：{url} 不是本站地址。", None)
+        absolute = url
+    else:
+        # 站内相对路径：拼成绝对地址，前端在任何页面都能正确打开。
+        absolute = urljoin(site + "/", url.lstrip("/"))
+
+    label = (label or "").strip() or "带我去看看"
+    artifact = {"type": "navigate", "url": absolute, "label": label}
+    return (f"已经为「{label}」准备好跳转按钮：{absolute}", artifact)
+
+
 # ----------------------------------------------------------------------
 # 工具注册表：create_agent 需要的是一个列表。
 # 以后新增工具时，只要在这里 append 即可，模型会自动看到它的描述。
 # ----------------------------------------------------------------------
-TOOLS = [get_current_datetime]
-
-
-# ----------------------------------------------------------------------
-# 后续工具的写法示例（现在还没有知识库，所以先注释掉）：
-#
-# @tool
-# async def search_site(query: str, limit: int = 5) -> list[dict]:
-#     """检索站内文章。
-#
-#     什么时候用：用户询问博客里是否写过某个主题、想找某篇文章时。
-#
-#     Args:
-#         query: 检索关键词或自然语言问题。
-#         limit: 最多返回几条结果。
-#     """
-#     # 异步工具：适合查数据库、调 HTTP 接口，不会阻塞 FastAPI 的事件循环。
-#     # 返回 list[dict] 时，LangChain 会自动序列化后放进 ToolMessage。
-#     return await knowledge_base.search(query, limit=limit)
-#
-# @tool
-# def navigate_to_article(url: str, label: str = "") -> str:
-#     """生成一个“跳转到站内文章”的按钮。
-#
-#     Args:
-#         url: 站内相对路径，例如 /archives/42/。
-#         label: 按钮文字。
-#     """
-#     # 工具本身不跳转，只是把动作通过事件发给前端，由用户点击确认。
-#     return f"已准备跳转：{label or url} -> {url}"
-# ----------------------------------------------------------------------
+TOOLS = [get_current_datetime, search_site, navigate_to_article]

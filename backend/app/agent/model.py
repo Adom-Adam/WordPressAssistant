@@ -28,7 +28,7 @@ def build_chat_model() -> ChatDeepSeek:
 
     参数说明（其余参数保持默认即可）：
 
-    - model:        模型名称。`deepseek-chat` 适合普通对话和工具调用。
+    - model:        模型名称。`deepseek-flash` 支持对话、工具调用和图片理解。
     - api_key:      DeepSeek 控制台创建的 Key。这里从 Settings 读，
                     避免把 Key 硬编码在代码里。SecretStr 类型还能防止日志打印明文。
     - base_url:     DeepSeek 的 OpenAI 兼容接口地址。
@@ -36,6 +36,12 @@ def build_chat_model() -> ChatDeepSeek:
     - max_tokens:   单次回复的最大 token 数，防止模型输出过长。
     - timeout:      单次请求超时，避免请求一直挂起。
     - max_retries:  遇到网络抖动/限流时，LangChain 内部自动重试的次数。
+    - extra_body:   传给底层 HTTP 请求的额外 JSON 字段。
+
+    DeepSeek V4.1 默认开启“思考模式”。如果不关掉，模型会先花很多 token
+    生成思维链，再输出正文；对闲聊和工具调用来说既慢又贵，所以这里通过
+    `extra_body={"thinking": {"type": "disabled"}}` 显式关闭。
+    这个字段不属于 OpenAI 标准参数，因此必须放在 extra_body 里透传。
 
     为什么要 `lru_cache`：
     模型实例内部持有 HTTP 客户端，创建成本较高；而它是无状态的，
@@ -44,12 +50,18 @@ def build_chat_model() -> ChatDeepSeek:
 
     settings = get_settings()
 
-    return ChatDeepSeek(
-        model=settings.deepseek_model,
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
-        temperature=0.7,
-        max_tokens=800,
-        timeout=settings.request_timeout,
-        max_retries=2,
-    )
+    # 先收集通用参数，再按配置决定是否加入 DeepSeek 特有的“关闭思考”字段。
+    # 这样以后如果要做复杂推理，只要把 DEEPSEEK_DISABLE_THINKING 设为 false 即可。
+    kwargs: dict[str, object] = {
+        "model": settings.deepseek_model,
+        "api_key": settings.deepseek_api_key,
+        "base_url": settings.deepseek_base_url,
+        "temperature": 0.7,
+        "max_tokens": 800,
+        "timeout": settings.request_timeout,
+        "max_retries": 2,
+    }
+    if settings.deepseek_disable_thinking:
+        kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+
+    return ChatDeepSeek(**kwargs)  # type: ignore[arg-type]

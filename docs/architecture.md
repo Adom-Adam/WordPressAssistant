@@ -15,7 +15,9 @@
 - 不做独立的用户系统、不做多轮长期记忆持久化；
 - 不接管 WordPress 的搜索、评论等既有功能；
 - 不在浏览器端保存 DeepSeek API Key；
-- 不支持 Cubism 2（`.model.json`）。
+- 不支持 Cubism 2（`.model.json`）；
+- 暂不做「上传图片找相似图」（先把文字检索图片做稳）；
+- 暂不做 TTS 语音播报与语音打断。
 
 ## 三层结构
 
@@ -47,6 +49,8 @@
 - **视线跟随**：监听 `mousemove` 手动调用 `model.focus()`，不依赖 PIXI 的交互系统。
 - **控件透明度**：默认 `opacity: .28`，`:hover` / `:focus-within` / 对话打开时变为 `1`；触屏设备默认更高不透明度。
 - **换模型**：构建前扫描 `public/live2d/models/**/*.model3.json` 生成 `manifest.json`，上拉框由此渲染。
+- **故障隔离**：Live2D 管理器用动态 `import()` 加载。Cubism Core 缺失或模型损坏时，
+  只有形象加载失败并弹提示，聊天面板、语音和来源浮层仍然可用。
 - **语音输入**：浏览器 `SpeechRecognition` / `webkitSpeechRecognition`，识别结果填入输入框，用户确认后发送。
 - **样式**：全部作用域在 `.l2d-root` 下，使用 CSS 变量（天蓝色系），不会污染主题样式。
 
@@ -57,13 +61,20 @@
 - `POST /api/chat`：接收对话历史与当前页面信息，返回 **SSE 流**。
 - 对话由 **LangChain agent** 驱动：
   - `ChatDeepSeek`（`langchain-deepseek`）封装 DeepSeek 的 OpenAI 兼容接口；
+  - 默认模型 `deepseek-flash`，同时用于聊天和图片理解；
+  - 通过 `extra_body={"thinking": {"type": "disabled"}}` 关闭 V4.1 的思考模式，
+    降低延迟和 token 消耗，也避免思维链占满 `max_tokens` 导致正文为空；
   - `create_agent(model, tools, system_prompt)` 把「模型 → 工具 → 模型」的循环
     编成 LangGraph 状态图；
-  - `agent.astream(..., stream_mode="messages")` 产出 `AIMessageChunk` 增量，
-    转成前端的 `delta` 事件。
+  - `agent.astream(..., stream_mode=["messages", "updates"])`：
+    `messages` 产出 `AIMessageChunk` 增量，转成 `delta` 事件；
+    `updates` 提供 `ToolMessage`，从 `artifact` 提取来源和跳转动作。
 - 工具用 `@tool` 装饰器定义：函数名是工具名，docstring 是给模型看的说明，
-  类型注解自动生成参数 schema。当前内置 `get_current_datetime` 作为链路示例，
-  后续新增 `search_site` / `navigate` 只需加入 `TOOLS` 列表。
+  类型注解自动生成参数 schema。当前有三个工具：
+  `get_current_datetime`、`search_site`、`navigate_to_article`。
+- 检索工具使用 `response_format="content_and_artifact"`：
+  content 给模型读，artifact 给程序生成 `citations` / `action` 事件，
+  避免模型改写或编造链接。
 - **API Key 只存在于服务端环境变量**，浏览器永远拿不到。
 - 没有 key 或 `MOCK_MODE=true` 时用 LangChain 的 `GenericFakeChatModel`
   模拟流式输出，方便前端联调。
@@ -86,44 +97,77 @@
 ```text
 data: {"type":"delta","content":"有"}
 data: {"type":"delta","content":"的～"}
-data: {"type":"citations","citations":[{"title":"Docker 入门","url":"/archives/42/","post_id":42}]}
-data: {"type":"action","action":{"type":"navigate","url":"/archives/42/","label":"带我去看看 →"}}
+data: {"type":"citations","citations":[{"title":"Docker 入门","url":"https://blog.example.com/archives/42/","post_id":42,"excerpt":"……","image_url":null,"kind":"article"}]}
+data: {"type":"action","action":{"type":"navigate","url":"https://blog.example.com/archives/42/","label":"带我去看看 →"}}
 data: {"type":"done"}
 data: {"type":"error","message":"..."}
 ```
 
-前端已实现 `delta / citations / action / error / done` 五种事件，后端后续只需按此格式输出。
+前端已实现 `delta / citations / action / error / done` 五种事件。
+来源在气泡下方显示为 `[1] [2]` 这样的小序号；鼠标悬浮或键盘聚焦时弹出卡片，
+展示标题、正文摘要和图片（有 `image_url` 才显示，没有就完全省略），
+点击卡片里的“打开文章”在新标签页打开。
 
-## 知识库与工具（第二阶段）
+## 知识库与工具
 
 ### 文章同步
 
-两种方式互补：
+当前实现：命令行全量重建，代码在 [backend/app/kb/sync.py](../backend/app/kb/sync.py)。
 
-1. **增量钩子**：插件在 `save_post` / `publish_post` 时调用后端 `/api/kb/sync`，只更新该文章；
-2. **定时兜底**：后端定时通过 WordPress REST API（`/wp-json/wp/v2/posts?per_page=...&_embed`）或 sitemap 全量增量扫描。
+```bash
+cd backend
+uv run python -m app.kb.sync
+```
+
+流程：
+
+1. 通过 WordPress REST API 分页拉取已发布文章。脚本会依次尝试
+   `/wp-json/wp/v2/posts`、`/index.php/wp-json/wp/v2/posts`、
+   `/?rest_route=/wp/v2/posts`，兼容没有开启伪静态的站点；
+2. HTML 正文清洗成纯文本，按 600 字左右切块，相邻块重叠 80 字；
+3. 提取文章图片（兼容 Argon 懒加载的 `data-original`），调用
+   `deepseek-flash` 生成中文描述、OCR 和关键词；
+4. 文本块和图片块一起写入 SQLite FTS5；
+5. 图片描述按 URL 缓存，重复同步不重复计费。
+
+每次同步默认全量重建（先清空文章与索引，保留图片缓存），
+能自然处理删文、改标题、删图等情况。文章上千篇后可改为按 `modified_gmt` 增量更新。
+
+未来两种触发方式可以互补：
+
+1. **增量钩子**：插件在 `save_post` / `publish_post` 时调用后端同步接口；
+2. **定时兜底**：后端定时扫描 REST API。
 
 不采用「每次提问现场爬站」：查询时只查索引，才快且稳定。
 
 ### 索引与检索
 
-初版建议：SQLite + FTS5（`tokenize='trigram'` 对中文友好），每条 chunk 保存：
+SQLite FTS5，`tokenize='unicode61 remove_diacritics 2'`。
+中文先用 jieba 分词，以空格写入 `tokens` 列，查询时做同样处理。
+每条 chunk 保存：
 
 ```text
-post_id, title, url, chunk_index, content
+post_id, chunk_index, kind, image_url, url, title, body, tokens
 ```
+
+检索顺序：AND → OR（按命中比例过滤）→ LIKE 兜底 → 按文章去重 →
+标题命中加成重排。图片块命中时，结果会带上 `image_url`，前端显示缩略图。
 
 后续可加向量检索（本地 embedding 模型或外部 embedding API）做混合召回。
 **引用来源直接来自索引元数据**，不是让模型自由编造。
 
+更详细的原理、配置和排错见 [knowledge-base.md](knowledge-base.md)。
+
 ### 工具设计
 
-- `search_site(query)`：检索文章，返回带 `post_id/title/url/excerpt` 的结果；
-- `get_post(post_id)`：取文章摘要/正文片段；
-- `navigate(url, label)`：产生 `action` 事件，前端渲染跳转按钮（不自动跳转，避免打断阅读）。
+- `search_site(query, limit)`：检索文章/图片块，content 给模型，
+  artifact 是带 `post_id/title/url/excerpt/kind/image_url` 的结构化结果；
+- `navigate_to_article(url, label)`：校验 URL 必须与 `WP_SITE_URL` 同站，
+  artifact 产生 `action` 事件，前端渲染按钮（不自动跳转，避免打断阅读）；
+- `get_current_datetime(timezone_name)`：回答当前时间。
 
 Agent 循环：模型决定调用工具 → 后端执行 → 结果回填 → 生成最终回答。
-最终回答中的引用通过 `citations` 事件单独下发，前端气泡下方渲染来源卡片。
+来源通过 `citations` 事件单独下发，前端在气泡下方渲染小序号与悬浮来源卡片。
 
 ## 可移植性
 

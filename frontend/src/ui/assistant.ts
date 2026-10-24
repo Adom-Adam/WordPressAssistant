@@ -1,6 +1,10 @@
 import { streamChat } from '../api/chat';
 import type { AssistantConfig } from '../config';
-import { Live2DManager } from '../live2d/manager';
+// 只导入类型，不产生运行时 import。
+// Live2D 管理器依赖 Cubism Core，如果 Core 没加载，静态导入会在模块求值阶段
+// 直接抛错，连聊天面板都来不及创建。改成在 start() 里动态导入后，
+// 即使 Live2D 挂了，聊天、语音等 UI 仍然可用，只是没有形象。
+import type { Live2DManager } from '../live2d/manager';
 import type { ChatMessage, Citation, ModelEntry, ModelManifest, StreamEvent } from '../types';
 
 const ICON = {
@@ -94,6 +98,13 @@ export class AssistantApp {
   private voicePrefix = '';
   private toastTimer: number | null = null;
 
+  // 引用悬浮卡片：整页只创建一个，显示时移动到对应序号旁边。
+  // 放在 .l2d-root 下、但用 position: fixed 定位，这样不会被聊天记录的
+  // overflow 滚动容器裁掉。
+  private citePopover: HTMLElement | null = null;
+  private activeCite: HTMLButtonElement | null = null;
+  private citeHideTimer: number | null = null;
+
   constructor(private readonly config: AssistantConfig) {
     this.root = document.createElement('div');
     this.root.className = 'l2d-root';
@@ -117,7 +128,10 @@ export class AssistantApp {
 
   async start(): Promise<void> {
     try {
-      this.l2d = new Live2DManager(this.canvas, this.config.assetBase);
+      // 动态 import：Cubism Core 缺失时，错误只落在 try/catch 里，
+      // 不会影响构造函数已经创建好的聊天 UI。
+      const { Live2DManager: Manager } = await import('../live2d/manager');
+      this.l2d = new Manager(this.canvas, this.config.assetBase);
       await this.loadModels();
     } catch (error) {
       console.error('[l2d-ai] Live2D 初始化失败', error);
@@ -146,6 +160,11 @@ export class AssistantApp {
 
     document.addEventListener('pointerdown', (event) => {
       const target = event.target as Node;
+      // 点来源序号或卡片本身都不算“点外面”。
+      const onCite = target instanceof Element && target.closest('.l2d-cite');
+      const inPopover = this.citePopover?.contains(target) ?? false;
+      if (!onCite && !inPopover) this.hideCitationPopover();
+
       if (this.modelMenu.hidden) return;
       if (this.modelMenu.contains(target) || this.modelsBtn.contains(target)) return;
       this.modelMenu.hidden = true;
@@ -153,9 +172,15 @@ export class AssistantApp {
 
     document.addEventListener('keydown', (event) => {
       if (event.key !== 'Escape') return;
+      this.hideCitationPopover();
       this.modelMenu.hidden = true;
       if (!this.chatPanel.hidden) this.closeChat();
     });
+
+    // 弹出卡片用 fixed 定位，锚点滚动或窗口尺寸变化后位置就失效了，
+    // 所以直接收起，等用户再次悬浮时重新计算。
+    window.addEventListener('scroll', () => this.hideCitationPopover(), true);
+    window.addEventListener('resize', () => this.hideCitationPopover());
   }
 
   private async loadModels(): Promise<void> {
@@ -232,6 +257,7 @@ export class AssistantApp {
   }
 
   private closeChat(): void {
+    this.hideCitationPopover();
     this.chatPanel.hidden = true;
     this.root.classList.remove('is-chat-open');
     this.chatBtn.classList.remove('is-active');
@@ -359,29 +385,159 @@ export class AssistantApp {
   private renderCitations(bubble: HTMLElement, citations: Citation[]): void {
     const existing = bubble.parentElement?.querySelector('.l2d-cites');
     existing?.remove();
+    this.hideCitationPopover();
 
+    // 回答下方只留一排小小的序号，像论文脚注。
+    // 标题、图片和跳转都放进悬浮卡片里，避免把聊天气泡撑得又宽又乱。
     const wrap = document.createElement('div');
     wrap.className = 'l2d-cites';
-    for (const citation of citations) {
-      const link = document.createElement('a');
-      link.className = 'l2d-cite';
-      link.href = citation.url;
-      link.title = citation.excerpt || citation.title;
+    wrap.setAttribute('aria-label', '参考来源');
 
-      const label = document.createElement('span');
-      label.className = 'l2d-cite__label';
-      label.textContent = '📖';
-      const title = document.createElement('span');
-      title.className = 'l2d-cite__title';
-      title.textContent = citation.title;
-      const go = document.createElement('span');
-      go.className = 'l2d-cite__go';
-      go.textContent = '跳转 →';
+    citations.forEach((citation, index) => {
+      const marker = document.createElement('button');
+      marker.type = 'button';
+      marker.className = 'l2d-cite';
+      marker.textContent = `[${index + 1}]`;
+      marker.setAttribute('aria-label', `来源 ${index + 1}：${citation.title}`);
+      marker.setAttribute('aria-expanded', 'false');
+      marker.setAttribute('aria-controls', 'l2d-cite-pop');
 
-      link.append(label, title, go);
-      wrap.appendChild(link);
+      // 桌面端悬浮即可预览；键盘用户聚焦时也会打开。
+      // 触屏没有 hover，所以 click 同样能打开，点页面其他地方收起。
+      marker.addEventListener('mouseenter', () => this.showCitationPopover(marker, citation));
+      marker.addEventListener('mouseleave', () => this.scheduleCiteHide());
+      marker.addEventListener('focus', () => this.showCitationPopover(marker, citation));
+      marker.addEventListener('blur', () => this.scheduleCiteHide());
+      marker.addEventListener('click', () => this.showCitationPopover(marker, citation));
+
+      wrap.appendChild(marker);
+    });
+
+    // 事件到达顺序不固定：如果跳转按钮已经先渲染，就把序号插到它前面，
+    // 始终保持「气泡 → 来源序号 → 跳转按钮」。
+    const action = bubble.parentElement?.querySelector('.l2d-action');
+    if (action) action.before(wrap);
+    else bubble.after(wrap);
+  }
+
+  /** 创建（或复用）唯一一个浮动来源卡片。 */
+  private ensureCitePopover(): HTMLElement {
+    if (this.citePopover) return this.citePopover;
+
+    const pop = document.createElement('div');
+    pop.id = 'l2d-cite-pop';
+    pop.className = 'l2d-cite-pop';
+    pop.setAttribute('role', 'dialog');
+    pop.setAttribute('aria-label', '来源详情');
+
+    // 鼠标从序号移进卡片时需要一点时间，离开时延迟收起；
+    // 进入卡片或聚焦卡片里的链接时取消这个延迟。
+    pop.addEventListener('mouseenter', () => this.cancelCiteHide());
+    pop.addEventListener('mouseleave', () => this.scheduleCiteHide());
+    pop.addEventListener('focusin', () => this.cancelCiteHide());
+    pop.addEventListener('focusout', () => this.scheduleCiteHide());
+
+    this.root.appendChild(pop);
+    this.citePopover = pop;
+    return pop;
+  }
+
+  private showCitationPopover(anchor: HTMLButtonElement, citation: Citation): void {
+    const pop = this.ensureCitePopover();
+    this.cancelCiteHide();
+
+    if (this.activeCite && this.activeCite !== anchor) {
+      this.activeCite.setAttribute('aria-expanded', 'false');
     }
-    bubble.after(wrap);
+    this.activeCite = anchor;
+    anchor.setAttribute('aria-expanded', 'true');
+
+    const head = document.createElement('div');
+    head.className = 'l2d-cite-pop__head';
+
+    // 只有真的有图才创建 <img>。没有图就什么都不放，
+    // 不用书本/图片小图标占位——那种图标一眼就像模板生成的。
+    if (citation.image_url) {
+      const thumb = document.createElement('img');
+      thumb.className = 'l2d-cite-pop__thumb';
+      thumb.src = citation.image_url;
+      thumb.alt = '';
+      thumb.loading = 'lazy';
+      thumb.addEventListener('error', () => thumb.remove(), { once: true });
+      head.appendChild(thumb);
+    }
+
+    const body = document.createElement('div');
+    body.className = 'l2d-cite-pop__body';
+
+    const title = document.createElement('div');
+    title.className = 'l2d-cite-pop__title';
+    title.textContent = citation.title;
+    body.appendChild(title);
+
+    if (citation.excerpt) {
+      const excerpt = document.createElement('div');
+      excerpt.className = 'l2d-cite-pop__excerpt';
+      excerpt.textContent = citation.excerpt;
+      body.appendChild(excerpt);
+    }
+
+    const open = document.createElement('a');
+    open.className = 'l2d-cite-pop__open';
+    open.href = citation.url;
+    open.target = '_blank';
+    open.rel = 'noopener noreferrer';
+    open.textContent = '打开文章 →';
+    body.appendChild(open);
+
+    head.appendChild(body);
+    pop.replaceChildren(head);
+
+    // 先显示出来才能量到真实高度，再决定放在序号上方还是下方。
+    pop.classList.add('is-visible');
+    pop.style.visibility = 'hidden';
+    this.positionCitePopover(anchor, pop);
+    pop.style.visibility = '';
+  }
+
+  private positionCitePopover(anchor: HTMLButtonElement, pop: HTMLElement): void {
+    const margin = 8;
+    const gap = 8;
+    const rect = anchor.getBoundingClientRect();
+    const popRect = pop.getBoundingClientRect();
+
+    // 优先放在序号下方：序号通常位于最新回答的下方，下面的聊天记录
+    // 区域是空的，不会挡住刚读完的回答。下方空间不够时再翻到上方。
+    const spaceBelow = window.innerHeight - rect.bottom - gap - margin;
+    let top = spaceBelow >= popRect.height ? rect.bottom + gap : rect.top - popRect.height - gap;
+    if (top < margin) top = rect.bottom + gap;
+    top = Math.min(top, window.innerHeight - popRect.height - margin);
+    top = Math.max(margin, top);
+
+    let left = rect.left;
+    left = Math.min(left, window.innerWidth - popRect.width - margin);
+    left = Math.max(margin, left);
+
+    pop.style.left = `${Math.round(left)}px`;
+    pop.style.top = `${Math.round(top)}px`;
+  }
+
+  private scheduleCiteHide(): void {
+    this.cancelCiteHide();
+    this.citeHideTimer = window.setTimeout(() => this.hideCitationPopover(), 160);
+  }
+
+  private cancelCiteHide(): void {
+    if (this.citeHideTimer === null) return;
+    window.clearTimeout(this.citeHideTimer);
+    this.citeHideTimer = null;
+  }
+
+  private hideCitationPopover(): void {
+    this.cancelCiteHide();
+    this.activeCite?.setAttribute('aria-expanded', 'false');
+    this.activeCite = null;
+    this.citePopover?.classList.remove('is-visible');
   }
 
   private renderAction(bubble: HTMLElement, action: { type: 'navigate'; url: string; label?: string }): void {
@@ -389,8 +545,13 @@ export class AssistantApp {
     const link = document.createElement('a');
     link.className = 'l2d-action';
     link.href = action.url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
     link.textContent = action.label || '带我去看看 →';
-    bubble.after(link);
+    // 有来源序号时排在序号后面，让序号紧贴气泡。
+    const cites = bubble.parentElement?.querySelector('.l2d-cites');
+    if (cites) cites.after(link);
+    else bubble.after(link);
     this.scrollToBottom(true);
   }
 

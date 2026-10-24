@@ -9,11 +9,16 @@
 | [app/config.py](app/config.py) | pydantic-settings 如何把 `.env` 变成带类型的配置 |
 | [app/agent/model.py](app/agent/model.py) | `ChatDeepSeek` 的每个参数；`BaseChatModel` 的 `invoke / stream / astream` |
 | [app/agent/prompts.py](app/agent/prompts.py) | System / User / Assistant / Tool 四种消息角色的区别 |
-| [app/agent/tools.py](app/agent/tools.py) | `@tool` 装饰器、docstring 为什么是给模型看的、工具异常处理 |
-| [app/agent/core.py](app/agent/core.py) | `create_agent` 的 agent 循环、`astream(stream_mode="messages")`、mock 模式 |
+| [app/agent/tools.py](app/agent/tools.py) | `@tool` 装饰器、`content_and_artifact`、工具异常处理 |
+| [app/agent/core.py](app/agent/core.py) | `create_agent` 循环、`astream(stream_mode=[...])`、mock 模式 |
 | [app/api/chat.py](app/api/chat.py) | SSE 协议与 `EventSourceResponse` |
 | [app/schemas.py](app/schemas.py) | Pydantic 校验与提示词注入防护 |
 | [app/main.py](app/main.py) | FastAPI 入口、CORS、路由前缀 |
+| [app/kb/sync.py](app/kb/sync.py) | 从 WordPress REST 拉文章、切块、写入索引（命令行入口） |
+| [app/kb/text.py](app/kb/text.py) | HTML 清洗、图片提取、jieba 分词、切块、摘要 |
+| [app/kb/db.py](app/kb/db.py) | SQLite 连接与 FTS5 表结构、图片描述缓存 |
+| [app/kb/vision.py](app/kb/vision.py) | 用 `deepseek-flash` 生成图片描述/OCR/关键词 |
+| [app/kb/search.py](app/kb/search.py) | AND→OR→LIKE 检索、按文章去重、标题加成重排 |
 
 ## 一图看懂 Agent 循环
 
@@ -34,15 +39,22 @@
 我们唯一需要消费的是：
 
 ```python
-async for chunk, metadata in agent.astream(
+async for mode, payload in agent.astream(
     {"messages": messages},
-    stream_mode="messages",
+    stream_mode=["messages", "updates"],
 ):
-    ...
+    if mode == "messages":
+        chunk, metadata = payload   # AIMessageChunk 增量
+    else:
+        ...                         # ToolMessage，取 artifact
 ```
 
-`stream_mode="messages"` 产出的是模型 token 的增量 `AIMessageChunk`。
+`messages` 模式产出模型 token 的增量 `AIMessageChunk`。
 工具调用参数的 chunk 内容为空，所以只处理非空 `content` 就能得到给用户看的文字。
+
+`updates` 模式在工具执行完后给出 `ToolMessage`。检索工具的 artifact 里是结构化结果，
+`core.py` 把它转成 `citations` 事件；导航工具的 artifact 转成 `action` 事件。
+artifact 模型看不到，所以链接不会被模型改写或编造。
 
 ## 关键概念速查
 
@@ -77,12 +89,20 @@ async def search_site(query: str, limit: int = 5) -> list[dict]:
 1. docstring 第一行要能独立说明用途；
 2. 参数必须有类型注解和说明；
 3. 工具内部自己兜住异常，返回错误文字，不要让异常冒到 agent；
-4. 需要查数据库/发 HTTP 请求时用 `async def`，不要阻塞事件循环。
+4. 耗时的网络请求用 `async def`，不要阻塞事件循环；很快的本地 SQLite 查询可以直接用
+   普通 `def`，LangChain 会把同步工具放到线程池里执行。
 
-## 后续知识库接入点
+## 知识库：已实现的部分
 
-- 文章同步：插件在 `save_post` 时调用后端 `/api/kb/sync`；或后端定时扫 WordPress REST API。
-- 索引：SQLite FTS5（trigram 对中文友好），每条 chunk 带 `post_id/title/url`。
-- 引用事件：监听 LangGraph 的 `stream_mode="updates"`，从 `ToolMessage` 提取来源，
-  输出 `{"type": "citations", ...}`；前端已经支持渲染。
-- 跳转事件：工具返回导航意图，后端输出 `{"type": "action", ...}`；前端渲染按钮，不自动跳转。
+- **同步**：`uv run python -m app.kb.sync` 从 WordPress REST 拉文章，
+  清洗、切块、分词后写入 `data/kb.sqlite3`（相对 `backend/`）。
+- **索引**：SQLite FTS5 + jieba。中文先分词再写入 `tokens` 列；
+  查询时对问题做同样处理。标题命中会额外加分。
+- **图片**：同步时调用 `deepseek-flash` 生成描述/OCR/关键词，写成 `kind='image'` 的块，
+  所以图片内容也能被文字检索到。
+- **引用**：`search_site` 用 `content_and_artifact` 返回结果；
+  `core.py` 从 `ToolMessage.artifact` 取出结构化数据，发 `citations` 事件。
+- **跳转**：`navigate_to_article` 校验同站 URL，发 `action` 事件；
+  前端渲染按钮，点击后新标签页打开。
+
+完整原理、命令、配置与排错见 [docs/knowledge-base.md](../docs/knowledge-base.md)。

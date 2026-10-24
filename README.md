@@ -8,7 +8,8 @@
   ├─ Live2D 形象 + 对话/语音/换模型 UI      ← frontend（Vite + TypeScript + PixiJS）
   └─ fetch /ai-api/chat （SSE 流式）
         └─ Python AI 服务                  ← backend（FastAPI + LangChain + DeepSeek）
-              └─ 知识库 / 站内检索 / 跳转工具（第二阶段）
+              ├─ 站内知识库（SQLite FTS5，含图片描述）
+              └─ 检索 / 来源卡片 / 跳转工具
 ```
 
 ## 目录
@@ -18,7 +19,8 @@
 | [frontend/](frontend/) | Live2D 形象、悬浮控件、对话面板、语音输入 |
 | [backend/](backend/) | FastAPI + LangChain agent（DeepSeek），流式对话与工具调用；[学习导读](backend/README.md) |
 | [wordpress-plugin/wp-live2d-ai/](wordpress-plugin/wp-live2d-ai/) | WordPress 插件：加载构建产物、注入配置、设置页 |
-| [docs/architecture.md](docs/architecture.md) | 技术架构与后续知识库/工具设计 |
+| [docs/architecture.md](docs/architecture.md) | 技术架构与知识库/工具设计 |
+| [docs/knowledge-base.md](docs/knowledge-base.md) | 知识库原理：FTS5、中文分词、图片理解、检索与引用 |
 | [docs/tutorial.md](docs/tutorial.md) | 教学教程：全部命令、搭建顺序与踩坑记录 |
 | [docs/deploy.md](docs/deploy.md) | 部署到阿里云服务器（宝塔 + Nginx + systemd） |
 
@@ -63,7 +65,19 @@ uv sync
 uv run uvicorn app.main:app --reload --port 8000
 ```
 
-**2. 前端**
+**2. 建立知识库索引**
+
+`.env` 里填写 `WP_SITE_URL`，然后在 `backend/` 下运行：
+
+```bash
+uv run python -m app.kb.sync
+```
+
+它会拉取全部已发布文章，建立正文和图片索引。发布或修改文章后重新运行一次即可。
+想先跳过图片理解、只建文字索引，加 `--no-vision`。
+详细原理与参数见 [docs/knowledge-base.md](docs/knowledge-base.md)。
+
+**3. 前端**
 
 ```bash
 cd frontend
@@ -73,7 +87,7 @@ pnpm dev
 
 打开 http://127.0.0.1:5173 即可看到左下角助手。`/ai-api` 已由 Vite 代理到后端 `/api`。
 
-**3. 构建给 WordPress 用**
+**4. 构建给 WordPress 用**
 
 ```bash
 cd frontend
@@ -89,15 +103,18 @@ pnpm build
 - [x] 半透明悬浮控件（悬停显示）
 - [x] 文本对话（SSE 流式）
 - [x] 语音输入（浏览器 Web Speech API，单句识别后手动发送）
-- [x] LangChain agent（`create_agent`）+ DeepSeek 流式对话
-- [x] 工具调用链路（内置 `get_current_datetime` 示例工具）
+- [x] LangChain agent（`create_agent`）+ DeepSeek（`deepseek-flash`）流式对话
+- [x] 工具调用链路（时间 / 站内检索 / 跳转）
+- [x] 站内知识库（WordPress 同步 + SQLite FTS5 + jieba 中文分词）
+- [x] 文章图片理解（`deepseek-flash` 生成描述/OCR，图片可被文字检索）
+- [x] 引用来源序号 + 悬浮卡片（标题/摘要/图片，新标签页打开）
+- [x] “带我去看看”跳转按钮（只允许本站 URL）
 - [x] mock 模式（无 Key 也能离线联调）
 - [x] WordPress 插件接入（设置页、资源注入、不改主题）
-- [ ] 站内知识库（文章同步 + 检索）
-- [ ] 引用来源展示与跳转工具
+- [ ] 上传图片找相似图（CLIP / 向量检索）
 - [ ] AI 语音播报（TTS）
 - [ ] 语音打断（连续收音 + 停止播报 + 取消请求）
-- [ ] 更多 agent tools / skills
+- [ ] 文章发布后自动增量同步
 - [ ] 服务器部署与自动化同步
 
 ## 说明

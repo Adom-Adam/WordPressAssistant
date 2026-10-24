@@ -29,8 +29,14 @@ class Settings(BaseSettings):
     # 通过这个 base_url 发请求，所以换代理/网关时只需要改这里。
     deepseek_base_url: str = "https://api.deepseek.com"
 
-    # 模型名：deepseek-chat（通用对话）或 deepseek-reasoner（推理模型）。
-    deepseek_model: str = "deepseek-chat"
+    # 模型名：deepseek-flash 是当前的 Flash 模型（DeepSeek-V4.1-Flash），
+    # 同时支持普通对话、工具调用和图片理解，所以聊天与图片描述都用它。
+    deepseek_model: str = "deepseek-flash"
+
+    # DeepSeek V4.1 默认开启“思考模式”：回复前先生成一段思维链。
+    # 对博客小助手来说，这会增加延迟和 token 消耗，而且思维链也不适合直接展示，
+    # 因此默认关闭；如果以后要做复杂推理，可以把它设为 false。
+    deepseek_disable_thinking: bool = True
 
     # ------------------------------------------------------------------
     # 服务行为
@@ -47,6 +53,40 @@ class Settings(BaseSettings):
 
     # 送给模型的历史消息上限。太长会浪费 token，太短会丢上下文。
     agent_max_history: int = 20
+
+    # ------------------------------------------------------------------
+    # 站内知识库
+    # ------------------------------------------------------------------
+    # WordPress 站点地址，例如 https://374969782.xyz。
+    # 同步脚本会依次尝试 /wp-json/、/index.php/wp-json/ 和 ?rest_route= 三种入口，
+    # 兼容没有配置伪静态的站点。
+    wp_site_url: str = ""
+
+    # SQLite 数据库路径。相对路径以 backend/ 目录为基准，
+    # 所以不管从哪个目录启动，都会落到 backend/data/ 下。
+    kb_db_path: str = "data/kb.sqlite3"
+
+    # 检索时最多返回几条来源。
+    kb_top_k: int = 4
+
+    # 文章切块大小（字符数）与相邻块的重叠量。
+    # 块太大检索不精准，太小会丢上下文；600/80 对中文博客比较均衡。
+    kb_chunk_size: int = 600
+    kb_chunk_overlap: int = 80
+
+    # 拉取 WordPress REST 接口的超时和 User-Agent。
+    kb_request_timeout: float = 30.0
+    kb_user_agent: str = "WordPressAssistant-KB/1.0"
+
+    # 单张图片下载上限。超过就跳过，避免把几十 MB 的图片塞进请求。
+    kb_image_max_bytes: int = 12_000_000
+
+    # 是否用视觉模型给文章图片生成描述/OCR。
+    vision_enabled: bool = True
+    vision_model: str = "deepseek-flash"
+    # low 更快更省；original 保留细节，适合截图和代码图。
+    vision_detail: str = "original"
+    vision_max_tokens: int = 800
 
     # SettingsConfigDict 是 pydantic-settings 的配置：
     # - env_file=".env"：从当前工作目录的 .env 读取；

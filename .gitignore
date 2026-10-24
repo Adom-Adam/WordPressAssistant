@@ -11,6 +11,9 @@ frontend/.env.local
 backend/.env
 backend/.venv/
 
+# ---- Local knowledge base (rebuild with `python -m app.kb.sync`) ----
+backend/data/
+
 # ---- Build output ----
 frontend/dist/
 frontend/.vite/

@@ -16,8 +16,11 @@ export interface ModelManifest {
 export interface Citation {
   title: string;
   url: string;
-  postId?: number;
+  post_id?: number;
   excerpt?: string;
+  /** 命中的图片地址；有值时来源卡片会显示缩略图 */
+  image_url?: string;
+  kind?: 'article' | 'image';
 }
 
 export interface ChatMessage {

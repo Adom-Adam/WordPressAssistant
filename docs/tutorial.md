@@ -653,7 +653,142 @@ location /ai-api/ {
 
 ---
 
-## 9. 踩坑速查表
+## 9. 站内知识库：从同步到来源浮层
+
+前面几步已经让助手能聊天、能调工具。这一步让它真正“读过博客”：
+回答站内问题时先检索文章，回答下面附来源序号，用户要的话再给跳转按钮。
+完整原理单独写在 [knowledge-base.md](knowledge-base.md)，这里只记操作顺序和踩过的坑。
+
+### 9.1 配置
+
+在 `backend/.env` 里补上站点地址（其余有默认值）：
+
+```dotenv
+WP_SITE_URL=https://374969782.xyz
+DEEPSEEK_MODEL=deepseek-flash
+VISION_ENABLED=true
+VISION_MODEL=deepseek-flash
+```
+
+> `.env` 只在进程启动时读取。改完要重启后端，否则 `/api/health` 还会显示旧模型。
+
+### 9.2 第一次同步
+
+```bash
+cd backend
+uv run python -m app.kb.sync
+```
+
+本项目实际跑出来的结果：
+
+```text
+文章：20 篇
+文本块：147 个
+图片块：11 个（本次处理图片 11 张）
+图片描述缓存：11 条
+数据库：backend/data/kb.sqlite3
+```
+
+文章发布或修改后，重新执行这一条即可。默认全量重建，图片描述有缓存，不会重复花钱。
+
+### 9.3 图片怎么进入索引
+
+FTS5 只认文字，所以同步时会把文章图片交给 `deepseek-flash`，让它输出：
+
+```json
+{
+  "description": "一张示意图，展示 visual geometry 与 collision geometry 的关系",
+  "ocr_text": "frame visual geometry collision geometry",
+  "keywords": ["URDF", "碰撞几何", "可视化几何"]
+}
+```
+
+这些文字作为 `kind='image'` 的块写进索引，同时保存图片地址。
+搜索「碰撞几何 示意图」就能命中这张图，来源浮层会显示它。
+
+两个实际踩到的坑：
+
+1. **Argon 懒加载**：`<img src>` 是 1×1 占位图，真实地址在 `data-original`。
+   提取顺序必须覆盖 `data-original → data-src → data-lazy-src → srcset → src`。
+2. **思考模式吃光 max_tokens**：第一次调用视觉模型，800 个输出 token 全是
+   reasoning，`content` 是空的。加 `extra_body={"thinking": {"type": "disabled"}}`
+   后正常。聊天模型也一并关闭（`DEEPSEEK_DISABLE_THINKING=true`）。
+
+### 9.4 检索与来源展示
+
+同步完成后，agent 的工具列表里多了两个工具：
+
+- `search_site(query, limit)`：检索正文和图片描述；
+- `navigate_to_article(url, label)`：生成“带我去看看”按钮。
+
+工具用 `response_format="content_and_artifact"` 返回两部分：
+content 给模型读，artifact 给程序生成 SSE 事件。
+`core.py` 用 `stream_mode=["messages", "updates"]` 同时收打字机增量和工具结果：
+
+```text
+data: {"type":"citations","citations":[{"title":"…URDF…","url":"…","image_url":"…","kind":"image"}]}
+data: {"type":"delta","content":"找到"}
+data: {"type":"action","action":{"type":"navigate","url":"…","label":"打开 URDF 建模那篇"}}
+data: {"type":"done"}
+```
+
+前端把来源渲染成气泡下方的一排 `[1] [2]` 小序号，而不是直接铺开卡片。
+这样长标题不会把聊天气泡撑宽，也不会出现“每段回答后面挂一串大卡片”的排版。
+
+几个实现要点在 [assistant.ts](../frontend/src/ui/assistant.ts) 和
+[style.css](../frontend/src/style.css)：
+
+- 助手消息改为纵向 flex（`.l2d-msg--assistant`），保证“气泡 → 序号 → 跳转按钮”
+  从上往下排列，而不是三个 flex 子项并排挤在一起；
+- 悬浮卡片用 `position: fixed` 并挂到 `.l2d-root` 上。聊天记录
+  `.l2d-chat__messages` 是 `overflow-y: auto`，如果卡片用 `absolute` 放在气泡里，
+  会被滚动容器裁掉；
+- 卡片根据序号在屏幕上的位置计算坐标，下方空间够就放下方，不够就翻到上方，
+  并限制在视口内；
+- 有 `image_url` 才创建 `<img>`；没有图片就什么都不放，不用书本/图片小图标占位；
+- 鼠标移开有 160ms 延迟，方便从序号移进卡片；点页面其他地方、滚动、按 Esc 都会收起；
+- 触屏没有 hover，点一下序号也能打开卡片；键盘用户 Tab 到序号时同样会显示。
+
+### 9.5 验证
+
+Windows Git Bash 里不要用 `-d '中文…'` 内联传 JSON，会报
+`There was an error parsing the body`。用 Python 写 UTF-8 文件，再让 curl 读：
+
+```bash
+cd backend
+uv run python - <<'EOF'
+import json, pathlib
+pathlib.Path('data/req.json').write_text(
+    json.dumps({"messages":[{"role":"user","content":"站内有没有讲 DDS 的文章？"}]},
+               ensure_ascii=False),
+    encoding='utf-8',
+)
+EOF
+
+curl -sN -X POST http://127.0.0.1:8000/api/chat \
+  -H 'Content-Type: application/json' --data-binary @data/req.json
+```
+
+正常应该先看到 `citations`，再看到逐字的 `delta`，最后 `done`。
+
+### 9.6 排序踩坑：标题权重没有生效
+
+一开始 `bm25(chunks, 0,0,0,0,0, 8.0, 1.0, 3.0)` 里的标题权重怎么调都没变化。
+原因是 `MATCH` 只查了 `tokens` 列，`title` 列根本没参与匹配，权重自然无效；
+而且每个词在 `tokens` 里只出现一次，BM25 的分差主要来自文章长度。
+
+解决分两步：
+
+1. 候选集从 `limit*5` 提高到 `max(limit*20, 60)`，
+   否则标题完全匹配的文章可能排在第 16 个块，进不了重排阶段；
+2. 按文章去重后，用“标题包含多少个查询词”做加成（最多 +1.5），再排序。
+
+修完后「ROS2 节点」第一条是《ROS2学习记录（2）-节点》，
+「ROS2 话题」第一条是《ROS2学习记录（3）-话题》。
+
+---
+
+## 10. 踩坑速查表
 
 | 报错 / 现象 | 原因 | 解决 |
 | --- | --- | --- |
@@ -666,11 +801,19 @@ location /ai-api/ {
 | 回复不是逐字出现 | Nginx/CDN 缓冲了 SSE | `proxy_buffering off` + `Connection ""` |
 | 页面没有小人 | 插件未启用 / 没上传构建产物 | 检查 `assets/app/app.js` 是否存在 |
 | 有按钮没形象 | `manifest.json` 为空或模型 404 | 确认 `.model3.json` 路径与 Cubism 版本 |
+| 整个 Live2D 板块（含聊天框）都不见了 | 浏览器控制台报 `Could not find Cubism 4 runtime`；开发服务器启动后才往 `public/` 里加静态文件，Vite 没登记 | 重启 `pnpm dev`；代码已改成动态导入 Live2D，Core 失败时聊天 UI 仍会显示 |
+| `/live2d/core/...js` 返回 `text/html` | 同上，请求落到了 SPA 的 `index.html` 兜底 | 重启开发服务器；生产构建会直接复制 public 文件 |
 | `mock: true` | 后端没读到 Key | 检查 `backend/.env` 与启动目录 |
+| `找不到可用的 WordPress REST 接口` | 固定链接/伪静态不同，或 REST 被安全插件关闭 | 脚本会自动试三种入口；仍失败就检查插件，或访问 `/?rest_route=/wp/v2/posts` |
+| 图片没有被检索到 | 懒加载 `src` 是占位图 | 提取 `data-original` 等属性；已实现，见 `app/kb/text.py` |
+| 视觉模型返回空 `content` | DeepSeek 思考模式占满 max_tokens | `extra_body={"thinking":{"type":"disabled"}}` |
+| 标题匹配的文章排不到第一 | `MATCH` 只查了 `tokens`，标题权重无效 | 扩大候选集 + 标题命中加成 |
+| 改了 `.env` 但模型没变 | 配置在进程启动时缓存 | 重启后端再看 `/api/health` |
+| 搜不到刚发的文章 | 索引未更新 | 重新 `uv run python -m app.kb.sync` |
 
 ---
 
-## 10. 一次性命令清单（新机器复现）
+## 11. 一次性命令清单（新机器复现）
 
 ```bash
 # 1. 克隆
@@ -690,7 +833,8 @@ pnpm build
 # 3. 后端
 cd ../backend
 UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple uv sync
-cp .env.example .env                 # 填 DEEPSEEK_API_KEY
+cp .env.example .env                 # 填 DEEPSEEK_API_KEY 和 WP_SITE_URL
+uv run python -m app.kb.sync         # 建知识库索引（发布新文章后重跑）
 uv run uvicorn app.main:app --reload --port 8000
 
 # 4. 前端开发
@@ -703,7 +847,7 @@ curl -s http://127.0.0.1:8000/api/health
 
 ---
 
-## 11. 设计说明：为什么这么做
+## 12. 设计说明：为什么这么做
 
 | 决策 | 原因 |
 | --- | --- |
@@ -712,8 +856,11 @@ curl -s http://127.0.0.1:8000/api/health
 | SSE 而不是 WebSocket | 对话是单向流式，SSE 更简单、可走普通 HTTP 反代 |
 | `pointer-events: none` 的 Canvas | 形象覆盖页面但不拦截点击、滚动、选中 |
 | 构建时生成模型 manifest | 加模型只放文件夹，不改代码；上拉框自动更新 |
-| 索引式知识库（待做） | 查询时只查索引，不做「每次提问现场爬站」，才快且稳定 |
+| 索引式知识库 | 查询时只查索引，不做「每次提问现场爬站」，才快且稳定 |
+| SQLite FTS5 而不是搜索引擎 | 单文件、零运维，几十到几万篇文章够用；备份就是复制文件 |
+| jieba 分词 + unicode61 | FTS5 默认按空格切词，中文必须先分词才能检索 |
+| 图片先用视觉模型转文字 | FTS5 不懂像素；先变成描述/OCR，就能和正文一起检索 |
 | 引用来自索引元数据 | 来源真实可点，不依赖模型自由编造 |
-
-后续做知识库时的数据流已经在前端事件协议里留好位置：
-后端只需输出 `citations` 与 `action` 事件，前端就会渲染来源卡片和跳转按钮。
+| 来源用序号 + 悬浮卡片 | 不把对话区铺满大卡片；需要标题、图片时再展开 |
+| 工具 artifact 而不是让模型输出链接 | 模型可能改写或幻觉 URL；artifact 是执行时的原始数据 |
+| 跳转按钮而不是自动跳转 | 点击由用户决定，不打断正在进行的阅读和对话 |
