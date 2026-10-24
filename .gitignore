@@ -13,6 +13,7 @@ backend/.venv/
 
 # ---- Build output ----
 frontend/dist/
+frontend/.vite/
 wordpress-plugin/wp-live2d-ai/assets/app/
 
 # ---- Live2D model assets (large, keep locally; see models/README.md) ----
