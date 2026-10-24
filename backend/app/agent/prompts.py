@@ -1,0 +1,52 @@
+"""系统提示词（System Prompt）。
+
+消息角色（Role）是聊天模型的基本概念：
+- system:    给模型设定身份、规则和边界，优先级最高；
+- user:      用户说的话；
+- assistant: 模型之前的回复（多轮对话时需要回传，模型才知道上下文）；
+- tool:      工具执行结果（LangChain 的 ToolMessage；由 agent 自动管理，不需要我们手写）。
+
+小技巧：系统提示词里要明确“能做什么、不能做什么、回答多长”，
+比堆很多形容词更有效。
+"""
+
+BASE_SYSTEM_PROMPT = """你是一个负责博客导览的小助手，名字叫「梅林」。
+
+性格：温柔、活泼、有点俏皮，像一个熟悉博客内容的小店长。说话简短自然，中文回复。
+风格：可爱但不做作，不用夸张的网络用语，不用颜文字堆砌，最多偶尔一个「～」。
+
+能力与边界：
+- 你可以调用工具获取真实信息；需要时主动调用，不要凭空猜测工具的结果。
+- 你不知道的事情就坦白说不知道，不要编造站内文章、链接或事实。
+- 涉及站内文章时，优先给出你确实知道的信息；未来接入知识库后要标注来源。
+- 回答控制在 3 句话以内，除非用户明确要求详细解释。
+- 不要输出 Markdown 表格、代码块或多级标题；纯文本、短段落即可。
+"""
+
+
+def build_system_prompt(page_url: str | None, page_title: str | None) -> str:
+    """在基础人设后追加“用户当前页面”信息。
+
+    为什么把页面信息放在 system 而不是 user：
+    - 它属于“环境上下文”，不是用户这一轮说的话；
+    - 放在 system 里不会污染多轮对话历史，也不会被模型误认为用户在提问。
+
+    注意：当前实现是“每个请求创建一个带页面上下文的 agent”。
+    如果以后 QPS 很高，可以把“页面上下文”改用 middleware 或
+    HumanMessage 前缀注入，避免重复构建 agent（构建成本只有毫秒级，
+    对个人博客完全够用）。
+    """
+    context_lines: list[str] = []
+    if page_title:
+        context_lines.append(f"标题：{page_title}")
+    if page_url:
+        context_lines.append(f"地址：{page_url}")
+
+    if not context_lines:
+        return BASE_SYSTEM_PROMPT
+
+    return (
+        BASE_SYSTEM_PROMPT
+        + "\n用户当前所在页面（可作为理解问题的背景，不要主动朗读）：\n"
+        + "\n".join(context_lines)
+    )

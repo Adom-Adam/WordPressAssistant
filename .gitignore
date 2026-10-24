@@ -1,3 +1,25 @@
+# ---- Node / pnpm ----
+node_modules/
+.pnpm-store/
+*.log
+.DS_Store
+
+# ---- Project local config ----
+.env
+.env.local
+frontend/.env.local
+backend/.env
+backend/.venv/
+
+# ---- Build output ----
+frontend/dist/
+wordpress-plugin/wp-live2d-ai/assets/app/
+
+# ---- Live2D model assets (large, keep locally; see models/README.md) ----
+frontend/public/live2d/models/*
+!frontend/public/live2d/models/README.md
+!frontend/public/live2d/models/.gitkeep
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
