@@ -9,7 +9,7 @@ Pydantic 的 BaseModel 会在请求进入业务代码之前完成校验和类型
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ChatMessage(BaseModel):
@@ -33,6 +33,31 @@ class ChatRequest(BaseModel):
     # 不传也完全没问题，属于可选的增强上下文。
     page_url: str | None = Field(default=None, max_length=2048)
     page_title: str | None = Field(default=None, max_length=512)
+
+
+class RuntimeSettingsUpdate(BaseModel):
+    """管理员可修改的运营参数。
+
+    所有字段都是可选的：前端只提交改过的项，PATCH 语义比 PUT 更友好。
+    但这里仍然用 PUT——WordPress 表单一次提交整组值，全量更新更好理解。
+
+    `extra="forbid"` 会拒绝拼错的字段名（例如 global_quota 少了 daily），
+    避免“保存成功但没生效”的静默错误。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    daily_quota: int | None = Field(default=None, ge=0, le=1000)
+    global_daily_quota: int | None = Field(default=None, ge=0, le=1_000_000)
+    agent_max_model_calls: int | None = Field(default=None, ge=1, le=20)
+    agent_max_tool_calls: int | None = Field(default=None, ge=1, le=20)
+    agent_max_seconds: float | None = Field(default=None, ge=5, le=300)
+    model: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    )
 
 
 class Citation(BaseModel):

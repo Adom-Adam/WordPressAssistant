@@ -75,6 +75,7 @@ from app.agent.model import build_chat_model
 from app.agent.prompts import build_system_prompt
 from app.agent.tools import TOOLS
 from app.config import get_settings
+from app.runtime_settings import get_runtime_store
 from app.schemas import ChatMessage
 
 logger = logging.getLogger(__name__)
@@ -98,7 +99,12 @@ def _to_langchain_messages(messages: list[ChatMessage]) -> list[BaseMessage]:
     return [_ROLE_TO_MESSAGE[item.role](content=item.content) for item in messages]
 
 
-def _build_agent(page_url: str | None, page_title: str | None) -> Any:
+def _build_agent(
+    page_url: str | None,
+    page_title: str | None,
+    *,
+    is_admin: bool = False,
+) -> Any:
     """创建一个带工具和页面上下文的 agent。
 
     返回值是 LangGraph 编译后的图（CompiledStateGraph）。
@@ -111,6 +117,8 @@ def _build_agent(page_url: str | None, page_title: str | None) -> Any:
     - `tools`：BaseTool 列表。空列表时 agent 退化成普通聊天模型。
     - `system_prompt`：字符串会自动被包装成 SystemMessage，
       放在每次模型调用的最前面。
+    - `is_admin`：当前访客是否为管理员。只影响提示词里的称呼，
+      不改变工具权限——管理员也不能越权访问站外内容。
 
     为什么每次请求都新建 agent：
     页面标题/地址是动态的，而 system_prompt 在建图时就固定了。
@@ -139,22 +147,24 @@ def _build_agent(page_url: str | None, page_title: str | None) -> Any:
     # 注意：这两个限制对管理员同样生效。
     # 管理员免的是“每日条数”，不是“防失控”——管理员账号触发 bug 一样危险。
     # ------------------------------------------------------------------
-    settings = get_settings()
+    # 这些参数允许管理员在 WP 后台实时调整：
+    # 每次请求重新读取一次 JSON 文件（只有十几行），开销可以忽略。
+    runtime = get_runtime_store().load()
     safeguards = [
         FriendlyModelCallLimitMiddleware(
-            run_limit=settings.agent_max_model_calls,
+            run_limit=runtime.agent_max_model_calls,
             exit_behavior="end",
         ),
         FriendlyToolCallLimitMiddleware(
-            run_limit=settings.agent_max_tool_calls,
+            run_limit=runtime.agent_max_tool_calls,
             exit_behavior="end",
         ),
     ]
 
     return create_agent(
-        model=build_chat_model(),
+        model=build_chat_model(runtime.model),
         tools=TOOLS,
-        system_prompt=build_system_prompt(page_url, page_title),
+        system_prompt=build_system_prompt(page_url, page_title, is_admin=is_admin),
         middleware=safeguards,
     )
 
@@ -232,6 +242,8 @@ async def stream_reply(
     messages: list[ChatMessage],
     page_url: str | None = None,
     page_title: str | None = None,
+    *,
+    is_admin: bool = False,
 ) -> AsyncIterator[dict[str, Any]]:
     """核心入口：产出一系列前端可直接消费的事件字典。
 
@@ -260,7 +272,11 @@ async def stream_reply(
     # 2. 真实模式：只保留最近 N 条历史，避免上下文无限增长。
     # ------------------------------------------------------------------
     history = messages[-settings.agent_max_history :]
-    agent = _build_agent(page_url=page_url, page_title=page_title)
+    agent = _build_agent(
+        page_url=page_url,
+        page_title=page_title,
+        is_admin=is_admin,
+    )
 
     # 用字典按 URL 去重：agent 可能连续检索多次，
     # 同一篇文章不应该在来源卡片里出现好几遍。

@@ -25,6 +25,7 @@ from fastapi.testclient import TestClient
 from app.api import chat as chat_module
 from app.config import get_settings
 from app.quota import get_quota_store
+from app.runtime_settings import get_runtime_store
 
 SECRET = "api-test-secret-" + "q" * 48
 
@@ -66,8 +67,10 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("L2D_AI_JWT_SECRET", SECRET)
     monkeypatch.setenv("DAILY_QUOTA", "2")
     monkeypatch.setenv("QUOTA_DB_PATH", str(tmp_path / "quota.sqlite3"))
+    monkeypatch.setenv("RUNTIME_SETTINGS_PATH", str(tmp_path / "runtime.json"))
     get_settings.cache_clear()
     get_quota_store.cache_clear()
+    get_runtime_store.cache_clear()
 
     from app.main import app
 
@@ -76,6 +79,7 @@ def client(tmp_path, monkeypatch):
 
     get_settings.cache_clear()
     get_quota_store.cache_clear()
+    get_runtime_store.cache_clear()
 
 
 @pytest.fixture(autouse=True)
@@ -182,6 +186,64 @@ def test_missing_secret_returns_503(client: TestClient, monkeypatch) -> None:
     assert response.status_code == 503
 
 
+def test_quota_endpoint_reports_without_consuming(client: TestClient) -> None:
+    headers = auth_header()
+
+    first = client.get("/api/quota", headers=headers)
+    assert first.status_code == 200
+    assert first.json()["remaining"] == 2
+    assert first.json()["unlimited"] is False
+
+    # 连续查三次也不应该消耗额度。
+    assert client.get("/api/quota", headers=headers).json()["remaining"] == 2
+    assert client.get("/api/quota", headers=headers).json()["remaining"] == 2
+
+    client.post(
+        "/api/chat",
+        json={"messages": [{"role": "user", "content": "hi"}]},
+        headers=headers,
+    )
+    assert client.get("/api/quota", headers=headers).json()["remaining"] == 1
+
+
+def test_quota_endpoint_admin_is_unlimited(client: TestClient) -> None:
+    response = client.get("/api/quota", headers=auth_header(make_token(admin=True)))
+
+    assert response.status_code == 200
+    assert response.json()["unlimited"] is True
+    assert response.json()["remaining"] is None
+
+
+def test_global_quota_returns_429_for_second_user(
+    client: TestClient, monkeypatch
+) -> None:
+    monkeypatch.setenv("GLOBAL_DAILY_QUOTA", "1")
+    get_settings.cache_clear()
+    get_runtime_store.cache_clear()
+
+    payload = {"messages": [{"role": "user", "content": "hi"}]}
+
+    first = client.post("/api/chat", json=payload, headers=auth_header())
+    assert first.status_code == 200
+    assert first.headers["x-global-quota-remaining"] == "0"
+
+    second = client.post(
+        "/api/chat",
+        json=payload,
+        headers=auth_header(make_token(sub="43")),
+    )
+    assert second.status_code == 429
+    assert "全站" in second.json()["detail"]
+
+    # 管理员不参与全站计数，仍然可以聊天。
+    admin = client.post(
+        "/api/chat",
+        json=payload,
+        headers=auth_header(make_token(sub="44", admin=True)),
+    )
+    assert admin.status_code == 200
+
+
 def test_failure_before_output_refunds_quota(
     client: TestClient, monkeypatch
 ) -> None:
@@ -191,6 +253,7 @@ def test_failure_before_output_refunds_quota(
     # 先把额度调成 1，让“有没有退款”变得可观察。
     monkeypatch.setenv("DAILY_QUOTA", "1")
     get_settings.cache_clear()
+    get_runtime_store.cache_clear()
 
     calls = {"count": 0}
 

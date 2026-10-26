@@ -54,12 +54,25 @@ from app.config import get_settings
 logger = logging.getLogger(__name__)
 
 
+class GlobalQuotaExceeded(Exception):
+    """全站当日总额度已经用完。
+
+    单独用异常而不是返回 None，是为了让接口层能区分：
+    - None：这个用户自己的额度用完了（429 文案 A）；
+    - 本异常：全站总电闸跳了（429 文案 B）。
+    两者对用户的表现不同，排障时也需要分开看日志。
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class QuotaReservation:
     """一次成功占位的凭证。
 
     `counted=False` 表示管理员没有写数据库（不限量）；
     退款时必须检查这个字段，否则会去减一条根本不存在的记录。
+
+    `global_counted` 单独记录“这次是否也占了全站额度”。
+    管理员不占全站额度，所以退款时不能盲目去减全站计数。
     """
 
     user_id: int
@@ -67,6 +80,24 @@ class QuotaReservation:
     counted: bool
     limit: int
     remaining: int | None
+    global_limit: int = 0
+    global_counted: bool = False
+    global_remaining: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class QuotaStatus:
+    """给前端展示用的只读额度状态（不消耗额度）。"""
+
+    day: str
+    is_admin: bool
+    limit: int
+    used: int | None
+    remaining: int | None
+    unlimited: bool
+    global_limit: int
+    global_used: int | None
+    global_remaining: int | None
 
 
 class QuotaStore:
@@ -136,6 +167,16 @@ class QuotaStore:
                 )
                 """
             )
+            # 全站额度只统计“普通用户”，所以主键只有 day——
+            # 每天一行，所有普通用户共享这个总计数。
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS global_usage (
+                    day  TEXT    PRIMARY KEY,
+                    used INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
 
     def today(self) -> str:
         """返回当前时区下的日期字符串，例如 "2026-10-26"。
@@ -167,19 +208,27 @@ class QuotaStore:
         limit: int,
         *,
         is_admin: bool = False,
+        global_limit: int = 0,
         day: str | None = None,
     ) -> QuotaReservation | None:
         """尝试占用一次额度。
 
         返回值：
         - 成功：QuotaReservation（管理员返回 counted=False）；
-        - 普通用户额度用完：None。
+        - 普通用户自己的额度用完：None；
+        - 全站总额度用完：抛 GlobalQuotaExceeded。
+
+        为什么个人额度和全站额度要在**同一个事务**里占：
+        如果先占个人、再占全站，全站满了以后个人计数已经 +1，
+        还得写补偿逻辑；中途进程崩溃就会漏掉。放在一个事务里，
+        要么两个都成功，要么两个都回滚。
 
         参数 day 只用于测试（模拟“第二天”），正常调用不传。
         """
         current_day = day or self.today()
 
-        # 管理员不限量，也不写数据库，避免产生无意义的计数行。
+        # 管理员不限量，也不写数据库（个人和全站都不计），
+        # 避免产生无意义的计数行。
         if is_admin:
             return QuotaReservation(
                 user_id=user_id,
@@ -194,21 +243,52 @@ class QuotaStore:
             return None
 
         with self._connection() as conn:
-            # RETURNING used 会把更新后的值直接返回；
-            # 如果 WHERE used < ? 不成立（已经用满），则不会返回任何行。
-            row = conn.execute(
-                """
-                INSERT INTO daily_usage (user_id, day, used)
-                VALUES (?, ?, 1)
-                ON CONFLICT(user_id, day) DO UPDATE SET used = used + 1
-                WHERE used < ?
-                RETURNING used
-                """,
-                (user_id, current_day, limit),
-            ).fetchone()
+            try:
+                # BEGIN IMMEDIATE 立刻拿写锁，而不是等到第一条 INSERT。
+                # 这样两个并发请求会真正排队，不会出现“都读到未满”的窗口。
+                conn.execute("BEGIN IMMEDIATE")
 
-        if row is None:
-            return None
+                # RETURNING used 会把更新后的值直接返回；
+                # 如果 WHERE used < ? 不成立（已经用满），则不会返回任何行。
+                row = conn.execute(
+                    """
+                    INSERT INTO daily_usage (user_id, day, used)
+                    VALUES (?, ?, 1)
+                    ON CONFLICT(user_id, day) DO UPDATE SET used = used + 1
+                    WHERE used < ?
+                    RETURNING used
+                    """,
+                    (user_id, current_day, limit),
+                ).fetchone()
+
+                if row is None:
+                    conn.rollback()
+                    return None
+
+                global_used: int | None = None
+                if global_limit > 0:
+                    global_row = conn.execute(
+                        """
+                        INSERT INTO global_usage (day, used)
+                        VALUES (?, 1)
+                        ON CONFLICT(day) DO UPDATE SET used = used + 1
+                        WHERE used < ?
+                        RETURNING used
+                        """,
+                        (current_day, global_limit),
+                    ).fetchone()
+                    if global_row is None:
+                        # 全站满了：回滚，让上面的个人 +1 一起撤销。
+                        conn.rollback()
+                        raise GlobalQuotaExceeded()
+                    global_used = int(global_row[0])
+
+                conn.commit()
+            except GlobalQuotaExceeded:
+                raise
+            except Exception:
+                conn.rollback()
+                raise
 
         used = int(row[0])
         return QuotaReservation(
@@ -217,6 +297,13 @@ class QuotaStore:
             counted=True,
             limit=limit,
             remaining=max(limit - used, 0),
+            global_limit=global_limit,
+            global_counted=global_limit > 0,
+            global_remaining=(
+                max(global_limit - global_used, 0)
+                if global_used is not None
+                else None
+            ),
         )
 
     def refund(self, reservation: QuotaReservation | None) -> None:
@@ -239,9 +326,82 @@ class QuotaStore:
                 """,
                 (reservation.user_id, reservation.day),
             )
+            # 只有本次确实占过全站额度时才退，管理员不能退。
+            if reservation.global_counted:
+                conn.execute(
+                    """
+                    UPDATE global_usage
+                       SET used = CASE WHEN used > 0 THEN used - 1 ELSE 0 END
+                     WHERE day = ?
+                    """,
+                    (reservation.day,),
+                )
 
         logger.info(
-            "额度已退还 user=%s day=%s", reservation.user_id, reservation.day
+            "额度已退还 user=%s day=%s global=%s",
+            reservation.user_id,
+            reservation.day,
+            reservation.global_counted,
+        )
+
+    def status(
+        self,
+        user_id: int,
+        limit: int,
+        *,
+        is_admin: bool = False,
+        global_limit: int = 0,
+        day: str | None = None,
+    ) -> QuotaStatus:
+        """查询额度状态，不写数据库、不消耗次数。
+
+        给前端“今日剩余 N 条”用。用 SELECT 而不是先 reserve 再 refund，
+        因为查询操作不应该产生任何副作用。
+        """
+        current_day = day or self.today()
+
+        if is_admin:
+            return QuotaStatus(
+                day=current_day,
+                is_admin=True,
+                limit=limit,
+                used=None,
+                remaining=None,
+                unlimited=True,
+                global_limit=global_limit,
+                global_used=None,
+                global_remaining=None,
+            )
+
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT used FROM daily_usage WHERE user_id = ? AND day = ?",
+                (user_id, current_day),
+            ).fetchone()
+            used = int(row[0]) if row else 0
+
+            global_used: int | None = None
+            if global_limit > 0:
+                grow = conn.execute(
+                    "SELECT used FROM global_usage WHERE day = ?",
+                    (current_day,),
+                ).fetchone()
+                global_used = int(grow[0]) if grow else 0
+
+        return QuotaStatus(
+            day=current_day,
+            is_admin=False,
+            limit=limit,
+            used=used,
+            remaining=max(limit - used, 0) if limit > 0 else 0,
+            unlimited=False,
+            global_limit=global_limit,
+            global_used=global_used,
+            global_remaining=(
+                max(global_limit - global_used, 0)
+                if global_used is not None
+                else None
+            ),
         )
 
 

@@ -42,8 +42,8 @@ from sse_starlette.sse import EventSourceResponse
 from app.agent.core import stream_reply
 from app.api.deps import require_user
 from app.auth import AuthUser
-from app.config import get_settings
-from app.quota import get_quota_store
+from app.quota import GlobalQuotaExceeded, get_quota_store
+from app.runtime_settings import get_runtime_store
 from app.schemas import ChatRequest
 
 logger = logging.getLogger(__name__)
@@ -71,7 +71,9 @@ async def chat(
     真正的“边生成边发送”由 `EventSourceResponse` 驱动：它不断向
     `event_stream` 索取下一项，每拿到一项就写成一个 SSE 事件并 flush 出去。
     """
-    settings = get_settings()
+    # 额度、调用上限、模型名都以“运行时设置”为准：
+    # 管理员在 WP 后台改过就立即生效，没改过则等于 .env 默认值。
+    runtime = get_runtime_store().load()
 
     # ------------------------------------------------------------------
     # 1. 占额度。
@@ -90,9 +92,25 @@ async def chat(
         reservation = await asyncio.to_thread(
             store.reserve,
             user.id,
-            settings.daily_quota,
+            runtime.daily_quota,
             is_admin=user.is_admin,
+            global_limit=runtime.global_daily_quota,
         )
+    except GlobalQuotaExceeded:
+        # 全站总电闸跳了。它和“个人额度用完”是两回事，
+        # 文案要分开，否则用户会以为是自己用太多了。
+        retry_after = store.seconds_until_reset()
+        logger.info(
+            "全站额度用尽 user=%s day=%s limit=%s",
+            user.id,
+            store.today(),
+            runtime.global_daily_quota,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail="今天全站的聊天额度已经用完了，明天再来吧～",
+            headers={"Retry-After": str(retry_after)},
+        ) from None
     except Exception:  # noqa: BLE001 - 数据库故障时“宁可不服务，也不放开”
         logger.exception("额度服务异常 user=%s", user.id)
         raise HTTPException(
@@ -108,11 +126,11 @@ async def chat(
             "额度用尽 user=%s day=%s limit=%s",
             user.id,
             store.today(),
-            settings.daily_quota,
+            runtime.daily_quota,
         )
         raise HTTPException(
             status_code=429,
-            detail=f"今天的聊天额度（{settings.daily_quota} 条）已经用完啦，明天再来～",
+            detail=f"今天的聊天额度（{runtime.daily_quota} 条）已经用完啦，明天再来～",
             headers={"Retry-After": str(retry_after)},
         )
 
@@ -146,7 +164,7 @@ async def chat(
             # asyncio.timeout 是 Python 3.11 的写法：
             # 代码块超过 90 秒会被取消，并在这里抛出 TimeoutError。
             # 它防的是“工具卡死”这类调用次数不会增加的问题。
-            async with asyncio.timeout(settings.agent_max_seconds):
+            async with asyncio.timeout(runtime.agent_max_seconds):
                 # 这里只做“内部事件 → SSE 数据帧”的转换：
                 # - agent 层产出 {"type": "delta", ...} 这种业务事件；
                 # - API 层负责把它序列化成传输格式。
@@ -158,6 +176,7 @@ async def chat(
                     messages=request.messages,
                     page_url=request.page_url,
                     page_title=request.page_title,
+                    is_admin=user.is_admin,
                 ):
                     if event.get("type") == "delta" and event.get("content"):
                         produced = True
@@ -167,7 +186,7 @@ async def chat(
             # 超时不一定代表出错：可能是模型/工具卡住了。
             # 给用户一句可行动的提示，而不是让他对着转圈等。
             logger.warning(
-                "对话超时 user=%s seconds=%s", user.id, settings.agent_max_seconds
+                "对话超时 user=%s seconds=%s", user.id, runtime.agent_max_seconds
             )
             yield {
                 "data": json.dumps(
@@ -216,8 +235,9 @@ async def chat(
     # ping=15：每 15 秒发送一个 SSE 注释行作为心跳，
     # 防止 Nginx/负载均衡把长时间没有数据的连接断开。
     #
-    # X-Quota-Remaining 让前端以后可以显示“今天还剩几条”；
-    # 现在前端暂未使用，但排障时用浏览器 Network 面板一眼就能看到。
+    # X-Quota-Remaining 让前端显示“今天还剩几条”。
+    # 响应头在流开始前就固定了，所以前端读完头再消费正文即可，
+    # 不需要为了刷新额度额外发一次请求。
     # ------------------------------------------------------------------
     headers: dict[str, str] = {}
     if reservation.remaining is not None:
@@ -226,5 +246,10 @@ async def chat(
     elif not reservation.counted:
         # 管理员的剩余次数是“无限”，用一个标记表示，避免前端误解析成 0。
         headers["X-Quota-Unlimited"] = "1"
+
+    # 全站剩余额度只在启用时返回；管理员不参与全站计数，所以没有这个头。
+    if reservation.global_remaining is not None:
+        headers["X-Global-Quota-Remaining"] = str(reservation.global_remaining)
+        headers["X-Global-Quota-Limit"] = str(reservation.global_limit)
 
     return EventSourceResponse(event_stream(), ping=15, headers=headers)

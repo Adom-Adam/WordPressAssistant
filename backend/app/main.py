@@ -18,8 +18,11 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.admin import router as admin_router
 from app.api.chat import router as chat_router
+from app.api.quota import router as quota_router
 from app.config import get_settings
+from app.runtime_settings import get_runtime_store
 
 # logging.basicConfig 配置根日志器：
 # 之后任何模块里的 logger.info/exception 都会按这个格式输出。
@@ -54,14 +57,27 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "OPTIONS"],
     allow_headers=["*"],
+    # 跨域部署时，浏览器默认读不到自定义响应头；额度提示依赖它们。
+    # 同域反代不受影响，这里主要是让“后端独立域名”的部署也能工作。
+    expose_headers=[
+        "X-Quota-Limit",
+        "X-Quota-Remaining",
+        "X-Quota-Unlimited",
+        "X-Global-Quota-Limit",
+        "X-Global-Quota-Remaining",
+        "Retry-After",
+    ],
 )
 
 # 把路由挂到 /api 前缀下：
 #   装饰器写的是 @router.post("/chat")
 #   最终地址就是 POST /api/chat
 app.include_router(chat_router, prefix="/api")
+app.include_router(quota_router, prefix="/api")
+# 管理接口需要 JWT 里的 admin=true，普通用户访问会得到 403。
+app.include_router(admin_router, prefix="/api")
 
 
 @app.get("/api/health")
@@ -71,10 +87,11 @@ async def health() -> dict[str, object]:
     返回 `mock` 字段可以让前端/运维一眼看出：
     当前是真实调用 DeepSeek，还是因为没有 Key 进入了假数据模式。
     """
+    # 模型名可能被管理员在后台改过，所以以运行时设置里的值为准。
     return {
         "ok": True,
         "mock": settings.mock_enabled,
-        "model": settings.deepseek_model,
+        "model": get_runtime_store().load().model,
         # 只暴露“有没有配好”，不暴露密钥本身。
         # 部署后用 curl 看一眼就知道聊天接口会不会 503。
         "auth_configured": settings.jwt_configured,

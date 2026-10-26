@@ -100,9 +100,18 @@ class Settings(BaseSettings):
     # 0 表示普通用户完全不能聊天（管理员仍可用）。
     daily_quota: int = 20
 
+    # 全站普通用户每天合计最多几条消息。0 表示不限。
+    # 管理员既不计入个人额度，也不计入全站额度——
+    # 这个总上限是给公开访客兜底的“总电闸”，避免异常流量烧掉 API 账单。
+    global_daily_quota: int = 0
+
     # 额度计数数据库。和知识库分开存放：
     # 知识库删掉可以重建，额度记录删掉会“重置所有人用量”，两者生命周期不同。
     quota_db_path: str = "data/quota.sqlite3"
+
+    # 管理员在 WP 后台修改的运营参数（额度、调用上限、模型名）保存在这里。
+    # 文件不存在时全部使用本文件的默认值。
+    runtime_settings_path: str = "data/runtime_settings.json"
 
     # 按哪个时区判断“新的一天”。用北京时间，符合博客读者的直觉。
     # 依赖 Python 3.9+ 的 zoneinfo；Windows 上需要 tzdata（项目已安装）。

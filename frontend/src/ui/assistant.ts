@@ -1,5 +1,6 @@
 import { AuthError, getAuthToken, resetAuthToken } from '../api/auth';
 import { ChatHttpError, streamChat } from '../api/chat';
+import { fetchQuota, type QuotaInfo } from '../api/quota';
 import type { AssistantConfig } from '../config';
 // 只导入类型，不产生运行时 import。
 // Live2D 管理器依赖 Cubism Core，如果 Core 没加载，静态导入会在模块求值阶段
@@ -42,6 +43,7 @@ const TEMPLATE = `
       </header>
       <div class="l2d-chat__userbar" hidden>
         <span class="l2d-chat__user"></span>
+        <span class="l2d-chat__quota" hidden></span>
         <a class="l2d-chat__logout" href="#" rel="nofollow">退出</a>
       </div>
       <div class="l2d-chat__messages" role="log" aria-live="polite"></div>
@@ -94,6 +96,7 @@ export class AssistantApp {
   private readonly form: HTMLFormElement;
   private readonly userbar: HTMLElement;
   private readonly userLabel: HTMLElement;
+  private readonly quotaEl: HTMLElement;
   private readonly logoutLink: HTMLAnchorElement;
   private readonly gate: HTMLElement;
   private readonly gateLogin: HTMLAnchorElement;
@@ -109,6 +112,7 @@ export class AssistantApp {
 
   private l2d: Live2DManager | null = null;
   private manifest: ModelManifest | null = null;
+  private quota: QuotaInfo | null = null;
   private history: ChatMessage[] = [];
   private busy = false;
   private abort: AbortController | null = null;
@@ -129,6 +133,10 @@ export class AssistantApp {
     this.root = document.createElement('div');
     this.root.className = 'l2d-root';
     this.root.innerHTML = TEMPLATE;
+    // 尺寸由 WP 后台注入。CSS 变量让“小/中/大/自定义”共用同一套样式，
+    // 不需要为每一档写一份 CSS。
+    this.root.style.setProperty('--l2d-width', `${config.appearance.width}px`);
+    this.root.style.setProperty('--l2d-height', `${config.appearance.height}px`);
     document.body.appendChild(this.root);
 
     this.canvas = must<HTMLCanvasElement>(this.root, '.l2d-canvas');
@@ -137,6 +145,7 @@ export class AssistantApp {
     this.form = must<HTMLFormElement>(this.root, '.l2d-chat__form');
     this.userbar = must(this.root, '.l2d-chat__userbar');
     this.userLabel = must(this.root, '.l2d-chat__user');
+    this.quotaEl = must(this.root, '.l2d-chat__quota');
     this.logoutLink = must<HTMLAnchorElement>(this.root, '.l2d-chat__logout');
     this.gate = must(this.root, '.l2d-gate');
     this.gateLogin = must<HTMLAnchorElement>(this.root, '[data-auth="login"]');
@@ -183,6 +192,10 @@ export class AssistantApp {
       const name = auth.user?.name || '已登录';
       this.userLabel.textContent = auth.user?.isAdmin ? `${name} · 管理员` : name;
       this.logoutLink.href = auth.logoutUrl || '/wp-login.php?action=logout';
+      // 额度显示失败不影响聊天，refreshQuota 内部已经吞掉异常。
+      if (!blocked) void this.refreshQuota();
+    } else {
+      this.quotaEl.hidden = true;
     }
 
     this.gate.hidden = !blocked;
@@ -197,6 +210,39 @@ export class AssistantApp {
 
   private authBlocked(): boolean {
     return this.config.auth.required && !this.config.auth.loggedIn;
+  }
+
+  /** 从后端刷新额度并更新显示；失败时保持上一次的值。 */
+  private async refreshQuota(): Promise<void> {
+    const quota = await fetchQuota(this.config.apiBase, this.config.auth);
+    if (!quota) return;
+    this.quota = quota;
+    this.renderQuota();
+  }
+
+  private renderQuota(): void {
+    const quota = this.quota;
+    if (!quota || !this.config.auth.loggedIn) {
+      this.quotaEl.hidden = true;
+      return;
+    }
+
+    this.quotaEl.hidden = false;
+    this.quotaEl.classList.toggle('is-empty', !quota.unlimited && quota.remaining === 0);
+
+    if (quota.unlimited) {
+      this.quotaEl.textContent = '管理员 · 不限量';
+      this.quotaEl.title = '管理员不受每日额度限制';
+      return;
+    }
+
+    const remaining = quota.remaining ?? 0;
+    this.quotaEl.textContent = remaining > 0 ? `今日剩余 ${remaining} 条` : '今日额度已用完';
+    const globalText =
+      quota.globalRemaining !== null && quota.globalLimit > 0
+        ? `；全站剩余 ${quota.globalRemaining} 条`
+        : '';
+    this.quotaEl.title = `每人每日 ${quota.limit} 条${globalText}`;
   }
 
   private bindEvents(): void {
@@ -312,7 +358,11 @@ export class AssistantApp {
     this.root.classList.add('is-chat-open');
     this.chatBtn.classList.add('is-active');
     this.chatPanel.classList.remove('l2d-chat--closing');
-    if (!this.authBlocked()) this.input.focus();
+    if (!this.authBlocked()) {
+      this.input.focus();
+      // 每次打开都刷新一次，管理员刚在后台改过额度也能马上看到。
+      void this.refreshQuota();
+    }
     this.scrollToBottom(true);
   }
 
@@ -367,7 +417,7 @@ export class AssistantApp {
 
     try {
       this.abort = new AbortController();
-      await streamChat(
+      const result = await streamChat(
         this.config.apiBase,
         {
           messages: this.history.slice(-20),
@@ -396,6 +446,10 @@ export class AssistantApp {
         }),
         { token, signal: this.abort.signal },
       );
+      if (result.quota) {
+        this.quota = result.quota;
+        this.renderQuota();
+      }
       typing.remove();
       if (!answer && !failed) {
         bubble.textContent = '（这次没有收到内容，再问我一次吧～）';
@@ -411,7 +465,10 @@ export class AssistantApp {
         bubble.textContent = '登录状态过期了，刷新一下页面再和我聊天吧～';
       } else if (error instanceof ChatHttpError && error.status === 429) {
         // 后端在流开始前就返回 429，说明今天这条额度已经用完。
-        bubble.textContent = '今天的聊天额度已经用完啦，明天再来找我玩吧～';
+        // detail 会区分“个人额度”和“全站额度”，直接展示更准确。
+        bubble.textContent =
+          error.detail || '今天的聊天额度已经用完啦，明天再来找我玩吧～';
+        void this.refreshQuota();
       } else if (error instanceof ChatHttpError && error.status === 503) {
         // 服务端没配 JWT 密钥，用户自己解决不了，提示联系站长。
         bubble.textContent = '小助手还没准备好登录凭证，先联系站长看看吧～';
@@ -471,7 +528,32 @@ export class AssistantApp {
   }
 
   private renderBubbleText(bubble: HTMLElement, text: string): void {
-    bubble.textContent = text;
+    // 模型现在允许输出 Markdown 代码块。这里不引入完整 Markdown 解析器
+    // （体积大、还要处理 XSS），只把 ``` 围起来的部分渲染成 <pre><code>。
+    // 所有内容仍然用 textContent 写入，永远不会执行 HTML。
+    bubble.textContent = '';
+
+    const segments = text.split('```');
+    segments.forEach((segment, index) => {
+      if (!segment) return;
+
+      if (index % 2 === 0) {
+        bubble.appendChild(document.createTextNode(segment));
+        return;
+      }
+
+      // 代码块第一行可能是语言标记（js、bash……），单独去掉。
+      const lines = segment.replace(/^\n/, '').split('\n');
+      if (lines.length > 1 && /^[A-Za-z0-9_+#.-]{1,20}$/.test(lines[0].trim())) {
+        lines.shift();
+      }
+
+      const pre = document.createElement('pre');
+      const code = document.createElement('code');
+      code.textContent = lines.join('\n').replace(/\n$/, '');
+      pre.appendChild(code);
+      bubble.appendChild(pre);
+    });
   }
 
   private renderCitations(bubble: HTMLElement, citations: Citation[]): void {

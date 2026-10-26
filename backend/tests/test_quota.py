@@ -11,7 +11,9 @@ from __future__ import annotations
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
-from app.quota import QuotaStore
+import pytest
+
+from app.quota import GlobalQuotaExceeded, QuotaStore
 
 
 def make_store(tmp_path) -> QuotaStore:
@@ -116,3 +118,72 @@ def test_seconds_until_reset_is_within_one_day(tmp_path) -> None:
     seconds = store.seconds_until_reset()
 
     assert 1 <= seconds <= 86_400
+
+
+def test_global_quota_blocks_everyone_after_limit(tmp_path) -> None:
+    store = make_store(tmp_path)
+
+    first = store.reserve(1, limit=10, global_limit=2)
+    second = store.reserve(2, limit=10, global_limit=2)
+
+    assert first is not None and first.global_remaining == 1
+    assert second is not None and second.global_remaining == 0
+
+    with pytest.raises(GlobalQuotaExceeded):
+        store.reserve(3, limit=10, global_limit=2)
+
+    # 全站额度失败时，个人计数必须一起回滚，不能白扣用户 3 的次数。
+    status = store.status(3, limit=10, global_limit=2)
+    assert status.used == 0
+    assert status.remaining == 10
+
+
+def test_refund_returns_both_personal_and_global(tmp_path) -> None:
+    store = make_store(tmp_path)
+
+    reservation = store.reserve(7, limit=1, global_limit=2)
+    assert reservation is not None
+    assert store.status(7, 1, global_limit=2).remaining == 0
+
+    store.refund(reservation)
+
+    status = store.status(7, 1, global_limit=2)
+    assert status.used == 0
+    assert status.remaining == 1
+    assert status.global_used == 0
+    assert status.global_remaining == 2
+
+
+def test_admin_does_not_consume_global_quota(tmp_path) -> None:
+    store = make_store(tmp_path)
+
+    for _ in range(5):
+        reservation = store.reserve(1, limit=0, is_admin=True, global_limit=1)
+        assert reservation is not None
+        assert reservation.global_counted is False
+
+    # 普通用户仍能拿到全站唯一的那一个名额。
+    assert store.reserve(2, limit=1, global_limit=1) is not None
+
+
+def test_status_does_not_consume_quota(tmp_path) -> None:
+    store = make_store(tmp_path)
+    reservation = store.reserve(5, limit=3, global_limit=10)
+    assert reservation is not None
+
+    for _ in range(3):
+        status = store.status(5, limit=3, global_limit=10)
+        assert status.used == 1
+        assert status.remaining == 2
+        assert status.global_used == 1
+        assert status.global_remaining == 9
+
+
+def test_admin_status_is_unlimited(tmp_path) -> None:
+    store = make_store(tmp_path)
+
+    status = store.status(1, limit=0, is_admin=True)
+
+    assert status.unlimited is True
+    assert status.remaining is None
+    assert status.used is None

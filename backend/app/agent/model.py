@@ -22,15 +22,19 @@ from langchain_deepseek import ChatDeepSeek
 from app.config import get_settings
 
 
-@lru_cache(maxsize=1)
-def build_chat_model() -> ChatDeepSeek:
+@lru_cache(maxsize=8)
+def build_chat_model(model_name: str | None = None) -> ChatDeepSeek:
     """创建一个可复用的 DeepSeek 聊天模型实例。
+
+    参数 model_name 来自运行时设置（管理员可在 WP 后台修改）。
+    用 lru_cache(maxsize=8) 按模型名分别缓存：同一个模型只创建一次，
+    切换模型时也不会复用旧实例。传 None 时使用 .env 里的默认模型。
 
     参数说明（其余参数保持默认即可）：
 
     - model:        模型名称。`deepseek-flash` 支持对话、工具调用和图片理解。
     - api_key:      DeepSeek 控制台创建的 Key。这里从 Settings 读，
-                    避免把 Key 硬编码在代码里。SecretStr 类型还能防止日志打印明文。
+                    避免把 Key 硬编码在代码里。
     - base_url:     DeepSeek 的 OpenAI 兼容接口地址。
     - temperature:  采样温度，0 更稳定，1 更发散。助手用 0.7 比较自然。
     - max_tokens:   单次回复的最大 token 数，防止模型输出过长。
@@ -45,7 +49,8 @@ def build_chat_model() -> ChatDeepSeek:
 
     为什么要 `lru_cache`：
     模型实例内部持有 HTTP 客户端，创建成本较高；而它是无状态的，
-    可以安全地在多个请求之间复用。注意：只有配置在进程生命周期内不变时才适合缓存。
+    可以安全地在多个请求之间复用。缓存键包含模型名，
+    所以管理员切换模型后会得到一个新实例，不会误用旧配置。
     """
 
     settings = get_settings()
@@ -53,7 +58,7 @@ def build_chat_model() -> ChatDeepSeek:
     # 先收集通用参数，再按配置决定是否加入 DeepSeek 特有的“关闭思考”字段。
     # 这样以后如果要做复杂推理，只要把 DEEPSEEK_DISABLE_THINKING 设为 false 即可。
     kwargs: dict[str, object] = {
-        "model": settings.deepseek_model,
+        "model": model_name or settings.deepseek_model,
         "api_key": settings.deepseek_api_key,
         "base_url": settings.deepseek_base_url,
         "temperature": 0.7,

@@ -28,6 +28,16 @@ export interface AssistantAuthConfig {
   nonce: string;
 }
 
+/** Live2D 形象的显示尺寸，由 WordPress 后台注入。 */
+export interface AssistantAppearance {
+  /** 预设档位；custom 表示直接使用 width/height */
+  preset: 'small' | 'medium' | 'large' | 'custom';
+  /** 容器宽度（CSS 像素） */
+  width: number;
+  /** 容器高度（CSS 像素） */
+  height: number;
+}
+
 export interface AssistantConfig {
   /** AI 后端地址，例如 /ai-api */
   apiBase: string;
@@ -37,6 +47,8 @@ export interface AssistantConfig {
   title: string;
   /** 语音识别语言 */
   voiceLang: string;
+  /** 形象尺寸 */
+  appearance: AssistantAppearance;
   /** 登录相关配置 */
   auth: AssistantAuthConfig;
 }
@@ -46,6 +58,7 @@ interface InjectedConfig {
   assetBase?: string;
   title?: string;
   voiceLang?: string;
+  appearance?: Partial<AssistantAppearance> | null;
   auth?: Partial<AssistantAuthConfig> | null;
 }
 
@@ -78,6 +91,39 @@ const DEV_AUTH: AssistantAuthConfig = {
   nonce: '',
 };
 
+const DEV_APPEARANCE: AssistantAppearance = {
+  preset: 'medium',
+  width: 260,
+  height: 460,
+};
+
+/** 把后台传来的尺寸夹到安全范围，避免 0 或超大值把页面撑坏。 */
+function normalizeAppearance(
+  injected: InjectedConfig['appearance'],
+): AssistantAppearance {
+  if (!injected) return DEV_APPEARANCE;
+
+  const preset =
+    injected.preset === 'small' ||
+    injected.preset === 'medium' ||
+    injected.preset === 'large' ||
+    injected.preset === 'custom'
+      ? injected.preset
+      : DEV_APPEARANCE.preset;
+
+  const clamp = (value: unknown, min: number, max: number, fallback: number) => {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return fallback;
+    return Math.min(max, Math.max(min, Math.round(number)));
+  };
+
+  return {
+    preset,
+    width: clamp(injected.width, 160, 420, DEV_APPEARANCE.width),
+    height: clamp(injected.height, 260, 720, DEV_APPEARANCE.height),
+  };
+}
+
 function normalizeAuth(injected: InjectedConfig['auth']): AssistantAuthConfig {
   if (!injected) return DEV_AUTH;
   return {
@@ -99,6 +145,7 @@ export function getConfig(): AssistantConfig {
     assetBase: withTrailingSlash(injected.assetBase ?? '/live2d/'),
     title: injected.title ?? '博客小助手',
     voiceLang: injected.voiceLang ?? 'zh-CN',
+    appearance: normalizeAppearance(injected.appearance),
     auth: normalizeAuth(injected.auth),
   };
 }

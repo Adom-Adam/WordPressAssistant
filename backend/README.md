@@ -12,10 +12,13 @@
 | [app/agent/tools.py](app/agent/tools.py) | `@tool` 装饰器、`content_and_artifact`、工具异常处理 |
 | [app/agent/core.py](app/agent/core.py) | `create_agent` 循环、`astream(stream_mode=[...])`、mock 模式 |
 | [app/auth/jwt.py](app/auth/jwt.py) | JWT 三段结构、HS256 验签、PyJWT 的 `decode` 参数 |
-| [app/api/deps.py](app/api/deps.py) | FastAPI 依赖注入、`HTTPBearer`、401/503 的区别 |
-| [app/quota.py](app/quota.py) | SQLite 原子占位、`ON CONFLICT`、并发与退款 |
+| [app/api/deps.py](app/api/deps.py) | FastAPI 依赖注入、`HTTPBearer`、401/403/503 的区别 |
+| [app/quota.py](app/quota.py) | SQLite 原子占位、`ON CONFLICT`、个人/全站额度与退款 |
+| [app/runtime_settings.py](app/runtime_settings.py) | 后台可改参数的校验、原子写 JSON、损坏回退 |
 | [app/agent/limits.py](app/agent/limits.py) | LangChain middleware：模型/工具调用次数上限 |
 | [app/api/chat.py](app/api/chat.py) | SSE 协议、`EventSourceResponse`、认证/额度/退款顺序 |
+| [app/api/quota.py](app/api/quota.py) | `GET /api/quota`：不消耗次数的额度查询 |
+| [app/api/admin.py](app/api/admin.py) | `GET/PUT /api/admin/settings`：管理员 JWT + 运行时参数 |
 | [app/schemas.py](app/schemas.py) | Pydantic 校验与提示词注入防护 |
 | [app/main.py](app/main.py) | FastAPI 入口、CORS、启动检查 |
 | [tests/](tests/) | JWT、额度并发、agent 防循环、接口 401/429 |
@@ -81,22 +84,28 @@ POST /api/chat
   ├─ Depends(require_user)
   │    └─ HTTPBearer 取 token → verify_token() 验签
   │         └─ 失败：401；服务端没配密钥：503
-  ├─ QuotaStore.reserve(user_id, DAILY_QUOTA)
-  │    ├─ 管理员：直接放行，不计数
-  │    ├─ 普通用户：一条原子 SQL 占位
-  │    └─ 用满：429 + Retry-After
-  ├─ asyncio.timeout(AGENT_MAX_SECONDS) 包住流式生成
+  ├─ QuotaStore.reserve(user_id, 单人额度, global_limit=全站额度)
+  │    ├─ 管理员：直接放行，不计数，也不占全站额度
+  │    ├─ 普通用户：个人 + 全站在同一个事务里原子占位
+  │    ├─ 个人用满：429“今天的聊天额度已经用完啦”
+  │    └─ 全站用满：429“今天全站的聊天额度已经用完了”
+  ├─ asyncio.timeout(运行时设置的 AGENT_MAX_SECONDS) 包住流式生成
   │    └─ agent 内部还有模型/工具调用次数上限
-  └─ finally：如果“一个字都没输出”，退回额度
+  └─ finally：如果“一个字都没输出”，个人和全站额度一起退回
 ```
 
-值得留意的三个设计：
+额度、模型名、调用上限和超时都来自 `RuntimeSettingsStore`：
+`.env` 提供默认值，WordPress 后台保存后写入 `data/runtime_settings.json`，**下一次请求立即生效**，
+不需要重启。文件损坏时逐字段回退到默认值，不会因为一个坏值整站瘫痪。
+
+值得留意的四个设计：
 
 1. **认证必须发生在 SSE 开始之前**。响应头一旦发出去，就改不了状态码了；
 2. **`sub` 是唯一可信的用户标识**。昵称、`admin` 都来自签名 payload，但权限只看
    `sub` 和布尔 `admin`；
 3. **额度按“请求”算，不按工具次数算**。内部循环再多次也只是 1 条，但 token 成本
-   由 `AGENT_MAX_*` 兜底。
+   由 `AGENT_MAX_*` 兜底；
+4. **全站额度只统计普通用户**。管理员聊天既不受个人额度限制，也不会挤占普通用户的全站额度。
 
 ## 怎么加一个新工具
 
@@ -135,8 +144,11 @@ uv run pytest -q
 测试不调用真实模型，也不花钱：
 
 - `test_jwt.py`：正常、过期、错密钥、错 `aud`、`alg=none`、篡改；
-- `test_quota.py`：额度、跨用户、跨天、退款、40 个并发只放行 5 个；
-- `test_chat_api.py`：401 / 200 / 429 / 503 / 失败退款；
+- `test_quota.py`：个人/全站额度、跨用户、跨天、退款、全站满时个人额度回滚、40 个并发只放行 5 个；
+- `test_chat_api.py`：401 / 200 / 429（个人与全站）/ 503 / 失败退款 / `GET /quota`；
+- `test_runtime_settings.py`：后台参数范围、非法值整批拒绝、损坏文件逐字段回退；
+- `test_admin_api.py`：非管理员 403、读取与更新设置；
+- `test_prompts.py`：管理员身份、页面上下文清洗、提示词注入边界；
 - `test_agent_limits.py`：用假模型模拟“无限调工具”，验证保险丝会断、提示是中文。
 
 ## 知识库：已实现的部分

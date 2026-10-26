@@ -1,4 +1,5 @@
 import type { ChatMessage, StreamEvent } from '../types';
+import { quotaFromHeaders, type QuotaInfo } from './quota';
 
 export interface ChatPayload {
   messages: ChatMessage[];
@@ -17,10 +18,17 @@ export class ChatHttpError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    /** 后端返回的 detail，用来区分“个人额度用完”和“全站额度用完”。 */
+    readonly detail = '',
   ) {
     super(message);
     this.name = 'ChatHttpError';
   }
+}
+
+export interface ChatResult {
+  /** 响应头里的额度；没有额度头时为 null。 */
+  quota: QuotaInfo | null;
 }
 
 /**
@@ -32,7 +40,7 @@ export async function streamChat(
   payload: ChatPayload,
   onEvent: (event: StreamEvent) => void,
   options: ChatOptions = {},
-): Promise<void> {
+): Promise<ChatResult> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (options.token) headers.Authorization = `Bearer ${options.token}`;
 
@@ -49,11 +57,15 @@ export async function streamChat(
     throw new ChatHttpError(
       `请求失败（${response.status}）${detail ? `：${detail.slice(0, 200)}` : ''}`,
       response.status,
+      detail,
     );
   }
   if (!response.body) {
     throw new Error('当前浏览器不支持流式响应');
   }
+
+  // 响应头在流开始前就固定了，先读出来再逐块消费正文。
+  const quota = quotaFromHeaders(response.headers);
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -75,6 +87,8 @@ export async function streamChat(
 
   const tail = buffer.trim();
   if (tail) dispatchBlock(tail, onEvent);
+
+  return { quota };
 }
 
 /**

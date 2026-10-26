@@ -9,12 +9,18 @@
 - 哪些设置必须**手动**在服务器上完成；
 - 怎么验证、更新、回滚和排查。
 
-> 适用版本：插件 `0.2.0`。
+> 适用版本：插件 `0.3.0` / 后端 `dd98f71` 之后。
 >
-> **当前边界（很重要）**：第二步已经完成。后端会校验 JWT，未登录/伪造/过期 token
-> 一律 401；普通用户按北京时间每天限额，管理员不限量。绕过前端直接 curl
-> `/ai-api/chat` 也会被拒绝。部署时请确认 `.env` 里有 `L2D_AI_JWT_SECRET`，
-> 且和 `wp-config.php` 完全一致。
+> **当前边界（很重要）**：后端会校验 JWT，未登录/伪造/过期 token
+> 一律 401；普通用户按北京时间每天限额，并受全站总额度约束；管理员不限量，
+> 也不占全站额度。绕过前端直接 curl `/ai-api/chat` 同样会被拒绝。
+> 部署时请确认 `.env` 里有 `L2D_AI_JWT_SECRET`，且和 `wp-config.php` 完全一致。
+> 额度、模型名、调用上限和超时可以在 WordPress 后台修改，保存后立即生效。
+>
+> **部署记录（2026-10-26）**：生产服务器已更新到 `dd98f71`，安装 PyJWT 并重启
+> `l2d-ai-backend`。已确认 `/api/health` 返回 `"auth_configured":true`，
+> 匿名 `POST /ai-api/chat` 返回 `401`。额度、退款与调用上限均使用代码默认值
+> （20 条/天、模型 6 次、工具 6 次、单轮 90 秒），无需额外写入 `.env`。
 
 ---
 
@@ -265,23 +271,29 @@ nano .env          # 没有 nano 就用 vi，或在宝塔文件管理里编辑
 | 键 | 示例 | 说明 |
 | --- | --- | --- |
 | `DEEPSEEK_API_KEY` | `sk-...` | 只写服务器；不填会进入 mock 模式 |
-| `DEEPSEEK_MODEL` | `deepseek-flash` | 以后可在后台配置（第三步） |
+| `DEEPSEEK_MODEL` | `deepseek-flash` | 初始默认值；后台“DeepSeek 模型名”可覆盖 |
 | `WP_SITE_URL` | `https://你的域名` | 知识库同步要抓的站点 |
 | `L2D_AI_JWT_SECRET` | 64 位十六进制 | 必须和 `wp-config.php` 完全一致 |
 | `L2D_AI_JWT_ISSUER` | `l2d-ai-wordpress` | 与插件常量一致 |
 | `L2D_AI_JWT_AUDIENCE` | `l2d-ai-backend` | 与插件常量一致 |
 | `L2D_AI_JWT_TTL_SECONDS` | `900` | 与插件签发有效期一致 |
 | `L2D_AI_JWT_LEEWAY_SECONDS` | `30` | 允许的服务器时钟偏差 |
-| `DAILY_QUOTA` | `20` | 普通用户每天条数；管理员不限量 |
+| `DAILY_QUOTA` | `20` | 普通用户每天条数；管理员不限量；后台可覆盖 |
+| `GLOBAL_DAILY_QUOTA` | `0` | 全站普通用户每天合计条数；0 = 不限；后台可覆盖 |
 | `QUOTA_DB_PATH` | `data/quota.sqlite3` | 额度计数库；可随时删除重置 |
 | `QUOTA_TIMEZONE` | `Asia/Shanghai` | 按哪个时区判断“新的一天” |
-| `AGENT_MAX_MODEL_CALLS` | `6` | 单轮最多模型调用次数（防循环） |
-| `AGENT_MAX_TOOL_CALLS` | `6` | 单轮最多工具调用次数 |
-| `AGENT_MAX_SECONDS` | `90` | 单轮最长秒数 |
+| `RUNTIME_SETTINGS_PATH` | `data/runtime_settings.json` | 后台保存的运营参数；不存在时用 `.env` 默认值 |
+| `AGENT_MAX_MODEL_CALLS` | `6` | 单轮最多模型调用次数（防循环）；后台可覆盖 |
+| `AGENT_MAX_TOOL_CALLS` | `6` | 单轮最多工具调用次数；后台可覆盖 |
+| `AGENT_MAX_SECONDS` | `90` | 单轮最长秒数；后台可覆盖 |
 | `MOCK_MODE` | `false` | 生产环境应为 false |
 
 `CORS_ORIGINS` 保持默认即可：生产环境走同域 `/ai-api/`，不会触发跨域。
 只有后端独立域名时才需要加博客域名。
+
+> 额度、模型名、调用上限和超时的**初始值**来自 `.env`；一旦在 WordPress 后台保存过，
+> 就以 `backend/data/runtime_settings.json` 为准，改 `.env` 不会覆盖它。
+> 想彻底回到 `.env` 默认值，停止后端后删除这个 JSON 再启动（不要只改 `.env` 然后疑惑为什么没生效）。
 
 > `.env` 权限必须是 `640` 或 `600`。后端进程按**当前工作目录**找 `.env`，
 > 所以 systemd 的 `WorkingDirectory` 必须是 `backend/`，否则会出现“明明配了 Key 还是 mock”。
@@ -738,17 +750,54 @@ curl -i -X POST https://你的域名/ai-api/chat \
 
 ### 11.6 额度的实际行为
 
-- 普通用户：每天 `DAILY_QUOTA` 条，按 `QUOTA_TIMEZONE` 的零点重置；
-- 管理员：token 里 `admin: true`，不限量；
+- 普通用户：每天“普通用户每日额度”条，按 `QUOTA_TIMEZONE` 的零点重置；
+- 普通用户还受“全站每日总额度”限制（0 = 不限），两者在同一个事务里占位；
+- 管理员：token 里 `admin: true`，不限量，也不占全站额度；
 - 一次聊天算 1 条，内部调用多少次工具都不会重复扣；
-- 如果模型在输出第一个字之前失败/超时/被取消，这次额度会自动退回；
-- 额度用完返回 `429`，响应头 `Retry-After` 告诉客户端多少秒后重置。
+- 如果模型在输出第一个字之前失败/超时/被取消，个人和全站额度都会自动退回；
+- 个人额度用完返回 `429`，提示“今天的聊天额度已经用完啦”；
+  全站额度用完同样返回 `429`，但提示“今天全站的聊天额度已经用完了”。
+- 打开聊天面板时 `GET /ai-api/quota` 会显示剩余次数；每次回答后前端再用响应头刷新。
 
-想快速验证 429：把 `.env` 的 `DAILY_QUOTA` 临时改成 `1`，重启服务，登录后连发两条。
-浏览器 Network 里第二条应返回 429，聊天窗口显示“今天的聊天额度已经用完啦”。
+想快速验证 429：在 WordPress 后台把“普通用户每日额度”临时改成 `1`，保存后立即生效，
+用普通账号连发两条。第二条应返回 429，聊天窗口显示额度用完的提示。
+验证完记得改回来。
 
 > 额度计数库是 `backend/data/quota.sqlite3`。删掉它等于把所有人的当天用量清零；
 > 它不参与 Git，也不需要和知识库一起重建。
+
+### 11.7 WordPress 后台设置页
+
+插件 `0.3.0` 起，后台“设置 → Live2D 小助手”分成三块：
+
+1. **显示设置**（保存到 WordPress options）
+   - AI 服务地址；
+   - 形象大小：小 / 中 / 大 / 自定义；
+   - 自定义宽高（160–420 px、260–720 px）。
+   这一类只影响浏览器，保存后访客刷新页面即可看到。
+
+2. **聊天额度与运行参数**（保存到后端 `runtime_settings.json`）
+   - 普通用户每日额度；
+   - 全站每日总额度（0 = 不限，只统计普通用户）；
+   - 单轮模型调用 / 工具调用上限；
+   - 单次回答超时；
+   - DeepSeek 模型名。
+   保存时 WordPress 服务器会现场签一个 **2 分钟有效的管理员 JWT**，
+   再 `PUT /ai-api/admin/settings`；浏览器不会接触这个 token，也不会接触 JWT 密钥。
+   后端校验并落盘后立即生效，不需要重启。
+
+3. **只读运行信息**
+   - 后端监听端口（由 systemd 决定）、DeepSeek Key 是否配置、mock 模式、
+     后端 JWT 密钥是否配置、额度重置时区。
+   - 端口和 Key 故意不提供在线修改：改它们需要动 systemd/Nginx 或 `.env`，
+     “看起来能改、其实没生效”比只读更危险。
+
+如果“读取后端设置失败”，依次检查：
+
+- “AI 服务地址”是否可以访问（`curl http://127.0.0.1:18080/api/health`）；
+- Python 服务是否在运行；
+- `wp-config.php` 和后端 `.env` 的 `L2D_AI_JWT_SECRET` 是否完全一致；
+- 后端日志里是否有 `401`（密钥不一致）或 `403`（token 里不是管理员）。
 
 ---
 
@@ -785,7 +834,7 @@ tar czf /root/l2d-ai-backup-$(date +%F).tgz \
 ```
 
 WordPress 侧按宝塔的数据库 + 站点备份策略走。
-`backend/data/` 里现在同时有知识库和额度库，升级前一起备份。
+`backend/data/` 里现在有知识库、额度库，以及后台保存的 `runtime_settings.json`，升级前一起备份。
 
 ### 12.4 轮换密钥
 
@@ -806,7 +855,7 @@ WordPress 侧按宝塔的数据库 + 站点备份策略走。
 | 1 | 运行用户 | `l2dai` | 不用 root/www 跑后端 |
 | 2 | 目录与属主 | `/opt/l2d-ai` | 后端不能放在网站根目录 |
 | 3 | `uv` 安装 | `/usr/local/bin/uv` | systemd/普通用户都能找到 |
-| 4 | 后端 `.env` | `backend/.env`，`640` | DeepSeek Key、JWT 密钥、每日额度、站点地址 |
+| 4 | 后端 `.env` | `backend/.env`，`640` | DeepSeek Key、JWT 密钥、额度默认值、站点地址 |
 | 5 | JWT 密钥 | `.env` + `wp-config.php` | 两处必须一致 |
 | 6 | 知识库同步 | `backend/data/kb.sqlite3` | 发布文章后要重跑 |
 | 7 | systemd 服务 | `/etc/systemd/system/l2d-ai-backend.service` | 开机自启、崩溃重启 |
@@ -820,6 +869,7 @@ WordPress 侧按宝塔的数据库 + 站点备份策略走。
 | 15 | 缓存排除 | 缓存插件/CDN | `/wp-json/l2d-ai/*`、`/ai-api/*` |
 | 16 | 时区 | `timedatectl` | 建议 `Asia/Shanghai` |
 | 17 | 备份 | 宝塔 + `/opt/l2d-ai` | 升级前先备份 `.env` 和 `data/` |
+| 18 | 后台运营参数 | 设置 → Live2D 小助手 | 首次保存后自动生成 `data/runtime_settings.json`，不要手改 |
 
 ---
 
@@ -838,8 +888,11 @@ WordPress 侧按宝塔的数据库 + 站点备份策略走。
 | 登录后仍是登录门 | 页面缓存把访客 HTML 发给了登录用户 | 缓存插件按登录 Cookie 排除 |
 | 登录后聊天 401 | 两处 JWT 密钥不一致、token 过期、服务器时间偏差 | 对比密钥长度/内容；`timedatectl` 校时；刷新页面换 token |
 | 聊天 503 | 后端 `.env` 没有 `L2D_AI_JWT_SECRET` 或短于 32 字符 | 补齐后重启；看 `/api/health` 的 `auth_configured` |
-| 聊天 429 | 当天额度用完 | 正常行为；等零点重置，或调 `DAILY_QUOTA` |
-| 回复“查资料次数有点多” | agent 触发了防循环上限 | 正常保护；确认不是模型反复检索，必要时小幅调高上限 |
+| 聊天 429（个人） | 当天个人额度用完 | 正常行为；等零点重置，或后台调高“普通用户每日额度” |
+| 聊天 429（全站） | 当天全站总额度用完 | 正常行为；等零点重置，或后台调高/清零“全站每日总额度” |
+| 设置页“读取后端设置失败” | 服务地址错、后端没开、JWT 密钥不一致 | 依次检查地址、`systemctl status`、两处密钥；点“重新读取” |
+| 后台保存后额度没变 | 改的是 `.env`，但运行时 JSON 优先 | 在后台改，或停服删除 `data/runtime_settings.json` 后重启 |
+| 回复“查资料次数有点多” | agent 触发了防循环上限 | 正常保护；确认不是模型反复检索，必要时在后台小幅调高上限 |
 | 回复一次性出现 | Nginx/CDN 缓冲 | `proxy_buffering off`，CDN 关缓冲 |
 | `mock:true` | 后端没读到 `.env` | 检查 `WorkingDirectory`、文件权限、Key |
 | 502 Bad Gateway | 后端没启动或端口不对 | `systemctl status`、`ss -lntp`、日志 |
@@ -864,11 +917,13 @@ WordPress 侧按宝塔的数据库 + 站点备份策略走。
 - [ ] 插件目录属主 `www:www`，包括 `assets/` 子目录，没有多余的可写权限；
 - [ ] token 接口能被未登录请求正确拒绝（401）；
 - [ ] 缓存/CDN 排除了 `/wp-json/l2d-ai/*` 和 `/ai-api/*`；
-- [ ] 已配置备份，知道怎么恢复 `.env` 和 `data/`（知识库 + 额度库）；
+- [ ] 已配置备份，知道怎么恢复 `.env` 和 `data/`（知识库 + 额度库 + 运行时设置）；
 - [ ] 未登录 curl `/ai-api/chat` 返回 401；
 - [ ] 普通用户额度用完返回 429，管理员账号不受限；
-- [ ] `AGENT_MAX_MODEL_CALLS` / `AGENT_MAX_TOOL_CALLS` / `AGENT_MAX_SECONDS`
-      没有被误设成很大的值（它们是防止单次请求失控烧 token 的保险丝）。
+- [ ] 后台设置页能读取后端参数，保存后立即生效；
+- [ ] 管理员 Key/端口只读展示，页面源码和前端配置里搜不到任何密钥；
+- [ ] 后台的单轮模型/工具调用上限和超时没有被误设成很大的值
+      （它们是防止单次请求失控烧 token 的保险丝；`.env` 只提供初始默认值）。
 
 ---
 

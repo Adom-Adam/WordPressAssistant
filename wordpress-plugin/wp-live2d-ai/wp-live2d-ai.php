@@ -3,7 +3,7 @@
  * Plugin Name:       Live2D AI 小助手
  * Plugin URI:        https://github.com/Adom-Adam/WordPressAssistant
  * Description:       在博客左下角显示 Live2D AI 助手。前端只负责展示与交互，AI 逻辑由独立的 Python 服务提供。
- * Version:           0.2.0
+ * Version:           0.3.0
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * Author:            Adom
@@ -14,19 +14,31 @@ defined( 'ABSPATH' ) || exit;
 
 final class L2D_AI_Plugin {
 
-	const VERSION          = '0.2.0';
+	const VERSION          = '0.3.0';
 	const OPTION_API_BASE  = 'l2d_ai_api_base';
+	const OPTION_SIZE      = 'l2d_ai_size_preset';
+	const OPTION_WIDTH     = 'l2d_ai_size_width';
+	const OPTION_HEIGHT    = 'l2d_ai_size_height';
 	const SETTINGS_GROUP   = 'l2d_ai_settings';
 	const REST_NAMESPACE   = 'l2d-ai/v1';
 	const JWT_TTL          = 900; // 15 分钟；过期后前端重新向 WordPress 换新 token。
+	const JWT_ADMIN_TTL    = 120; // 后台设置页只需要一次请求，有效期越短越安全。
 	const JWT_ISSUER       = 'l2d-ai-wordpress';
 	const JWT_AUDIENCE     = 'l2d-ai-backend';
+
+	/** 三个预设档位的实际像素尺寸。custom 表示使用管理员填写的宽高。 */
+	const SIZE_PRESETS = array(
+		'small'  => array( 'width' => 200, 'height' => 360 ),
+		'medium' => array( 'width' => 260, 'height' => 460 ),
+		'large'  => array( 'width' => 330, 'height' => 600 ),
+	);
 
 	public static function init() {
 		add_action( 'wp_enqueue_scripts', array( __CLASS__, 'enqueue_assets' ), 20 );
 		add_action( 'rest_api_init', array( __CLASS__, 'register_routes' ) );
 		add_action( 'admin_menu', array( __CLASS__, 'add_settings_page' ) );
 		add_action( 'admin_init', array( __CLASS__, 'register_settings' ) );
+		add_action( 'admin_post_l2d_ai_save_backend_settings', array( __CLASS__, 'save_backend_settings' ) );
 		add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), array( __CLASS__, 'action_links' ) );
 	}
 
@@ -74,6 +86,7 @@ final class L2D_AI_Plugin {
 				'assetBase' => $app_url . 'live2d/',
 				'title'     => get_bloginfo( 'name' ),
 				'voiceLang' => 0 === strpos( get_locale(), 'zh' ) ? 'zh-CN' : 'en-US',
+				'appearance' => self::appearance_config(),
 				'auth'      => self::auth_config(),
 			)
 		);
@@ -100,6 +113,57 @@ final class L2D_AI_Plugin {
 		}
 		// 允许同域相对路径，例如 /ai-api
 		return '/' . ltrim( sanitize_text_field( $value ), '/' );
+	}
+
+	/** 当前档位。只接受四个已知值，写错时回退到 medium。 */
+	public static function size_preset() {
+		$value = (string) get_option( self::OPTION_SIZE, 'medium' );
+		if ( 'custom' === $value || isset( self::SIZE_PRESETS[ $value ] ) ) {
+			return $value;
+		}
+		return 'medium';
+	}
+
+	public static function sanitize_size_preset( $value ) {
+		$value = sanitize_key( (string) $value );
+		if ( 'custom' === $value || isset( self::SIZE_PRESETS[ $value ] ) ) {
+			return $value;
+		}
+		return 'medium';
+	}
+
+	public static function size_width() {
+		return max( 160, min( 420, (int) get_option( self::OPTION_WIDTH, 260 ) ) );
+	}
+
+	public static function sanitize_size_width( $value ) {
+		return max( 160, min( 420, absint( $value ) ) );
+	}
+
+	public static function size_height() {
+		return max( 260, min( 720, (int) get_option( self::OPTION_HEIGHT, 460 ) ) );
+	}
+
+	public static function sanitize_size_height( $value ) {
+		return max( 260, min( 720, absint( $value ) ) );
+	}
+
+	/** 注入前端的尺寸：预设换算成实际像素，custom 才用管理员填写的值。 */
+	public static function appearance_config() {
+		$preset = self::size_preset();
+		if ( 'custom' === $preset ) {
+			$width  = self::size_width();
+			$height = self::size_height();
+		} else {
+			$width  = self::SIZE_PRESETS[ $preset ]['width'];
+			$height = self::SIZE_PRESETS[ $preset ]['height'];
+		}
+
+		return array(
+			'preset' => $preset,
+			'width'  => $width,
+			'height' => $height,
+		);
 	}
 
 	/**
@@ -284,6 +348,213 @@ final class L2D_AI_Plugin {
 		return rtrim( strtr( base64_encode( $value ), '+/', '-_' ), '=' );
 	}
 
+	/**
+	 * 把后台的相对路径拼成完整 URL。
+	 *
+	 * `/ai-api` 这种相对地址走 Nginx 反代；也允许管理员直接填完整地址。
+	 * 这里由 WordPress 服务器自己发请求，所以完整地址必须是服务器能访问到的。
+	 */
+	private static function backend_url( $path ) {
+		$base = self::api_base();
+		if ( preg_match( '#^https?://#i', $base ) ) {
+			return untrailingslashit( $base ) . $path;
+		}
+		return home_url( '/' . ltrim( $base, '/' ) . $path );
+	}
+
+	/**
+	 * 后台专用短时 JWT：2 分钟有效，只用于 WordPress 服务器 → Python 后端。
+	 * 浏览器完全接触不到这个 token。
+	 */
+	private static function admin_token() {
+		$secret = self::jwt_secret();
+		if ( is_wp_error( $secret ) ) {
+			return $secret;
+		}
+
+		$user = wp_get_current_user();
+		if ( ! $user instanceof WP_User || ! $user->ID ) {
+			return new WP_Error( 'l2d_ai_no_user', '找不到当前用户', array( 'status' => 401 ) );
+		}
+		if ( ! current_user_can( 'manage_options' ) ) {
+			return new WP_Error( 'l2d_ai_not_admin', '需要管理员权限', array( 'status' => 403 ) );
+		}
+
+		$now   = time();
+		$token = self::encode_jwt(
+			array(
+				'iss'   => self::JWT_ISSUER,
+				'aud'   => self::JWT_AUDIENCE,
+				'sub'   => (string) $user->ID,
+				'name'  => (string) $user->display_name,
+				'admin' => true,
+				'iat'   => $now,
+				'exp'   => $now + self::JWT_ADMIN_TTL,
+				'jti'   => wp_generate_uuid4(),
+			),
+			$secret
+		);
+
+		return $token;
+	}
+
+	/**
+	 * 调用后端接口。成功返回数组，失败返回 WP_Error。
+	 * 错误信息会带上 HTTP 状态码和后端的 detail，方便在设置页直接看到原因。
+	 */
+	private static function request_backend( $method, $path, $body = null ) {
+		$token = self::admin_token();
+		if ( is_wp_error( $token ) ) {
+			return $token;
+		}
+
+		$args = array(
+			'method'  => $method,
+			'timeout' => 8,
+			'headers' => array(
+				'Authorization' => 'Bearer ' . $token,
+				'Accept'        => 'application/json',
+			),
+		);
+		if ( null !== $body ) {
+			$args['headers']['Content-Type'] = 'application/json';
+			$args['body']                    = wp_json_encode( $body );
+		}
+
+		$response = wp_remote_request( self::backend_url( $path ), $args );
+		if ( is_wp_error( $response ) ) {
+			return new WP_Error(
+				'l2d_ai_backend_unreachable',
+				'无法连接 AI 服务：' . $response->get_error_message()
+			);
+		}
+
+		$code = (int) wp_remote_retrieve_response_code( $response );
+		$raw  = (string) wp_remote_retrieve_body( $response );
+		$data = json_decode( $raw, true );
+
+		if ( $code < 200 || $code >= 300 ) {
+			$detail = '';
+			if ( is_array( $data ) && isset( $data['detail'] ) ) {
+				if ( is_string( $data['detail'] ) ) {
+					$detail = $data['detail'];
+				} elseif ( is_array( $data['detail'] ) ) {
+					// Pydantic 的 422 是 [{loc, msg, ...}]，只取可读的 msg。
+					$messages = array();
+					foreach ( $data['detail'] as $item ) {
+						if ( is_array( $item ) && isset( $item['msg'] ) ) {
+							$messages[] = (string) $item['msg'];
+						}
+					}
+					$detail = implode( '；', $messages );
+				}
+			}
+			return new WP_Error(
+				'l2d_ai_backend_error',
+				sprintf( 'AI 服务返回 %d%s', $code, '' !== $detail ? '：' . $detail : '' ),
+				array( 'status' => $code )
+			);
+		}
+
+		if ( ! is_array( $data ) ) {
+			return new WP_Error( 'l2d_ai_backend_json', 'AI 服务返回的内容不是 JSON' );
+		}
+
+		return $data;
+	}
+
+	/** 读取后端当前设置。短缓存 30 秒，避免每次刷新设置页都多打一次后端。 */
+	private static function backend_snapshot( $force = false ) {
+		$cache_key = 'l2d_ai_backend_snapshot_' . md5( self::api_base() );
+		if ( ! $force ) {
+			$cached = get_transient( $cache_key );
+			if ( is_array( $cached ) ) {
+				return $cached;
+			}
+		}
+
+		$data = self::request_backend( 'GET', '/admin/settings' );
+		if ( is_wp_error( $data ) ) {
+			return $data;
+		}
+		set_transient( $cache_key, $data, 30 );
+		return $data;
+	}
+
+	private static function clear_backend_cache() {
+		delete_transient( 'l2d_ai_backend_snapshot_' . md5( self::api_base() ) );
+	}
+
+	private static function notice_key() {
+		return 'l2d_ai_admin_notice_' . get_current_user_id();
+	}
+
+	private static function settings_page_url( array $args = array() ) {
+		return add_query_arg(
+			array_merge( array( 'page' => 'l2d-ai' ), $args ),
+			admin_url( 'options-general.php' )
+		);
+	}
+
+	/**
+	 * 保存后端运营参数。
+	 *
+	 * 表单提交到 admin-post.php，而不是 options.php：
+	 * 这些值不在 WordPress 的 options 表里，而是保存在 Python 后端的 JSON 文件，
+	 * 所以需要 WordPress 服务器自己带 admin JWT 去 PUT。
+	 */
+	public static function save_backend_settings() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( '需要管理员权限', '无权限', array( 'response' => 403 ) );
+		}
+		check_admin_referer( 'l2d_ai_save_backend_settings' );
+
+		// 第一层校验：在 WordPress 这边就给出清楚的中文错误，避免把明显不合法的值送出去。
+		$rules = array(
+			'daily_quota'           => array( 0, 1000 ),
+			'global_daily_quota'    => array( 0, 1000000 ),
+			'agent_max_model_calls' => array( 1, 20 ),
+			'agent_max_tool_calls'  => array( 1, 20 ),
+			'agent_max_seconds'     => array( 5, 300 ),
+		);
+
+		$patch = array();
+		foreach ( $rules as $key => $range ) {
+			$raw = isset( $_POST[ $key ] ) ? trim( (string) wp_unslash( $_POST[ $key ] ) ) : '';
+			if ( '' === $raw || ! preg_match( '/^\d+$/', $raw ) ) {
+				self::redirect_with_error( $key . ' 必须是非负整数' );
+			}
+			$value = (int) $raw;
+			if ( $value < $range[0] || $value > $range[1] ) {
+				self::redirect_with_error(
+					sprintf( '%s 必须在 %d 到 %d 之间', $key, $range[0], $range[1] )
+				);
+			}
+			$patch[ $key ] = $value;
+		}
+
+		$model = isset( $_POST['model'] ) ? trim( (string) wp_unslash( $_POST['model'] ) ) : '';
+		if ( ! preg_match( '/^[A-Za-z0-9._:-]{1,100}$/', $model ) ) {
+			self::redirect_with_error( '模型名只能包含字母、数字、点、下划线、冒号和连字符，最长 100 字符' );
+		}
+		$patch['model'] = $model;
+
+		$result = self::request_backend( 'PUT', '/admin/settings', $patch );
+		if ( is_wp_error( $result ) ) {
+			self::redirect_with_error( $result->get_error_message() );
+		}
+
+		self::clear_backend_cache();
+		wp_safe_redirect( self::settings_page_url( array( 'l2d-ai-saved' => '1' ) ) );
+		exit;
+	}
+
+	private static function redirect_with_error( $message ) {
+		set_transient( self::notice_key(), (string) $message, 60 );
+		wp_safe_redirect( self::settings_page_url() );
+		exit;
+	}
+
 	public static function add_settings_page() {
 		add_options_page(
 			'Live2D 小助手',
@@ -304,15 +575,67 @@ final class L2D_AI_Plugin {
 				'default'           => '/ai-api',
 			)
 		);
+
+		register_setting(
+			self::SETTINGS_GROUP,
+			self::OPTION_SIZE,
+			array(
+				'type'              => 'string',
+				'sanitize_callback' => array( __CLASS__, 'sanitize_size_preset' ),
+				'default'           => 'medium',
+			)
+		);
+
+		register_setting(
+			self::SETTINGS_GROUP,
+			self::OPTION_WIDTH,
+			array(
+				'type'              => 'integer',
+				'sanitize_callback' => array( __CLASS__, 'sanitize_size_width' ),
+				'default'           => 260,
+			)
+		);
+
+		register_setting(
+			self::SETTINGS_GROUP,
+			self::OPTION_HEIGHT,
+			array(
+				'type'              => 'integer',
+				'sanitize_callback' => array( __CLASS__, 'sanitize_size_height' ),
+				'default'           => 460,
+			)
+		);
 	}
 
 	public static function render_settings_page() {
 		if ( ! current_user_can( 'manage_options' ) ) {
 			return;
 		}
+
+		$notice = get_transient( self::notice_key() );
+		if ( $notice ) {
+			delete_transient( self::notice_key() );
+		}
+
+		// “重新读取”链接会带上 l2d-ai-retry，跳过 30 秒缓存。
+		$snapshot = self::backend_snapshot( isset( $_GET['l2d-ai-retry'] ) );
+		$saved    = isset( $_GET['l2d-ai-saved'] ) && '1' === $_GET['l2d-ai-saved'];
 		?>
 		<div class="wrap">
 			<h1>Live2D 小助手</h1>
+
+			<?php if ( $saved ) : ?>
+				<div class="notice notice-success is-dismissible">
+					<p>后端运营参数已保存，立即生效，不需要重启服务。</p>
+				</div>
+			<?php endif; ?>
+
+			<?php if ( $notice ) : ?>
+				<div class="notice notice-error">
+					<p><strong>保存失败：</strong><?php echo esc_html( $notice ); ?></p>
+				</div>
+			<?php endif; ?>
+
 			<form method="post" action="options.php">
 				<?php settings_fields( self::SETTINGS_GROUP ); ?>
 				<table class="form-table" role="presentation">
@@ -336,9 +659,252 @@ final class L2D_AI_Plugin {
 							</p>
 						</td>
 					</tr>
+					<tr>
+						<th scope="row">Live2D 形象大小</th>
+						<td>
+							<select name="<?php echo esc_attr( self::OPTION_SIZE ); ?>" id="l2d-ai-size-preset">
+								<?php
+								$presets = array(
+									'small'  => '小（200 × 360）',
+									'medium' => '中（260 × 460）',
+									'large'  => '大（330 × 600）',
+									'custom' => '自定义',
+								);
+								foreach ( $presets as $value => $label ) :
+									?>
+									<option value="<?php echo esc_attr( $value ); ?>" <?php selected( self::size_preset(), $value ); ?>>
+										<?php echo esc_html( $label ); ?>
+									</option>
+								<?php endforeach; ?>
+							</select>
+							<p class="description">
+								预设档位会覆盖下面的宽高；只有选择“自定义”时才使用手填数值。
+								修改后访客刷新页面即可看到。
+							</p>
+							<p>
+								<label for="l2d-ai-size-width">宽度</label>
+								<input
+									type="number"
+									id="l2d-ai-size-width"
+									name="<?php echo esc_attr( self::OPTION_WIDTH ); ?>"
+									value="<?php echo esc_attr( self::size_width() ); ?>"
+									min="160"
+									max="420"
+									step="1"
+									class="small-text"
+								/>
+								px
+								&nbsp;&nbsp;
+								<label for="l2d-ai-size-height">高度</label>
+								<input
+									type="number"
+									id="l2d-ai-size-height"
+									name="<?php echo esc_attr( self::OPTION_HEIGHT ); ?>"
+									value="<?php echo esc_attr( self::size_height() ); ?>"
+									min="260"
+									max="720"
+									step="1"
+									class="small-text"
+								/>
+								px
+							</p>
+							<p class="description">自定义范围：宽 160–420 px，高 260–720 px。手机端会自动缩小。</p>
+						</td>
+					</tr>
 				</table>
-				<?php submit_button(); ?>
+				<?php submit_button( '保存显示设置' ); ?>
 			</form>
+
+			<hr />
+
+			<h2>聊天额度与运行参数</h2>
+			<?php if ( is_wp_error( $snapshot ) ) : ?>
+				<div class="notice notice-error inline">
+					<p><strong>读取后端设置失败：</strong><?php echo esc_html( $snapshot->get_error_message() ); ?></p>
+				</div>
+				<p class="description">
+					请依次检查：AI 服务地址是否正确、Python 服务是否在运行、
+					<code>L2D_AI_JWT_SECRET</code> 在 <code>wp-config.php</code> 与后端 <code>.env</code> 中是否完全一致。
+				</p>
+				<p>
+					<a class="button" href="<?php echo esc_url( self::settings_page_url( array( 'l2d-ai-retry' => '1' ) ) ); ?>">重新读取</a>
+				</p>
+			<?php else : ?>
+				<?php
+				$settings = isset( $snapshot['settings'] ) && is_array( $snapshot['settings'] ) ? $snapshot['settings'] : array();
+				$defaults = isset( $snapshot['defaults'] ) && is_array( $snapshot['defaults'] ) ? $snapshot['defaults'] : array();
+				$backend  = isset( $snapshot['backend'] ) && is_array( $snapshot['backend'] ) ? $snapshot['backend'] : array();
+
+				$get = static function ( $array, $key, $fallback = '' ) {
+					return array_key_exists( $key, $array ) ? $array[ $key ] : $fallback;
+				};
+				?>
+				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+					<input type="hidden" name="action" value="l2d_ai_save_backend_settings" />
+					<?php wp_nonce_field( 'l2d_ai_save_backend_settings' ); ?>
+					<table class="form-table" role="presentation">
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-daily-quota">普通用户每日额度</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-daily-quota"
+									name="daily_quota"
+									value="<?php echo esc_attr( $get( $settings, 'daily_quota', 0 ) ); ?>"
+									min="0"
+									max="1000"
+									step="1"
+									class="small-text"
+								/>
+								条 / 天
+								<p class="description">
+									每位普通用户每天最多发起多少次聊天；管理员不受限制。
+									设为 <code>0</code> 表示所有人（含普通用户）都不能聊天。当前默认：<?php echo esc_html( $get( $defaults, 'daily_quota', '—' ) ); ?>。
+								</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-global-quota">全站每日总额度</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-global-quota"
+									name="global_daily_quota"
+									value="<?php echo esc_attr( $get( $settings, 'global_daily_quota', 0 ) ); ?>"
+									min="0"
+									max="1000000"
+									step="1"
+									class="small-text"
+								/>
+								条 / 天
+								<p class="description">
+									所有普通用户合计的每日上限，用来防止额度被刷爆；管理员聊天不计入。
+									<strong>设为 <code>0</code> 表示不限制。</strong>
+									当前默认：<?php echo esc_html( $get( $defaults, 'global_daily_quota', '—' ) ); ?>。
+								</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">单次回答内部上限</th>
+							<td>
+								<label for="l2d-ai-model-calls">模型调用</label>
+								<input
+									type="number"
+									id="l2d-ai-model-calls"
+									name="agent_max_model_calls"
+									value="<?php echo esc_attr( $get( $settings, 'agent_max_model_calls', 6 ) ); ?>"
+									min="1"
+									max="20"
+									step="1"
+									class="small-text"
+								/>
+								次
+								&nbsp;&nbsp;
+								<label for="l2d-ai-tool-calls">工具调用</label>
+								<input
+									type="number"
+									id="l2d-ai-tool-calls"
+									name="agent_max_tool_calls"
+									value="<?php echo esc_attr( $get( $settings, 'agent_max_tool_calls', 6 ) ); ?>"
+									min="1"
+									max="20"
+									step="1"
+									class="small-text"
+								/>
+								次
+								<p class="description">
+									防止一次提问触发大量重复工具调用而浪费额度。普通问答通常用不到上限。
+								</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-max-seconds">单次回答超时</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-max-seconds"
+									name="agent_max_seconds"
+									value="<?php echo esc_attr( $get( $settings, 'agent_max_seconds', 60 ) ); ?>"
+									min="5"
+									max="300"
+									step="1"
+									class="small-text"
+								/>
+								秒
+								<p class="description">超过这个时间会中止回答，并退还本次占用的额度。</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-model">DeepSeek 模型名</label>
+							</th>
+							<td>
+								<input
+									type="text"
+									id="l2d-ai-model"
+									name="model"
+									value="<?php echo esc_attr( $get( $settings, 'model', 'deepseek-chat' ) ); ?>"
+									class="regular-text"
+									maxlength="100"
+								/>
+								<p class="description">
+									例如 <code>deepseek-chat</code>。只允许字母、数字、点、下划线、冒号和连字符。
+									保存后只影响新请求，已有的对话不受影响。
+								</p>
+							</td>
+						</tr>
+					</table>
+					<?php submit_button( '保存后端参数' ); ?>
+				</form>
+
+				<h2>只读运行信息</h2>
+				<table class="form-table" role="presentation">
+					<tr>
+						<th scope="row">后端监听端口</th>
+						<td>
+							<code><?php echo esc_html( null === $get( $backend, 'listen_port', null ) ? '未知（仅 Linux 可读取）' : $get( $backend, 'listen_port', '' ) ); ?></code>
+							<p class="description">端口由 systemd 启动参数决定。要修改端口，需要改 systemd 和 Nginx 配置并重启服务。</p>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row">DeepSeek API Key</th>
+						<td>
+							<?php if ( $get( $backend, 'api_key_configured', false ) ) : ?>
+								<span style="color:#1e7b3c;">已配置</span>
+							<?php else : ?>
+								<span style="color:#b32d2e;">未配置</span>（需要在服务器后端的 <code>.env</code> 中填写）
+							<?php endif; ?>
+							<p class="description">出于安全考虑，这里不显示 Key 的内容，也不能在这里修改。</p>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row">演示模式</th>
+						<td>
+							<?php echo $get( $backend, 'mock', false ) ? '开启（返回测试回复，不调用 DeepSeek）' : '关闭'; ?>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row">后端 JWT 密钥</th>
+						<td>
+							<?php if ( $get( $backend, 'jwt_configured', false ) ) : ?>
+								<span style="color:#1e7b3c;">已配置</span>
+							<?php else : ?>
+								<span style="color:#b32d2e;">未配置</span>，聊天接口会拒绝所有请求。
+							<?php endif; ?>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row">额度重置时区</th>
+						<td><code><?php echo esc_html( $get( $backend, 'quota_timezone', 'Asia/Shanghai' ) ); ?></code></td>
+					</tr>
+				</table>
+			<?php endif; ?>
 
 			<h2>登录凭证</h2>
 			<table class="form-table" role="presentation">

@@ -73,8 +73,9 @@ export class Live2DManager {
     if (!bounds.height) return;
 
     model.anchor.set(0.5, 1);
-    // 以 92% 容器高度为基准，按模型自带比例缩放
-    const scale = ((height * 0.92) / bounds.height) * (entry.scale || 1);
+    // 以 86% 容器高度为基准，按模型自带比例缩放。
+    // 留出顶部空间，形象不会顶到浏览器边缘，也更少遮挡正文。
+    const scale = ((height * 0.86) / bounds.height) * (entry.scale || 1);
     model.scale.set(scale);
     model.x = width / 2 + entry.offsetX;
     model.y = height + entry.offsetY;

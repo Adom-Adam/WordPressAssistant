@@ -70,3 +70,18 @@ async def require_user(
             detail=exc.message,
             headers=exc.headers,
         ) from None
+
+
+async def require_admin(user: AuthUser = Depends(require_user)) -> AuthUser:
+    """在“已登录”的基础上再要求管理员身份。
+
+    401 和 403 的区别：
+    - 401：我不知道你是谁（没登录/token 无效）；
+    - 403：我知道你是谁，但你没有这个权限。
+
+    `admin` 来自 WordPress 签发的 JWT，普通用户无法在前端伪造；
+    后端编辑器拿不到这个 claim，也就进不了管理接口。
+    """
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="只有管理员可以修改这些设置")
+    return user

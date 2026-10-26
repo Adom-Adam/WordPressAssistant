@@ -13,8 +13,9 @@
   position: fixed;
   left: 12px;
   bottom: 0;
-  width: clamp(220px, 26vw, 360px);
-  height: clamp(320px, 62vh, 640px);
+  /* WP 后台通过内联 CSS 变量注入尺寸；没有注入时用这套较小的默认值。 */
+  width: var(--l2d-width, clamp(200px, 22vw, 300px));
+  height: var(--l2d-height, clamp(300px, 52vh, 520px));
   z-index: 2147483000;
   pointer-events: none;
   font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, -apple-system, sans-serif;
@@ -189,7 +190,9 @@
   position: absolute;
   left: calc(100% + 6px);
   bottom: 10px;
-  width: 342px;
+  /* 窗口变窄时跟着缩，但不小于 280px；最大仍为 342px。 */
+  width: clamp(280px, 30vw, 342px);
+  max-width: calc(100vw - 24px);
   height: min(520px, 64vh);
   pointer-events: auto;
   display: flex;
@@ -281,6 +284,23 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.l2d-chat__quota {
+  flex: none;
+  margin-left: auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(116, 201, 242, 0.16);
+  color: var(--l2d-sky-700);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.l2d-chat__quota.is-empty {
+  background: rgba(255, 183, 213, 0.22);
+  color: #b0446d;
 }
 
 .l2d-chat__logout {
@@ -415,6 +435,44 @@
 .l2d-bubble.is-error {
   background: #fff0f3;
   color: #a8415f;
+}
+
+/* 代码块：只做纯文本渲染，避免引入 Markdown 解析器的 XSS 风险 */
+.l2d-bubble pre {
+  margin: 8px 0 2px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #24333f;
+  color: #e7f2f8;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.l2d-bubble pre:first-child {
+  margin-top: 0;
+}
+
+.l2d-bubble pre:last-child {
+  margin-bottom: 0;
+}
+
+.l2d-bubble code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* 行内代码 */
+.l2d-bubble :not(pre) > code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(41, 128, 185, 0.1);
+  font-size: 12.5px;
+}
+
+.l2d-msg--user .l2d-bubble :not(pre) > code {
+  background: rgba(255, 255, 255, 0.22);
+  color: inherit;
 }
 
 .l2d-typing {
@@ -703,10 +761,12 @@
 }
 
 /* ---------- 小屏适配 ---------- */
+/* 900px 以下只缩小形象和面板，仍然保持“浮在左下角”的形态。
+   以前这里直接把面板改成 left/right 贴边，导致半屏窗口时几乎占满整屏。 */
 @media (max-width: 900px) {
   .l2d-root {
-    width: min(58vw, 300px);
-    height: min(54vh, 470px);
+    width: min(var(--l2d-width, 260px), 52vw);
+    height: min(var(--l2d-height, 460px), 54vh);
   }
 
   .l2d-dock {
@@ -720,11 +780,20 @@
   }
 
   .l2d-chat {
+    width: min(320px, 46vw);
+    height: min(500px, 60vh);
+  }
+}
+
+/* 真正的手机屏幕才让聊天面板接近全宽——这时也没有侧边正文可挡。 */
+@media (max-width: 560px) {
+  .l2d-chat {
     position: fixed;
     left: 8px;
     right: 8px;
     bottom: 8px;
     width: auto;
+    max-width: none;
     height: 62vh;
     max-height: 540px;
     z-index: 1;
