@@ -159,7 +159,7 @@ curl -fsSL -o frontend/public/live2d/core/live2dcubismcore.min.js \
 server: {
   proxy: {
     '/ai-api': {
-      target: 'http://127.0.0.1:8000',
+      target: 'http://127.0.0.1:18080',
       changeOrigin: true,
       rewrite: (path) => path.replace(/^\/ai-api/, '/api'),
     },
@@ -361,7 +361,7 @@ cp .env.example .env
 启动：
 
 ```bash
-uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
+uv run uvicorn app.main:app --host 127.0.0.1 --port 18080
 ```
 
 > 本次机器上本来就存在 `DEEPSEEK_API_KEY` 环境变量，所以没有创建 `.env`
@@ -440,7 +440,7 @@ if ( ! is_readable( $app_dir . 'app.js' ) ) {
 ### 6.1 健康检查
 
 ```bash
-curl -s http://127.0.0.1:8000/api/health
+curl -s http://127.0.0.1:18080/api/health
 ```
 
 ```json
@@ -454,7 +454,7 @@ curl -s http://127.0.0.1:8000/api/health
 直接内联中文 JSON：
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/chat \
+curl -X POST http://127.0.0.1:18080/api/chat \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"你好"}]}'
 ```
@@ -469,7 +469,7 @@ curl -X POST http://127.0.0.1:8000/api/chat \
 
 ```bash
 printf '%s' '{"messages":[{"role":"user","content":"hello"}]}' > /tmp/payload.json
-curl -sN -X POST http://127.0.0.1:8000/api/chat \
+curl -sN -X POST http://127.0.0.1:18080/api/chat \
   -H "Content-Type: application/json" \
   --data-binary @/tmp/payload.json
 ```
@@ -578,21 +578,21 @@ gen = event_stream()   # 此刻什么都不执行，只是创建生成器对象
 第一次用 shell 后台方式启动：
 
 ```bash
-(uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 &)
+(uv run uvicorn app.main:app --host 127.0.0.1 --port 18080 &)
 ```
 
 它虽然能跑，但脱离管理，后续再启一个会报端口占用（uvicorn 退出码 3）。
 正确做法是让工具托管后台进程；如果已经残留，先查再杀：
 
 ```bash
-netstat -ano | grep ":8000"
+netstat -ano | grep ":18080"
 cmd //c "taskkill /PID 40652 /F"
 ```
 
 然后重新启动后端与前端：
 
 ```bash
-cd backend && uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
+cd backend && uv run uvicorn app.main:app --host 127.0.0.1 --port 18080
 cd frontend && pnpm dev --host 127.0.0.1
 ```
 
@@ -600,7 +600,7 @@ cd frontend && pnpm dev --host 127.0.0.1
 
 ```bash
 for i in $(seq 1 25); do
-  h=$(curl -s --max-time 2 http://127.0.0.1:8000/api/health)
+  h=$(curl -s --max-time 2 http://127.0.0.1:18080/api/health)
   f=$(curl -s --max-time 2 http://127.0.0.1:5173/ | head -c 60)
   if [ -n "$h" ] && [ -n "$f" ]; then echo "backend: $h"; echo "frontend: $f"; break; fi
   sleep 1
@@ -632,15 +632,15 @@ scp -r wordpress-plugin/wp-live2d-ai \
 cd /www/wwwroot/l2d-ai-backend
 cp .env.example .env && vi .env      # 填 DEEPSEEK_API_KEY
 uv sync
-uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
+uv run uvicorn app.main:app --host 127.0.0.1 --port 18080
 ```
 
-生产用 systemd 托管，Nginx 把 `/ai-api/` 反代到 `127.0.0.1:8000/api/`，
+生产用 systemd 托管，Nginx 把 `/ai-api/` 反代到 `127.0.0.1:18080/api/`，
 并**必须关闭缓冲**，否则流式回复会变成一次性输出：
 
 ```nginx
 location /ai-api/ {
-    proxy_pass http://127.0.0.1:8000/api/;
+    proxy_pass http://127.0.0.1:18080/api/;
     proxy_http_version 1.1;
     proxy_set_header Connection "";
     proxy_buffering off;
@@ -765,7 +765,7 @@ pathlib.Path('data/req.json').write_text(
 )
 EOF
 
-curl -sN -X POST http://127.0.0.1:8000/api/chat \
+curl -sN -X POST http://127.0.0.1:18080/api/chat \
   -H 'Content-Type: application/json' --data-binary @data/req.json
 ```
 
@@ -788,7 +788,211 @@ curl -sN -X POST http://127.0.0.1:8000/api/chat \
 
 ---
 
-## 10. 踩坑速查表
+## 10. 注册、登录与邮件：先用 WordPress 原生能力
+
+这一节先解决“怎么让访客有账号”。结论先说：
+
+- 注册、登录、找回密码、菜单入口、发邮件，**WordPress 原生功能 + 插件设置**就能完成，不需要改 Argon 主题；
+- 但“小助手知道当前用户是谁、按用户扣每日额度、管理员不限量”**需要写代码**，放在我们自己的插件和后端里。
+
+### 10.1 先分清：哪些点几下就行，哪些要写代码
+
+| 需求 | 做法 | 需要写代码吗 |
+| --- | --- | --- |
+| 开启注册 | 后台「设置 → 常规 → 会员资格」 | 否 |
+| 登录 / 注册 / 找回密码页面 | WordPress 自带的 `/wp-login.php` | 否 |
+| 导航栏的「登录」「注册」入口 | 「外观 → 菜单」添加自定义链接 | 否 |
+| 发送注册通知、重置密码邮件 | 安装 SMTP 插件 | 否 |
+| 注册验证码 / 防刷 | 验证码插件 + 限流 | 否（少量配置） |
+| 小助手显示登录态、登录后回到当前文章 | 插件把 `wp_login_url()` 等注入前端 | 是 |
+| 聊天前校验登录、每日额度、管理员不限量 | 插件签发短期 JWT + Python 校验 + SQLite 计数 | 是 |
+| WordPress 后台配置模型、额度、API Key | 扩展现有设置页 + 后端管理接口 | 是 |
+
+先做前五行，网站就已经具备“注册/登录/发邮件”的完整能力；后三行才是小助手专属的接入工作。
+
+### 10.2 开启注册（后台点选即可）
+
+1. 用管理员账号进入 WordPress 后台；
+2. 打开 **设置 → 常规 → 会员资格**，勾选“任何人都可以注册”；
+3. 「新用户默认角色」选择 **订阅者（Subscriber）**；
+4. 保存；
+5. 退出登录，在隐身窗口打开
+   `https://你的域名/wp-login.php?action=register` 测试。
+
+注意：
+
+- 如果注册页提示“注册已关闭”，先检查上面的会员资格是否保存成功，再检查缓存插件是否缓存了旧页面；
+- 开放公开注册前，建议同时准备邮箱验证或验证码，否则很容易收到垃圾账号；
+- 管理员账号仍然是 WordPress 的 Administrator，不需要另建一套“AI 管理员”账号。
+
+### 10.3 SMTP 是什么？为什么后台找不到
+
+SMTP（Simple Mail Transfer Protocol）是“发邮件”用的协议。WordPress 核心默认调用 PHP 的 `mail()`，
+**没有内置 SMTP 设置页**，所以在「设置」里找不到是正常的。
+
+问题在于：云服务器上的 PHP `mail()` 经常发不出信，或者直接被判为垃圾邮件。
+例如阿里云默认限制出站 25 端口，而 25 正是传统 SMTP 端口。表现就是：
+
+- 用户注册成功，但收不到通知；
+- 用户点“忘记密码”，收不到重置邮件；
+- 评论通知、联系表单也静默失败。
+
+解决办法是安装一个 SMTP 插件，把 WordPress 的发信动作交给真实的邮箱服务。常见选择：
+
+- **WP Mail SMTP**：向导清晰，用户最多；
+- **FluentSMTP**：免费、轻量；
+- **Post SMTP**：日志和排错信息比较直观。
+
+任选一个即可，不要同时装多个。配置项通常只有这些：
+
+| 配置项 | 填什么 |
+| --- | --- |
+| From Email / 发件邮箱 | 你的真实邮箱，例如 `noreply@yourdomain.com` |
+| SMTP Host | 邮件服务商给的服务器，例如 QQ 邮箱 `smtp.qq.com` |
+| SMTP Port | 优先 `465`（SSL）；`587`（TLS）也可以 |
+| Encryption | `SSL`（465）或 `TLS`（587） |
+| Authentication | 开启 |
+| Username | 通常是完整邮箱地址 |
+| Password | **邮箱授权码 / SMTP 专用密码，不是网页登录密码** |
+
+国内个人博客比较省事的测试方式：
+
+| 服务 | SMTP 主机 | 端口 / 加密 | 密码 |
+| --- | --- | --- | --- |
+| QQ 邮箱 | `smtp.qq.com` | `465` / SSL | 在 QQ 邮箱设置里生成的“授权码” |
+| 163 邮箱 | `smtp.163.com` | `465` / SSL | 在邮箱设置里生成的“授权码” |
+| 阿里云邮件推送 | `smtpdm.aliyun.com` | `465` / SSL | 发信地址对应的 SMTP 密码 |
+
+上面这些个人邮箱适合先做连通性测试。如果希望**长期免费、额度每天刷新**，可以选：
+
+| 服务 | 免费额度 | 重置方式 | 说明 |
+| --- | --- | --- | --- |
+| Brevo | 300 封/天 | 每天 00:00 UTC（北京时间 08:00） | 事务邮件和营销邮件共用额度；免费版带 “Sent with Brevo” 签名；需要验证发件域名；WP Mail SMTP 免费版支持 |
+| SMTP2GO | 200 封/天、1,000 封/月 | 每天 / 按注册日滚动每月 | 未验证域名时还有 25 封/小时限制；超出日额度会排队 |
+| Resend | 100 封/天、3,000 封/月 | 每天 UTC | SMTP 主机 `smtp.resend.com`，端口 `465`/`587`，用户名 `resend`，密码是 API Key；适合低量站点 |
+
+对个人博客来说，**WP Mail SMTP 免费版 + Brevo 免费 300 封/天** 通常就够用。
+注册 Brevo 后要先在控制台验证发件域名（加 DNS 的 SPF/DKIM 记录），
+否则通常只能发到你自己的验证邮箱，不能给任意注册用户发信。
+新账号如果提示不能发送事务邮件，按控制台提示开工单开通即可。
+
+WP Mail SMTP 插件本身也有免费版和 Pro 版：
+
+- **免费版**：Setup Wizard、测试邮件、From 地址覆盖、Brevo/Resend/SMTP2GO/Other SMTP 等集成；
+- **Pro 版**：邮件日志、重发、失败告警、备用连接、统计、限流、多站点等；
+- 公开信息显示 Pro 首年约 `$49`，续费约 `$99/年`（1 个站点），价格会调整，以官网为准。
+
+注意：**收费的是插件 Pro 版，不是发信服务本身**。免费插件 + 免费 SMTP 额度可以长期零成本使用；
+免费版没有邮件日志，排错时要靠插件测试邮件、收件箱垃圾箱和服务器日志。
+
+如果不想为“邮件日志、重发”买 Pro，可以换 **FluentSMTP**：它本身完全免费，
+自带邮件日志、重发和失败记录，也支持 Brevo、SMTP2GO 和任意 SMTP。
+WP Mail SMTP 和 FluentSMTP **二选一**，不要同时启用，否则两个插件都会接管 `wp_mail()`。
+
+配置完成后一定要点插件里的 **Send Test Email**，并用另一个邮箱查收（也检查垃圾箱）。
+如果测试失败，优先检查：
+
+1. 密码是不是授权码，而不是邮箱登录密码；
+2. 端口是否用了被云厂商限制的 `25`；
+3. 发件地址是否与认证账号一致（QQ/163 尤其严格）；
+4. 服务器能不能出站访问 `465` 端口；
+5. 域名 SPF/DKIM 是否配置（正式群发时重要，个人测试可后补）。
+
+> 没有可用的 SMTP 之前，不建议开放公开注册。否则用户注册后无法找回密码，体验会很差。
+
+### 10.4 在 Argon 导航菜单加入口（不需要代码）
+
+Argon 的导航仍然使用 WordPress 的菜单系统，不需要改主题文件。操作顺序：
+
+1. 后台打开 **外观 → 菜单**；
+2. 如果没有菜单，点“创建新菜单”，命名例如“顶部导航”；
+3. 在左侧展开 **自定义链接**，添加两项：
+   - 登录：`https://你的域名/wp-login.php`
+   - 注册：`https://你的域名/wp-login.php?action=register`
+4. 在“显示位置”里勾选 Argon 的 **顶部导航**（想放左侧栏就勾 **左侧栏菜单**）；
+5. 保存菜单，清除缓存，用隐身窗口检查。
+
+这台服务器上的 Argon 1.3.5 在主题 `functions.php` 里注册了四个菜单位置：
+
+```text
+顶部导航            toolbar_menu
+左侧栏菜单          leftbar_menu
+左侧栏作者个人链接   leftbar_author_links
+左侧栏友情链接       leftbar_friend_links
+```
+
+登录/注册入口放在 **顶部导航** 最显眼。注意：
+**Argon 主题选项里的“顶栏”设置只控制导航栏样式，不会替你添加菜单项**；
+菜单项仍然要在「外观 → 菜单」里加。Argon 1.3.5 本身也没有输出
+`wp_login_url()` / `wp_registration_url()` 的登录按钮，所以这两个入口需要手动加，
+或者以后由我们的插件动态输出。
+
+几个容易踩的点：
+
+- **登录后默认会进 wp-admin**。如果希望登录后回到当前文章，链接必须由代码动态生成：
+  `wp_login_url( get_permalink() )`。静态菜单链接做不到“知道当前页面”。
+- **菜单项不会自动隐藏**。WordPress 原生菜单没有“登录后隐藏登录按钮”的逻辑；
+  需要条件显示时，要么装菜单可见性插件，要么由我们自己的插件输出。
+- **不要手写退出链接**。`wp-login.php?action=logout` 需要 nonce；
+  正确做法是用 `wp_logout_url( get_permalink() )` 生成。
+- 如果 Argon 主题本身已经在页头提供登录/注册按钮，就优先使用主题入口，不要重复添加。
+- 不要在 `header.php` 里直接改代码；主题升级会覆盖，正确位置是插件或子主题。
+
+### 10.5 哪些地方必须接代码
+
+当前插件只做三件事：加载前端资源、注入 AI 服务地址、提供设置页。它**还不会读取登录态**。
+下一步会新增：
+
+1. **插件令牌接口** `POST /wp-json/l2d-ai/v1/token`
+   - 用 WordPress 登录 Cookie + `X-WP-Nonce` 校验；
+   - 返回短期 JWT，包含用户 ID、显示名、是否管理员、过期时间；
+   - 未登录返回 401，并设置 `Cache-Control: no-store`。
+2. **前端配置**
+   - 注入 `loginUrl`、`registerUrl`、`logoutUrl`、当前用户和 nonce；
+   - 助手面板据此显示“登录后可聊天”或“剩余次数”。
+3. **Python 后端**
+   - 校验 JWT；
+   - 游客拒绝聊天；
+   - 普通用户按 WordPress 用户 ID 扣每日额度；
+   - 管理员绕过额度；
+   - 额度在 SQLite 里用事务原子扣减。
+4. **WordPress 后台设置页**
+   - 模型、单用户每日额度、全局每日额度、API Key、测试连接；
+   - API Key 只写不读，不回显到 HTML/JavaScript；
+   - 后端端口只读显示 `18080`，避免后台改端口后服务失联。
+
+插件里最终会用到的 WordPress 原生函数大致是：
+
+```php
+$login_url    = wp_login_url( get_permalink() ); // 登录后回到当前文章
+$register_url = wp_registration_url();           // 注册是否开放由后台设置决定
+$logout_url   = wp_logout_url( get_permalink() ); // 自动带 nonce
+```
+
+这些链接由 WordPress 生成，比在菜单里手写 URL 可靠。等接入登录态时，
+优先让插件生成，再传给前端，而不是让前端自己拼。
+
+### 10.6 上线顺序与安全检查
+
+建议按这个顺序做，出问题时容易定位：
+
+1. 备份 WordPress 数据库和 `wp-content`；
+2. 开启注册，设置订阅者角色；
+3. 安装并测试 SMTP，确认能收到测试邮件；
+4. 添加菜单入口，用隐身窗口测试登录、注册、找回密码；
+5. 再接入 JWT、额度和管理员设置页；
+6. 最后才考虑公开宣传注册入口。
+
+另外注意：
+
+- 页面缓存要排除 `/wp-login.php`、`/wp-json/l2d-ai/v1/token` 和 `/ai-api/`；
+- 开放注册后至少加验证码/邮箱验证，并给登录、注册接口限流；
+- API Key 不写进 WordPress options，也不下发浏览器；
+- 每日额度必须由 Python 后端判断，前端显示的剩余次数只是提示。
+
+---
+
+## 11. 踩坑速查表
 
 | 报错 / 现象 | 原因 | 解决 |
 | --- | --- | --- |
@@ -797,7 +1001,7 @@ curl -sN -X POST http://127.0.0.1:8000/api/chat \
 | `uv sync` 超时 | 直连 PyPI 慢 | `UV_DEFAULT_INDEX=清华镜像 uv sync` |
 | 构建后没有 `app.css` | Vite 把 CSS 内联进 JS | `build.cssCodeSplit: false` |
 | `There was an error parsing the body` | Git Bash 内联中文编码 | 用文件 + `--data-binary @file` |
-| 后端重启退出码 3 | 8000 端口被残留进程占用 | `netstat -ano` 找到 PID 后结束 |
+| 后端重启退出码 3 | 18080 端口被残留进程占用 | `netstat -ano` 找到 PID 后结束 |
 | 回复不是逐字出现 | Nginx/CDN 缓冲了 SSE | `proxy_buffering off` + `Connection ""` |
 | 页面没有小人 | 插件未启用 / 没上传构建产物 | 检查 `assets/app/app.js` 是否存在 |
 | 有按钮没形象 | `manifest.json` 为空或模型 404 | 确认 `.model3.json` 路径与 Cubism 版本 |
@@ -813,7 +1017,7 @@ curl -sN -X POST http://127.0.0.1:8000/api/chat \
 
 ---
 
-## 11. 一次性命令清单（新机器复现）
+## 12. 一次性命令清单（新机器复现）
 
 ```bash
 # 1. 克隆
@@ -835,19 +1039,19 @@ cd ../backend
 UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple uv sync
 cp .env.example .env                 # 填 DEEPSEEK_API_KEY 和 WP_SITE_URL
 uv run python -m app.kb.sync         # 建知识库索引（发布新文章后重跑）
-uv run uvicorn app.main:app --reload --port 8000
+uv run uvicorn app.main:app --reload --port 18080
 
 # 4. 前端开发
 cd ../frontend
 pnpm dev
 
 # 5. 验证
-curl -s http://127.0.0.1:8000/api/health
+curl -s http://127.0.0.1:18080/api/health
 ```
 
 ---
 
-## 12. 设计说明：为什么这么做
+## 13. 设计说明：为什么这么做
 
 | 决策 | 原因 |
 | --- | --- |

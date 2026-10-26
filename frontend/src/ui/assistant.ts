@@ -1,4 +1,5 @@
-import { streamChat } from '../api/chat';
+import { AuthError, getAuthToken, resetAuthToken } from '../api/auth';
+import { ChatHttpError, streamChat } from '../api/chat';
 import type { AssistantConfig } from '../config';
 // 只导入类型，不产生运行时 import。
 // Live2D 管理器依赖 Cubism Core，如果 Core 没加载，静态导入会在模块求值阶段
@@ -39,7 +40,19 @@ const TEMPLATE = `
         </div>
         <button type="button" class="l2d-chat__close" data-action="close" aria-label="收起对话" title="收起">${ICON.close}</button>
       </header>
+      <div class="l2d-chat__userbar" hidden>
+        <span class="l2d-chat__user"></span>
+        <a class="l2d-chat__logout" href="#" rel="nofollow">退出</a>
+      </div>
       <div class="l2d-chat__messages" role="log" aria-live="polite"></div>
+      <div class="l2d-gate" hidden>
+        <div class="l2d-gate__title">登录后就能聊天啦</div>
+        <p class="l2d-gate__text">用博客账号登录后，就能和我聊天啦～</p>
+        <div class="l2d-gate__actions">
+          <a class="l2d-gate__btn l2d-gate__btn--primary" data-auth="login" href="#">去登录</a>
+          <a class="l2d-gate__btn" data-auth="register" href="#" hidden>注册账号</a>
+        </div>
+      </div>
       <form class="l2d-chat__form">
         <textarea class="l2d-chat__input" rows="1" placeholder="问我站内的问题吧～" aria-label="输入消息"></textarea>
         <button type="submit" class="l2d-chat__send" aria-label="发送" title="发送">${ICON.send}</button>
@@ -78,6 +91,13 @@ export class AssistantApp {
   private readonly canvas: HTMLCanvasElement;
   private readonly chatPanel: HTMLElement;
   private readonly messagesEl: HTMLElement;
+  private readonly form: HTMLFormElement;
+  private readonly userbar: HTMLElement;
+  private readonly userLabel: HTMLElement;
+  private readonly logoutLink: HTMLAnchorElement;
+  private readonly gate: HTMLElement;
+  private readonly gateLogin: HTMLAnchorElement;
+  private readonly gateRegister: HTMLAnchorElement;
   private readonly input: HTMLTextAreaElement;
   private readonly sendBtn: HTMLButtonElement;
   private readonly modelsBtn: HTMLButtonElement;
@@ -114,6 +134,13 @@ export class AssistantApp {
     this.canvas = must<HTMLCanvasElement>(this.root, '.l2d-canvas');
     this.chatPanel = must(this.root, '.l2d-chat');
     this.messagesEl = must(this.root, '.l2d-chat__messages');
+    this.form = must<HTMLFormElement>(this.root, '.l2d-chat__form');
+    this.userbar = must(this.root, '.l2d-chat__userbar');
+    this.userLabel = must(this.root, '.l2d-chat__user');
+    this.logoutLink = must<HTMLAnchorElement>(this.root, '.l2d-chat__logout');
+    this.gate = must(this.root, '.l2d-gate');
+    this.gateLogin = must<HTMLAnchorElement>(this.root, '[data-auth="login"]');
+    this.gateRegister = must<HTMLAnchorElement>(this.root, '[data-auth="register"]');
     this.input = must<HTMLTextAreaElement>(this.root, '.l2d-chat__input');
     this.sendBtn = must<HTMLButtonElement>(this.root, '.l2d-chat__send');
     this.modelsBtn = must<HTMLButtonElement>(this.root, '[data-action="models"]');
@@ -123,6 +150,7 @@ export class AssistantApp {
     this.modelList = must(this.root, '.l2d-model-menu__list');
     this.toast = must(this.root, '.l2d-toast');
 
+    this.applyAuthState();
     this.bindEvents();
   }
 
@@ -139,6 +167,38 @@ export class AssistantApp {
     }
   }
 
+  /**
+   * 根据登录态切换界面：
+   * - 访客且要求登录：隐藏消息区和输入框，显示登录引导；
+   * - 已登录：显示用户名和退出链接，正常聊天；
+   * - 本地开发（没有 tokenUrl）：保持原来的纯聊天界面。
+   */
+  private applyAuthState(): void {
+    const { auth } = this.config;
+    const blocked = this.authBlocked();
+    const showUser = Boolean(auth.tokenUrl) && auth.loggedIn;
+
+    this.userbar.hidden = !showUser;
+    if (showUser) {
+      const name = auth.user?.name || '已登录';
+      this.userLabel.textContent = auth.user?.isAdmin ? `${name} · 管理员` : name;
+      this.logoutLink.href = auth.logoutUrl || '/wp-login.php?action=logout';
+    }
+
+    this.gate.hidden = !blocked;
+    this.messagesEl.hidden = blocked;
+    this.form.hidden = blocked;
+    if (blocked) {
+      this.gateLogin.href = auth.loginUrl || '/wp-login.php';
+      this.gateRegister.hidden = !auth.registerUrl;
+      if (auth.registerUrl) this.gateRegister.href = auth.registerUrl;
+    }
+  }
+
+  private authBlocked(): boolean {
+    return this.config.auth.required && !this.config.auth.loggedIn;
+  }
+
   private bindEvents(): void {
     this.modelsBtn.addEventListener('click', () => this.toggleModelMenu());
     this.chatBtn.addEventListener('click', () => this.toggleChat());
@@ -153,7 +213,7 @@ export class AssistantApp {
       }
     });
 
-    must<HTMLFormElement>(this.root, '.l2d-chat__form').addEventListener('submit', (event) => {
+    this.form.addEventListener('submit', (event) => {
       event.preventDefault();
       void this.send();
     });
@@ -252,7 +312,7 @@ export class AssistantApp {
     this.root.classList.add('is-chat-open');
     this.chatBtn.classList.add('is-active');
     this.chatPanel.classList.remove('l2d-chat--closing');
-    this.input.focus();
+    if (!this.authBlocked()) this.input.focus();
     this.scrollToBottom(true);
   }
 
@@ -265,8 +325,29 @@ export class AssistantApp {
 
   private async send(): Promise<void> {
     if (this.busy) return;
+    if (this.authBlocked()) {
+      this.showToast('登录后就能和我聊天啦～', 4000);
+      return;
+    }
+
     const text = this.input.value.trim();
     if (!text) return;
+
+    // 先拿到 token，再清空输入框、插入消息。
+    // 反过来做的话，凭证失败时用户会看到自己的话已经发出去了，却没有任何回复。
+    let token: string | null = null;
+    try {
+      token = await getAuthToken(this.config.auth);
+    } catch (error) {
+      console.error('[l2d-ai] 获取登录凭证失败', error);
+      this.showToast(
+        error instanceof AuthError ? error.message : '暂时无法确认登录状态，稍后再试～',
+        6000,
+      );
+      return;
+    }
+    // 等 token 的时间里，可能已经有一条消息在发送了。
+    if (this.busy) return;
 
     this.input.value = '';
     this.autoGrowInput();
@@ -313,7 +394,7 @@ export class AssistantApp {
             this.scrollToBottom(true);
           },
         }),
-        this.abort.signal,
+        { token, signal: this.abort.signal },
       );
       typing.remove();
       if (!answer && !failed) {
@@ -325,7 +406,12 @@ export class AssistantApp {
       typing.remove();
       console.error('[l2d-ai] 对话失败', error);
       bubble.classList.add('is-error');
-      bubble.textContent = '呜…我这边连接不上后端。检查一下 AI 服务是否启动了好不好？';
+      if (error instanceof ChatHttpError && (error.status === 401 || error.status === 403)) {
+        resetAuthToken();
+        bubble.textContent = '登录状态过期了，刷新一下页面再和我聊天吧～';
+      } else {
+        bubble.textContent = '呜…我这边连接不上后端。检查一下 AI 服务是否启动了好不好？';
+      }
     } finally {
       this.abort = null;
       this.busy = false;
@@ -574,6 +660,11 @@ export class AssistantApp {
   private toggleVoice(): void {
     if (this.listening) {
       this.recognition?.stop();
+      return;
+    }
+    if (this.authBlocked()) {
+      this.openChat();
+      this.showToast('登录后就能用语音啦～', 4000);
       return;
     }
     if (this.voiceUnsupported) {

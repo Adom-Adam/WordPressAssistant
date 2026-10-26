@@ -6,6 +6,23 @@ export interface ChatPayload {
   pageTitle?: string;
 }
 
+export interface ChatOptions {
+  /** WordPress 换来的 JWT；为空时不带 Authorization 头（本地开发）。 */
+  token?: string | null;
+  signal?: AbortSignal;
+}
+
+/** 后端返回非 2xx 时抛出，带着状态码方便上层区分“登录过期”和“服务没开”。 */
+export class ChatHttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = 'ChatHttpError';
+  }
+}
+
 /**
  * 以 SSE 方式读取后端流式回复。
  * 后端每个事件是一行 `data: {...}\n\n`。
@@ -14,18 +31,25 @@ export async function streamChat(
   apiBase: string,
   payload: ChatPayload,
   onEvent: (event: StreamEvent) => void,
-  signal?: AbortSignal,
+  options: ChatOptions = {},
 ): Promise<void> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+
   const response = await fetch(`${apiBase}/chat`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(payload),
-    signal,
+    signal: options.signal,
   });
 
   if (!response.ok) {
-    const detail = await response.text().catch(() => '');
-    throw new Error(`请求失败（${response.status}）${detail ? `：${detail.slice(0, 200)}` : ''}`);
+    const raw = await response.text().catch(() => '');
+    const detail = extractDetail(raw);
+    throw new ChatHttpError(
+      `请求失败（${response.status}）${detail ? `：${detail.slice(0, 200)}` : ''}`,
+      response.status,
+    );
   }
   if (!response.body) {
     throw new Error('当前浏览器不支持流式响应');
@@ -51,6 +75,22 @@ export async function streamChat(
 
   const tail = buffer.trim();
   if (tail) dispatchBlock(tail, onEvent);
+}
+
+/**
+ * FastAPI 的错误是 `{"detail": "..."}`，插件的错误是 `{"message": "..."}`。
+ * 能解析出文字就用文字，否则退回原始响应。
+ */
+function extractDetail(raw: string): string {
+  if (!raw) return '';
+  try {
+    const data = JSON.parse(raw) as { detail?: unknown; message?: unknown };
+    if (typeof data.detail === 'string') return data.detail;
+    if (typeof data.message === 'string') return data.message;
+  } catch {
+    // 不是 JSON，直接用原文
+  }
+  return raw;
 }
 
 function dispatchBlock(block: string, onEvent: (event: StreamEvent) => void): void {

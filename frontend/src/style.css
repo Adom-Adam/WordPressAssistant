@@ -261,6 +261,101 @@
   height: 18px;
 }
 
+/* ---------- 登录态 ---------- */
+/* 已登录时在标题下显示一行很轻的用户信息，不抢对话的视觉重心。 */
+.l2d-chat__userbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 14px 6px;
+  border-bottom: 1px solid rgba(200, 236, 255, 0.7);
+  background: rgba(244, 251, 255, 0.7);
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: #6b8fa1;
+}
+
+.l2d-chat__user {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.l2d-chat__logout {
+  flex: none;
+  color: var(--l2d-sky-600);
+  text-decoration: none;
+}
+
+.l2d-chat__logout:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* 访客看到的登录引导：占据消息区的位置，输入框同时隐藏。 */
+.l2d-gate {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 20px;
+  text-align: center;
+}
+
+.l2d-gate__title {
+  color: var(--l2d-sky-700);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.l2d-gate__text {
+  margin: 0;
+  color: #6b8fa1;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.l2d-gate__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 3px;
+}
+
+.l2d-gate__btn {
+  display: inline-block;
+  padding: 8px 16px;
+  border: 1px solid var(--l2d-sky-200);
+  border-radius: 999px;
+  background: #ffffff;
+  color: var(--l2d-sky-600);
+  font-size: 12.5px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background 0.15s ease, filter 0.15s ease;
+}
+
+.l2d-gate__btn:hover {
+  background: var(--l2d-sky-50);
+}
+
+.l2d-gate__btn--primary {
+  border-color: transparent;
+  background: linear-gradient(160deg, var(--l2d-sky-300), var(--l2d-sky-500));
+  color: #ffffff;
+  box-shadow: 0 6px 14px rgba(67, 169, 223, 0.28);
+}
+
+.l2d-gate__btn--primary:hover {
+  background: linear-gradient(160deg, var(--l2d-sky-300), var(--l2d-sky-500));
+  filter: brightness(1.05);
+}
+
 .l2d-chat__messages {
   flex: 1;
   overflow-y: auto;

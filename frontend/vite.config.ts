@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite';
 
 /**
- * 开发时：前端 5173，后端 8000，/ai-api 代理到 /api。
+ * 开发时：前端 5173，后端 18080，/ai-api 代理到 /api。
  * 构建时：输出到 WordPress 插件的 assets/app，供插件直接 enqueue。
  */
 export default defineConfig({
@@ -10,7 +10,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/ai-api': {
-        target: 'http://127.0.0.1:8000',
+        target: 'http://127.0.0.1:18080',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/ai-api/, '/api'),
       },

@@ -2,15 +2,15 @@
 
 启动方式（在 backend/ 目录下）：
 
-    uv run uvicorn app.main:app --reload --port 8000
+    uv run uvicorn app.main:app --reload --port 18080
 
 - `app.main` 是模块路径（app/main.py）；
 - `app`    是模块里的 FastAPI 实例；
 - `--reload` 只在开发时用，代码改动后自动重启（不要用于生产）。
 
 启动后可访问：
-- http://127.0.0.1:8000/docs     自动生成的交互式 API 文档
-- http://127.0.0.1:8000/api/health  健康检查
+- http://127.0.0.1:18080/docs     自动生成的交互式 API 文档
+- http://127.0.0.1:18080/api/health  健康检查
 """
 
 import logging
@@ -38,7 +38,7 @@ app = FastAPI(
 )
 
 # CORS（跨域资源共享）中间件。
-# 浏览器里 5173 端口的前端访问 8000 端口的后端属于“跨域”，
+# 浏览器里 5173 端口的前端访问 18080 端口的后端属于“跨域”，
 # 没有这个中间件，浏览器会拦截响应。
 # 生产环境用 Nginx 同域反代 /ai-api 时，其实不会触发跨域；
 # 这里的白名单主要服务本地开发，避免使用 "*" 放开所有来源。

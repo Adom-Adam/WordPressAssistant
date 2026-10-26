@@ -21,8 +21,9 @@
 | [wordpress-plugin/wp-live2d-ai/](wordpress-plugin/wp-live2d-ai/) | WordPress 插件：加载构建产物、注入配置、设置页 |
 | [docs/architecture.md](docs/architecture.md) | 技术架构与知识库/工具设计 |
 | [docs/knowledge-base.md](docs/knowledge-base.md) | 知识库原理：FTS5、中文分词、图片理解、检索与引用 |
-| [docs/tutorial.md](docs/tutorial.md) | 教学教程：全部命令、搭建顺序与踩坑记录 |
-| [docs/deploy.md](docs/deploy.md) | 部署到阿里云服务器（宝塔 + Nginx + systemd） |
+| [docs/tutorial.md](docs/tutorial.md) | 教学教程：全部命令、搭建顺序、注册/登录/SMTP 与踩坑记录 |
+| [docs/deploy.md](docs/deploy.md) | 部署概览（简版：宝塔 + Nginx + systemd） |
+| [docs/deployment-walkthrough.md](docs/deployment-walkthrough.md) | **从零部署实操**：服务器手动设置清单、JWT 密钥对齐、systemd/Nginx、插件上传与验证、排查 |
 
 ## Live2D 模型放哪里
 
@@ -56,13 +57,34 @@ frontend/public/live2d/models/
 
 需要：Node 20+、pnpm、Python 3.11+、uv。
 
+### Windows 一键启动
+
+双击根目录的 `dev.bat` 即可启动后端和前端、等待健康检查通过并打开浏览器。
+第一次使用如果缺少 `backend/.env`，脚本会从 `.env.example` 复制一份。
+
+也可以带参数使用：
+
+```bat
+dev.bat            :: 启动前后端
+dev.bat menu       :: 打开菜单（同步知识库、构建插件、安装依赖等）
+dev.bat backend    :: 只启动后端
+dev.bat frontend   :: 只启动前端
+dev.bat sync       :: 同步知识库，可加 --no-vision
+dev.bat build      :: 构建 WordPress 插件资源
+dev.bat install    :: 安装 / 更新依赖
+dev.bat doctor     :: 检查 uv、pnpm、.env、索引和端口
+```
+
+> 中文界面由 `scripts/dev.ps1` 输出；`dev.bat` 只负责设置 UTF-8 代码页并调用它。
+> 两个服务会各自打开一个命令行窗口，关闭窗口即可停止服务。
+
 **1. 后端**
 
 ```bash
 cd backend
 cp .env.example .env          # 填入 DEEPSEEK_API_KEY；不填则自动 mock
 uv sync
-uv run uvicorn app.main:app --reload --port 8000
+uv run uvicorn app.main:app --reload --port 18080
 ```
 
 **2. 建立知识库索引**
@@ -95,7 +117,8 @@ pnpm build
 ```
 
 产物输出到 `wordpress-plugin/wp-live2d-ai/assets/app/`（含模型与 Cubism Core）。
-整个 `wp-live2d-ai` 文件夹丢进 `wp-content/plugins/` 启用即可，详见 [docs/deploy.md](docs/deploy.md)。
+整个 `wp-live2d-ai` 文件夹丢进 `wp-content/plugins/` 启用即可。
+服务器上要手动改哪些配置、怎么验证，见 [docs/deployment-walkthrough.md](docs/deployment-walkthrough.md)。
 
 ## 当前状态
 
@@ -111,6 +134,9 @@ pnpm build
 - [x] “带我去看看”跳转按钮（只允许本站 URL）
 - [x] mock 模式（无 Key 也能离线联调）
 - [x] WordPress 插件接入（设置页、资源注入、不改主题）
+- [x] WordPress 登录态注入 + 短时 JWT 换取（前端登录门已生效）
+- [ ] 后端 JWT 校验、每日额度与管理员不限量
+- [ ] WordPress 后台配置模型、额度与 API Key（端口只读）
 - [ ] 上传图片找相似图（CLIP / 向量检索）
 - [ ] AI 语音播报（TTS）
 - [ ] 语音打断（连续收音 + 停止播报 + 取消请求）
@@ -120,5 +146,6 @@ pnpm build
 ## 说明
 
 - 前端与 AI 完全解耦：换模型、换主题样式不影响后端；换模型供应商只需改 `backend/`。
+- 注册、登录和找回密码复用 WordPress 用户体系；助手只消费登录态，不接触密码。
 - Cubism Core 的授权请遵循 Live2D 官方条款；模型版权请自行确认。
 - 模型文件较大，默认不纳入 Git（见 `.gitignore`），部署时随构建产物一起同步。
