@@ -1,4 +1,4 @@
-"""对话接口：把内部事件字典转换成 SSE 流。
+"""对话接口：认证 → 额度 → SSE 流。
 
 SSE（Server-Sent Events）是一种“服务器持续往浏览器推文本”的 HTTP 协议。
 它的报文格式非常简单，每个事件就是几行文本，以空行结束：
@@ -21,33 +21,104 @@ SSE（Server-Sent Events）是一种“服务器持续往浏览器推文本”�
 - 客户端断开时取消生成器（避免协程泄漏）；
 - `ping=15`：每 15 秒发一个注释行作为心跳，防止 Nginx/负载均衡
   把长时间没有数据的连接当成“僵死连接”掐掉。
+
+第二步新增的三件事（顺序很重要）：
+
+    1. 认证：没有有效 JWT 的请求在进入模型之前就被拒绝（401）；
+    2. 额度：普通用户先原子占位，占不到就返回 429；
+    3. 退款：如果模型一个字都没输出就失败/超时/断开，把额度还回去。
+
+认证和额度都必须在**流开始之前**完成。SSE 一旦开始发送响应头，
+就没法再把 HTTP 状态码改成 401/429 了。
 """
 
+import asyncio
 import json
+import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
 from app.agent.core import stream_reply
+from app.api.deps import require_user
+from app.auth import AuthUser
+from app.config import get_settings
+from app.quota import get_quota_store
 from app.schemas import ChatRequest
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
 @router.post("/chat")
-async def chat(request: ChatRequest) -> EventSourceResponse:
+async def chat(
+    request: ChatRequest,
+    user: AuthUser = Depends(require_user),
+) -> EventSourceResponse:
     """接收对话请求，返回流式响应。
 
-    这个函数本身**不会等待 AI 回复生成完**，它只做两件事：
+    参数 `user` 由 require_user 依赖注入：
+    - 没带 token / token 无效 / token 过期 → 直接 401，不会执行到这个函数；
+    - 验签成功 → 得到可信的 user.id 和 user.is_admin。
 
-    1. 创建一个异步生成器 `event_stream`；
-    2. 立刻返回 `EventSourceResponse`（响应头先发给浏览器）。
+    这个函数本身**不会等待 AI 回复生成完**，它只做四件事：
+    1. 检查并占用额度；
+    2. 创建一个异步生成器 `event_stream`；
+    3. 立刻返回 `EventSourceResponse`（响应头先发给浏览器）；
+    4. 生成器结束时，按需退款。
 
     真正的“边生成边发送”由 `EventSourceResponse` 驱动：它不断向
     `event_stream` 索取下一项，每拿到一项就写成一个 SSE 事件并 flush 出去。
     """
+    settings = get_settings()
 
     # ------------------------------------------------------------------
+    # 1. 占额度。
+    #
+    # 为什么用 asyncio.to_thread：
+    # sqlite3 的调用是同步阻塞的。如果数据库恰好被另一个请求锁住，
+    # 直接调用会让整个事件循环停住，所有用户一起等。
+    # to_thread 把这次调用丢到线程池，事件循环可以继续处理别的请求。
+    #
+    # 为什么先占位再调模型：
+    # 如果等回答完再扣次数，用户同时发 10 个请求就能突破上限。
+    # reserve() 内部用一条原子 SQL 完成“判断 + 扣减”，并发安全。
+    # ------------------------------------------------------------------
+    try:
+        store = get_quota_store()
+        reservation = await asyncio.to_thread(
+            store.reserve,
+            user.id,
+            settings.daily_quota,
+            is_admin=user.is_admin,
+        )
+    except Exception:  # noqa: BLE001 - 数据库故障时“宁可不服务，也不放开”
+        logger.exception("额度服务异常 user=%s", user.id)
+        raise HTTPException(
+            status_code=503,
+            detail="额度服务暂时不可用，请稍后再试",
+        ) from None
+
+    if reservation is None:
+        # 普通用户额度用完。429 Too Many Requests 是最贴切的状态码。
+        # Retry-After 告诉客户端“多少秒后再来”，避免它立刻重试。
+        retry_after = store.seconds_until_reset()
+        logger.info(
+            "额度用尽 user=%s day=%s limit=%s",
+            user.id,
+            store.today(),
+            settings.daily_quota,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=f"今天的聊天额度（{settings.daily_quota} 条）已经用完啦，明天再来～",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    # ------------------------------------------------------------------
+    # 2. 定义 SSE 生成器。
+    #
     # 为什么要在端点里再定义一个 async 函数？
     #
     # 1. `async def` + `yield` = **异步生成器函数**。
@@ -62,27 +133,98 @@ async def chat(request: ChatRequest) -> EventSourceResponse:
     #    “外层立刻返回 Response，内层按需产出数据”。
     #
     # 3. 为什么用内层函数（闭包）：
-    #    可以直接读取外层的 `request`，不必再把 messages / page_url
-    #    等参数重新传一遍。如果以后要单独测试或复用，也可以把它提到
-    #    模块级，改成：
-    #        async def _event_stream(request: ChatRequest): ...
-    #        return EventSourceResponse(_event_stream(request), ping=15)
+    #    可以直接读取外层的 request、reservation，不必再把参数传一遍。
     # ------------------------------------------------------------------
     async def event_stream():
-        # 这里只做“内部事件 → SSE 数据帧”的转换：
-        # - agent 层产出 {"type": "delta", ...} 这种业务事件；
-        # - API 层负责把它序列化成传输格式。
-        # 两层解耦后，以后换传输方式（WebSocket 等）不用改 AI 代码。
-        #
-        # ensure_ascii=False 让中文以 UTF-8 原样输出，
-        # 否则会变成 你好 这类转义（能工作，但调试时难读）。
-        async for event in stream_reply(
-            messages=request.messages,
-            page_url=request.page_url,
-            page_title=request.page_title,
-        ):
-            yield {"data": json.dumps(event, ensure_ascii=False)}
+        # produced 记录“是否已经给用户输出过正文”。
+        # 退款规则只看它：
+        # - 一个字都没输出就失败 → 退；
+        # - 已经说过话 → 不退（模型确实花了 token，用户也看到了内容）。
+        produced = False
 
+        try:
+            # asyncio.timeout 是 Python 3.11 的写法：
+            # 代码块超过 90 秒会被取消，并在这里抛出 TimeoutError。
+            # 它防的是“工具卡死”这类调用次数不会增加的问题。
+            async with asyncio.timeout(settings.agent_max_seconds):
+                # 这里只做“内部事件 → SSE 数据帧”的转换：
+                # - agent 层产出 {"type": "delta", ...} 这种业务事件；
+                # - API 层负责把它序列化成传输格式。
+                # 两层解耦后，以后换传输方式（WebSocket 等）不用改 AI 代码。
+                #
+                # ensure_ascii=False 让中文以 UTF-8 原样输出，
+                # 否则会变成 你好 这类转义（能工作，但调试时难读）。
+                async for event in stream_reply(
+                    messages=request.messages,
+                    page_url=request.page_url,
+                    page_title=request.page_title,
+                ):
+                    if event.get("type") == "delta" and event.get("content"):
+                        produced = True
+                    yield {"data": json.dumps(event, ensure_ascii=False)}
+
+        except TimeoutError:
+            # 超时不一定代表出错：可能是模型/工具卡住了。
+            # 给用户一句可行动的提示，而不是让他对着转圈等。
+            logger.warning(
+                "对话超时 user=%s seconds=%s", user.id, settings.agent_max_seconds
+            )
+            yield {
+                "data": json.dumps(
+                    {
+                        "type": "error",
+                        "message": "这次处理时间有点久，我先停下来了，请再问我一次～",
+                    },
+                    ensure_ascii=False,
+                )
+            }
+
+        except asyncio.CancelledError:
+            # 客户端断开连接（关闭页面/取消请求）时，FastAPI 会取消这个协程。
+            # 必须原样抛出，让框架完成清理，不要吞掉。
+            # 退款统一放在下面的 finally 里处理。
+            raise
+
+        except Exception:  # noqa: BLE001 - 兜底，避免异常泄漏到 SSE 框架
+            logger.exception("对话流异常 user=%s", user.id)
+            yield {
+                "data": json.dumps(
+                    {
+                        "type": "error",
+                        "message": "AI 服务暂时不可用，请稍后再试。",
+                    },
+                    ensure_ascii=False,
+                )
+            }
+
+        finally:
+            # finally 在任何退出路径都会执行：正常结束、超时、异常、客户端断开。
+            # 这里用同步调用而不是 await：
+            # 协程被取消时，await 可能立刻再次抛出 CancelledError，
+            # 导致退款没执行完。退一次额度只是一条本地 SQL，耗时可以忽略。
+            if not produced:
+                try:
+                    store.refund(reservation)
+                except Exception:  # noqa: BLE001 - 退款失败不能破坏已发出的 SSE
+                    # 最坏情况只是少退一次额度；把错误留在服务端日志，
+                    # 不要让它覆盖超时/断开的原始错误。
+                    logger.exception("退还额度失败 user=%s", user.id)
+
+    # ------------------------------------------------------------------
+    # 3. 返回 SSE 响应。
+    #
     # ping=15：每 15 秒发送一个 SSE 注释行作为心跳，
-    # 防止 Nginx/负载均衡把长时间没有数据的连接当成僵死连接断开。
-    return EventSourceResponse(event_stream(), ping=15)
+    # 防止 Nginx/负载均衡把长时间没有数据的连接断开。
+    #
+    # X-Quota-Remaining 让前端以后可以显示“今天还剩几条”；
+    # 现在前端暂未使用，但排障时用浏览器 Network 面板一眼就能看到。
+    # ------------------------------------------------------------------
+    headers: dict[str, str] = {}
+    if reservation.remaining is not None:
+        headers["X-Quota-Remaining"] = str(reservation.remaining)
+        headers["X-Quota-Limit"] = str(reservation.limit)
+    elif not reservation.counted:
+        # 管理员的剩余次数是“无限”，用一个标记表示，避免前端误解析成 0。
+        headers["X-Quota-Unlimited"] = "1"
+
+    return EventSourceResponse(event_stream(), ping=15, headers=headers)

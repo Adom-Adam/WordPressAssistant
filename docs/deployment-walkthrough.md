@@ -11,9 +11,10 @@
 
 > 适用版本：插件 `0.2.0`。
 >
-> **当前边界（很重要）**：登录门和 JWT 签发已经完成，但后端还没有校验 token，也没有每日额度。
-> 也就是说，现在绕过前端直接请求 `/ai-api/chat` 仍然能聊天。等第二步完成后，
-> “必须登录 + 每日额度”才会真正生效。本文会明确标出这一点，避免误以为已经安全。
+> **当前边界（很重要）**：第二步已经完成。后端会校验 JWT，未登录/伪造/过期 token
+> 一律 401；普通用户按北京时间每天限额，管理员不限量。绕过前端直接 curl
+> `/ai-api/chat` 也会被拒绝。部署时请确认 `.env` 里有 `L2D_AI_JWT_SECRET`，
+> 且和 `wp-config.php` 完全一致。
 
 ---
 
@@ -27,8 +28,8 @@
        │    └─ wp-content/plugins/wp-live2d-ai/  ← 前端构建产物 + 插件
        │
        └─ /ai-api/             → 127.0.0.1:18080（FastAPI，systemd 托管）
-            ├─ backend/.env    ← DeepSeek Key、JWT 密钥
-            └─ backend/data/   ← 知识库 SQLite
+            ├─ backend/.env    ← DeepSeek Key、JWT 密钥、额度配置
+            └─ backend/data/   ← 知识库 + 每日额度 SQLite
 ```
 
 需要先建立三个认识：
@@ -45,9 +46,9 @@
 
 | 内容 | 推荐位置 | 属主 | 说明 |
 | --- | --- | --- | --- |
-| 仓库代码 | `/opt/l2d-ai/repo` | `l2dai:l2dai` | 不要放进网站根目录 |
-| 后端配置 | `/opt/l2d-ai/repo/backend/.env` | `l2dai:l2dai`，权限 `640` | 含 API Key 和 JWT 密钥 |
-| 知识库 | `/opt/l2d-ai/repo/backend/data/` | `l2dai:l2dai` | SQLite，可随时重建 |
+| 仓库代码 | `/opt/l2d-ai/WordPressAssistant` | `l2dai:l2dai` | 不要放进网站根目录 |
+| 后端配置 | `/opt/l2d-ai/WordPressAssistant/backend/.env` | `l2dai:l2dai`，权限 `640` | 含 API Key 和 JWT 密钥 |
+| 知识库 + 额度库 | `/opt/l2d-ai/WordPressAssistant/backend/data/` | `l2dai:l2dai` | SQLite；知识库可重建，额度库删掉等于重置用量 |
 | WordPress 插件 | `/www/wwwroot/<站点目录>/wp-content/plugins/wp-live2d-ai/` | `www:www` | 含构建产物和模型 |
 | systemd 服务 | `/etc/systemd/system/l2d-ai-backend.service` | `root:root` | 开机自启、崩溃重启 |
 | Nginx 配置 | 宝塔站点配置的 `server { }` | `root:root` | 用宝塔“配置文件”修改 |
@@ -64,6 +65,94 @@
 | 18080 | FastAPI | **否**，只监听 `127.0.0.1` |
 
 阿里云安全组和宝塔防火墙都**不要**放行 18080。
+
+### 1.1 `127.0.0.1` 是什么意思？uvicorn 不是可以直接开端口吗？
+
+先分清两件事：**监听地址** 和 **端口**。
+
+- **IP 地址**回答“哪台机器、哪块网卡”；
+- **端口**回答“这台机器上的哪个程序”。
+
+`uvicorn --host 127.0.0.1 --port 18080` 的意思是：
+“我只在 **本机回环网卡** 上占用 18080 这个端口。”
+
+服务器通常有几块“网卡”：
+
+| 地址 | 含义 | 谁能访问 |
+| --- | --- | --- |
+| `127.0.0.1` | 回环地址（loopback），永远指向本机自己 | 只有服务器自己 |
+| `0.0.0.0` | 所有网卡 | 本机 + 内网 + 公网（如果防火墙放行） |
+| 服务器的内网/公网 IP | 某一块具体网卡 | 取决于网络和防火墙 |
+
+所以：
+
+```bash
+# 在服务器上执行：能通
+curl http://127.0.0.1:18080/api/health
+
+# 从你自己的电脑执行：不通（连接被拒绝/超时）
+curl http://<服务器公网IP>:18080/api/health
+```
+
+不是防火墙没开，而是 **uvicorn 根本没有在公网网卡上监听**。
+即使把阿里云安全组和宝塔防火墙都放行，公网也连不上——因为那个“门”不存在。
+
+uvicorn 确实可以直接监听公网：
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 18080
+```
+
+但这通常是**不推荐**的，原因在下一节。这里没有 Docker，所以也不存在
+“端口映射”这回事：`--port` 只是让进程监听端口；Docker 的 `-p 18080:18080`
+才是 NAT 层的端口映射。
+
+### 1.2 反向代理到底在做什么？
+
+“反向代理”就是**服务器前面的前台**：
+
+- 浏览器只认识 `https://你的域名`（80/443）；
+- Nginx 在 443 上接待所有请求；
+- 看到路径是 `/ai-api/...`，就转给本机的 `127.0.0.1:18080`；
+- Python 处理完，把响应交回 Nginx；
+- Nginx 再加密后发回浏览器。
+
+```text
+浏览器
+  │  https://你的域名/ai-api/chat
+  ▼
+Nginx :443（公网）
+  │  解密 TLS，匹配 location /ai-api/
+  │  proxy_pass http://127.0.0.1:18080/api/chat
+  ▼
+uvicorn :18080（只监听回环）
+  │  LangChain / DeepSeek / 知识库
+  ▼
+Nginx 把 SSE 流原样转回浏览器
+```
+
+它和“端口映射”不是一回事：
+
+| | 端口映射（Docker/NAT） | 反向代理（Nginx） |
+| --- | --- | --- |
+| 工作层 | 传输层（TCP） | 应用层（HTTP） |
+| 能否按路径分流 | 不能 | 能（`/ai-api/` → 18080） |
+| TLS 证书 | 后端自己处理 | Nginx 统一处理 |
+| 改路径 | 不能 | 能（`/ai-api/chat` → `/api/chat`） |
+| 流式控制 | 不涉及 | 能关缓冲、调超时 |
+| 日志/限流/WAF | 弱 | 强 |
+
+**为什么这里要用反向代理：**
+
+1. **同源**：浏览器只看到 `https://你的域名`，`/ai-api` 和 WordPress 同源，
+   不会有 CORS，也不会出现“HTTPS 页面请求 HTTP 接口”的混合内容拦截。
+2. **TLS 只在一处**：证书配在 Nginx；后端只说普通 HTTP，且只在回环上。
+3. **SSE 可控**：聊天是流式响应，Nginx 必须关掉缓冲，否则会“等全部生成完才显示”。
+4. **隐藏后端**：公网只开 80/443，18080 不暴露，攻击面更小。
+5. **路径改写**：前端统一写 `/ai-api/chat`，后端仍然是 `/api/chat`。
+6. **运维能力**：访问日志、限流、WAF、压缩、超时都在 Nginx 做。
+
+一句话：**uvicorn 负责“算”，Nginx 负责“接待、加密、分流、限流”。**
 
 ---
 
@@ -128,14 +217,21 @@ apt-get install -y git curl ca-certificates openssl
 仓库是公开的，服务器上直接克隆：
 
 ```bash
-git clone --depth 1 https://github.com/Adom-Adam/WordPressAssistant.git /opt/l2d-ai/repo
-chown -R l2dai:l2dai /opt/l2d-ai/repo
+git clone --depth 1 https://github.com/Adom-Adam/WordPressAssistant.git /opt/l2d-ai/WordPressAssistant
+chown -R l2dai:l2dai /opt/l2d-ai/WordPressAssistant
 ```
+
+> **路径必须前后一致。** 本文按实际部署目录 `/opt/l2d-ai/WordPressAssistant` 编写。
+> 如果你换了目录，后面 systemd 的 `WorkingDirectory` 和 `ExecStart` 也要同步改；
+> 这两处写错，服务会以 `203/EXEC` 或 `200/CHDIR` 启动失败。
+>
+> 如果目录已经存在（例如之前已经克隆过），不要再执行 `git clone`，用
+> `git -C /opt/l2d-ai/WordPressAssistant pull` 更新即可。
 
 安装依赖：
 
 ```bash
-cd /opt/l2d-ai/repo/backend
+cd /opt/l2d-ai/WordPressAssistant/backend
 runuser -u l2dai -- env UV_CACHE_DIR=/opt/l2d-ai/.uv-cache /usr/local/bin/uv sync --no-dev
 ```
 
@@ -148,7 +244,7 @@ runuser -u l2dai -- env UV_CACHE_DIR=/opt/l2d-ai/.uv-cache /usr/local/bin/uv syn
 建数据目录：
 
 ```bash
-install -d -o l2dai -g l2dai /opt/l2d-ai/repo/backend/data
+install -d -o l2dai -g l2dai /opt/l2d-ai/WordPressAssistant/backend/data
 ```
 
 > **不要上传本地的 `.venv`、`node_modules`、`data/`**。`.venv` 里是 Windows 的二进制，
@@ -159,7 +255,7 @@ install -d -o l2dai -g l2dai /opt/l2d-ai/repo/backend/data
 ## 5. 写后端 `.env`
 
 ```bash
-cd /opt/l2d-ai/repo/backend
+cd /opt/l2d-ai/WordPressAssistant/backend
 install -o l2dai -g l2dai -m 640 .env.example .env
 nano .env          # 没有 nano 就用 vi，或在宝塔文件管理里编辑
 ```
@@ -175,6 +271,13 @@ nano .env          # 没有 nano 就用 vi，或在宝塔文件管理里编辑
 | `L2D_AI_JWT_ISSUER` | `l2d-ai-wordpress` | 与插件常量一致 |
 | `L2D_AI_JWT_AUDIENCE` | `l2d-ai-backend` | 与插件常量一致 |
 | `L2D_AI_JWT_TTL_SECONDS` | `900` | 与插件签发有效期一致 |
+| `L2D_AI_JWT_LEEWAY_SECONDS` | `30` | 允许的服务器时钟偏差 |
+| `DAILY_QUOTA` | `20` | 普通用户每天条数；管理员不限量 |
+| `QUOTA_DB_PATH` | `data/quota.sqlite3` | 额度计数库；可随时删除重置 |
+| `QUOTA_TIMEZONE` | `Asia/Shanghai` | 按哪个时区判断“新的一天” |
+| `AGENT_MAX_MODEL_CALLS` | `6` | 单轮最多模型调用次数（防循环） |
+| `AGENT_MAX_TOOL_CALLS` | `6` | 单轮最多工具调用次数 |
+| `AGENT_MAX_SECONDS` | `90` | 单轮最长秒数 |
 | `MOCK_MODE` | `false` | 生产环境应为 false |
 
 `CORS_ORIGINS` 保持默认即可：生产环境走同域 `/ai-api/`，不会触发跨域。
@@ -195,7 +298,7 @@ openssl rand -hex 32
 
 把结果分别写进两个地方：
 
-1. **后端** `/opt/l2d-ai/repo/backend/.env`
+1. **后端** `/opt/l2d-ai/WordPressAssistant/backend/.env`
    `L2D_AI_JWT_SECRET=<生成的值>`
 2. **WordPress** `/www/wwwroot/<站点目录>/wp-config.php`
    在 `/* That's all, stop editing! Happy publishing. */` 之前加：
@@ -216,8 +319,8 @@ define( 'L2D_AI_JWT_SECRET', '生成的值' );
 grep '^L2D_AI_JWT_SECRET=' .env | awk -F= '{print "length:", length($2)}'
 ```
 
-> 目前后端还没有读取这个密钥；第二步接入校验后，它才会真正生效。
-> 但现在就配好，可以避免以后上线时漏配。
+> 后端现在会读取并校验这个密钥。两处不一致时，所有聊天请求都会返回 401；
+> 后端完全没配时返回 503。健康检查里的 `auth_configured` 可以快速判断是否配好。
 
 ---
 
@@ -226,7 +329,7 @@ grep '^L2D_AI_JWT_SECRET=' .env | awk -F= '{print "length:", length($2)}'
 先只建文字索引，确认网络和文章抓取正常：
 
 ```bash
-cd /opt/l2d-ai/repo/backend
+cd /opt/l2d-ai/WordPressAssistant/backend
 runuser -u l2dai -- .venv/bin/python -m app.kb.sync --no-vision
 ```
 
@@ -245,6 +348,70 @@ runuser -u l2dai -- .venv/bin/python -m app.kb.sync
 
 ## 8. 用 systemd 托管后端
 
+### 8.1 面向初学者：systemd 是什么？
+
+你可以把 systemd 理解成服务器上的**服务管家**：
+
+- 服务器开机时，它负责把该启动的服务拉起来；
+- 进程崩溃时，它按规则重启；
+- 它记录服务的标准输出和错误输出（日志）；
+- 它统一管理“谁在跑、跑在哪个用户下、工作目录在哪”。
+
+没有 systemd 时，常见做法是：
+
+```bash
+nohup uv run uvicorn app.main:app --port 18080 &
+```
+
+问题很明显：SSH 断开可能被杀、服务器重启不会自动起来、崩溃了没人管、
+日志散落在某个 `nohup.out` 里、时间久了忘记自己开过几个进程。
+
+systemd 用一份 **unit 文件**（就是一份“岗位说明书”）描述怎么运行服务。
+文件放在 `/etc/systemd/system/`，名字通常叫 `<服务名>.service`。
+
+unit 文件分三段：
+
+| 段 | 作用 | 常见字段 |
+| --- | --- | --- |
+| `[Unit]` | 元信息、启动顺序 | `Description`、`After=network.target` |
+| `[Service]` | 怎么运行 | `User`、`WorkingDirectory`、`ExecStart`、`Restart` |
+| `[Install]` | 开机自启挂到哪个目标 | `WantedBy=multi-user.target` |
+
+几个容易混淆的命令：
+
+| 命令 | 含义 |
+| --- | --- |
+| `systemctl start l2d-ai-backend` | **现在**启动一次 |
+| `systemctl enable l2d-ai-backend` | 设置**开机自启**（不会立刻启动） |
+| `systemctl enable --now ...` | 两者一起做 |
+| `systemctl restart ...` | 重启（改了 `.env` 或代码后） |
+| `systemctl status ...` | 看状态、最近几行日志、退出码 |
+| `systemctl disable ...` | 取消开机自启（不会立刻停止） |
+| `systemctl daemon-reload` | **改完 unit 文件后必须执行**，让 systemd 重新读配置 |
+
+日志用 `journalctl`：
+
+```bash
+journalctl -u l2d-ai-backend -f          # 实时跟踪
+journalctl -u l2d-ai-backend -n 100      # 最近 100 行
+journalctl -u l2d-ai-backend --since "10 min ago"
+```
+
+常见启动失败退出码：
+
+| 退出码 | 含义 | 先检查 |
+| --- | --- | --- |
+| `203/EXEC` | 可执行文件不存在或没有执行权限 | `ExecStart` 路径、`.venv` 是否建好 |
+| `200/CHDIR` | 工作目录不存在 | `WorkingDirectory` 路径 |
+| `217/USER` | 运行用户不存在 | `User=l2dai` 是否创建 |
+| `1` / `3` | Python 自己报错 | `journalctl` 里的 traceback、`.env` |
+
+> **unit 文件的属主必须是 `root:root`、权限 `644`。**
+> 如果它归 `www` 所有，WordPress 一旦被攻破，攻击者就能改这个文件，
+> 让服务以任意用户运行。这是一个很容易被忽略的提权入口。
+
+### 8.2 写 unit 文件
+
 创建 `/etc/systemd/system/l2d-ai-backend.service`：
 
 ```ini
@@ -257,9 +424,9 @@ Type=simple
 User=l2dai
 Group=l2dai
 UMask=0027
-WorkingDirectory=/opt/l2d-ai/repo/backend
+WorkingDirectory=/opt/l2d-ai/WordPressAssistant/backend
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/l2d-ai/repo/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 18080 --proxy-headers --forwarded-allow-ips=127.0.0.1
+ExecStart=/opt/l2d-ai/WordPressAssistant/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 18080 --proxy-headers --forwarded-allow-ips=127.0.0.1
 Restart=always
 RestartSec=3
 NoNewPrivileges=true
@@ -267,6 +434,13 @@ PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
+```
+
+保存后先修正权限（很重要）：
+
+```bash
+chown root:root /etc/systemd/system/l2d-ai-backend.service
+chmod 644 /etc/systemd/system/l2d-ai-backend.service
 ```
 
 每一行的理由：
@@ -280,7 +454,7 @@ WantedBy=multi-user.target
 | `Restart=always` | 崩溃或重启后自动拉起 |
 | `NoNewPrivileges` / `PrivateTmp` | 基础加固，阻止提权和共享临时目录 |
 
-启用：
+### 8.3 启用与查看
 
 ```bash
 systemctl daemon-reload
@@ -289,10 +463,14 @@ systemctl status l2d-ai-backend --no-pager
 curl http://127.0.0.1:18080/api/health
 ```
 
+`daemon-reload` 不能省：systemd 会缓存 unit 文件，改完不重新加载，
+它仍然按旧配置启动。看到 `Active: inactive (dead)` 或 `failed` 时，
+先 `systemctl status` 看退出码，再 `journalctl -u ...` 看 Python 的报错。
+
 健康检查应返回：
 
 ```json
-{"ok":true,"mock":false,"model":"deepseek-flash"}
+{"ok":true,"mock":false,"model":"deepseek-flash","auth_configured":true}
 ```
 
 `mock:true` 说明没有读到 API Key，重点检查 `.env` 路径和权限。
@@ -350,6 +528,69 @@ location /ai-api/ {
 如果用了 CDN/WAF，确认它不会缓冲 SSE、不会拦截 `X-WP-Nonce` 请求头、
 不会把长时间连接当成攻击。可以先临时绕过 CDN 测试，确认问题来源。
 
+### 9.2 在宝塔里怎么操作？需要为后端新建站点吗？
+
+**不需要新建站点。**
+
+“新建站点”在宝塔里意味着新建一个域名（vhost）和网站根目录。后端没有独立域名，
+也没有需要 Nginx 直接提供的静态文件；它只是现有 WordPress 站点下的一个路径
+`/ai-api/`。给后端单独建站点反而会带来：
+
+- 同域名冲突；
+- 子域名要额外做 DNS 解析和证书；
+- 前端 `apiBase` 得改成绝对地址，变成跨域，还要配 CORS；
+- 多一个 vhost 要维护。
+
+正确做法：**在现有 WordPress 站点的 `server { }` 里加一个 `location`。**
+
+#### 方式 A：手动改配置文件（推荐，最可控）
+
+1. 宝塔 → 网站 → 找到 WordPress 站点 → 设置 → 配置文件；
+2. 在 `server { }` 内、PHP 的 `include enable-php-*.conf;` 之前，粘贴第 9 节的
+   `location /ai-api/ { ... }`；
+3. 保存。宝塔会检查语法并重载 Nginx；报错会弹出来；
+4. 验证：
+
+```bash
+curl -s https://你的域名/ai-api/health
+```
+
+#### 方式 B：用宝塔的“反向代理”界面
+
+不同宝塔版本字段名略有差异，核心步骤是：
+
+1. 网站 → 站点 → 设置 → 反向代理 → 添加反向代理；
+2. 代理名称：`l2d-ai-api`；
+3. 目标 URL：`http://127.0.0.1:18080`；
+4. 发送域名：`$host`；
+5. 代理目录：填 `/ai-api/`（有的版本叫“代理目录/路径”）；
+6. **缓存：关闭**；
+7. 保存后打开“配置文件”，确认最终生成的内容里有：
+
+```nginx
+proxy_pass http://127.0.0.1:18080/api/;   # 末尾必须有 /
+proxy_buffering off;                      # 没有就手动补
+proxy_read_timeout 300s;
+```
+
+> 如果面板只允许代理 `/`，**不要**在主站点上使用它——那会把整个 WordPress
+> 也转发给 Python 服务。这种情况回到方式 A。
+
+#### 验证返回码的含义
+
+| `/ai-api/health` 返回 | 含义 |
+| --- | --- |
+| `200` + JSON | 反代和后端都正常 |
+| `404` | Nginx 没有匹配到 `location`（配置没保存/放错 server 块） |
+| `502` | Nginx 找不到后端（服务没启动、端口不对） |
+| `504` | 后端超时（SSE 超时设得太短或后端卡住） |
+
+#### 什么时候才需要新建站点？
+
+只有当你决定让后端使用**独立子域名**（例如 `ai.example.com`）时才需要。
+那时要额外做 DNS、证书、修改插件 `apiBase` 为绝对地址，并在后端配置 CORS。
+除非有特别理由，**同域 `/ai-api/` 更简单，也更容易保证登录 Cookie 和 nonce 正常**。
+
 ---
 
 ## 10. 部署 WordPress 插件（手动）
@@ -391,6 +632,10 @@ wordpress-plugin/wp-live2d-ai/assets/app/
 chown -R www:www /www/wwwroot/<站点目录>/wp-content/plugins/wp-live2d-ai
 ```
 
+注意 `-R` 不能省：`assets/` 子目录也要一起改。如果外层是 `www:www`、里面
+`assets/` 却是 `root:root`，WordPress 能读、但升级或在线编辑插件时会因为
+没有写权限而失败。
+
 **不要**上传以下内容：`node_modules/`、`.git/`、本地 `.env`。
 
 ### 10.3 启用与设置
@@ -410,17 +655,28 @@ chown -R www:www /www/wwwroot/<站点目录>/wp-content/plugins/wp-live2d-ai
 
 ### 10.5 REST 接口检查
 
-WordPress 的 token 接口依赖 REST API 可用：
+WordPress 的 token 接口依赖 REST API 可用。先试“漂亮”地址：
 
 ```bash
 curl -i https://你的域名/wp-json/
 ```
 
-如果 404：
+如果返回 404，再试“参数”形式：
 
-- 后台 → 设置 → 固定链接，改成“文章名”后保存；
-- 或检查安全插件是否禁用了 REST API；
-- 没有伪静态时，插件会用 `?rest_route=/l2d-ai/v1/token` 这种形式，功能仍然可用。
+```bash
+curl -i "https://你的域名/?rest_route=/"
+curl -i "https://你的域名/index.php/wp-json/"
+```
+
+三种入口只要有一个返回 JSON，REST 就是正常的。**`/wp-json/` 404 本身不代表 REST 坏了**，
+它通常说明固定链接用的是“朴素”模式，而 `rest_url()` 会自动选择可用的形式，
+插件不需要你手动改。
+
+如果三种都 404：
+
+- 后台 → 设置 → 固定链接，改成“文章名”后保存（需要 Nginx 伪静态支持）；
+- 检查安全插件/WAF 是否禁用了 REST API；
+- 检查是否把 `/wp-json/` 误配置成了静态目录或重定向。
 
 ---
 
@@ -449,7 +705,11 @@ curl -s https://你的域名/ai-api/health
 未登录时应被拒绝：
 
 ```bash
+# 固定链接是“文章名”时
 curl -i -X POST https://你的域名/wp-json/l2d-ai/v1/token
+
+# 固定链接是“朴素”时（上一条 404 就用这条）
+curl -i -X POST "https://你的域名/?rest_route=/l2d-ai/v1/token"
 ```
 
 期望 `401` 和 JSON 错误（`l2d_ai_not_logged_in`）。
@@ -465,11 +725,30 @@ curl -i -X POST https://你的域名/wp-json/l2d-ai/v1/token
    - 响应类型是 `text/event-stream`，文字逐段出现；
 4. 退出登录 → 登录门重新出现。
 
-### 11.5 当前阶段的限制
+### 11.5 未登录请求必须被拒绝
 
-- 直接 `curl` 调 `/ai-api/chat` 仍然能拿到回复，因为后端还没校验 token；
-- 每日额度、管理员不限量都还没实现；
-- 这些是第二步的工作，完成后上面两条才会改变。
+```bash
+curl -i -X POST https://你的域名/ai-api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"hi"}]}'
+```
+
+期望 `401`。如果仍然返回 `200 text/event-stream`，说明后端还是旧版本、服务没重启，
+或者 `.env` 里的密钥没被读到。
+
+### 11.6 额度的实际行为
+
+- 普通用户：每天 `DAILY_QUOTA` 条，按 `QUOTA_TIMEZONE` 的零点重置；
+- 管理员：token 里 `admin: true`，不限量；
+- 一次聊天算 1 条，内部调用多少次工具都不会重复扣；
+- 如果模型在输出第一个字之前失败/超时/被取消，这次额度会自动退回；
+- 额度用完返回 `429`，响应头 `Retry-After` 告诉客户端多少秒后重置。
+
+想快速验证 429：把 `.env` 的 `DAILY_QUOTA` 临时改成 `1`，重启服务，登录后连发两条。
+浏览器 Network 里第二条应返回 429，聊天窗口显示“今天的聊天额度已经用完啦”。
+
+> 额度计数库是 `backend/data/quota.sqlite3`。删掉它等于把所有人的当天用量清零；
+> 它不参与 Git，也不需要和知识库一起重建。
 
 ---
 
@@ -478,7 +757,7 @@ curl -i -X POST https://你的域名/wp-json/l2d-ai/v1/token
 ### 12.1 更新后端
 
 ```bash
-cd /opt/l2d-ai/repo
+cd /opt/l2d-ai/WordPressAssistant
 git pull
 chown -R l2dai:l2dai backend
 cd backend
@@ -501,12 +780,12 @@ chown -R www:www /www/wwwroot/<站点目录>/wp-content/plugins/wp-live2d-ai
 
 ```bash
 tar czf /root/l2d-ai-backup-$(date +%F).tgz \
-  /opt/l2d-ai/repo/backend/.env \
-  /opt/l2d-ai/repo/backend/data
+  /opt/l2d-ai/WordPressAssistant/backend/.env \
+  /opt/l2d-ai/WordPressAssistant/backend/data
 ```
 
 WordPress 侧按宝塔的数据库 + 站点备份策略走。
-升级前先备份，尤其是第二步加入额度数据库之后。
+`backend/data/` 里现在同时有知识库和额度库，升级前一起备份。
 
 ### 12.4 轮换密钥
 
@@ -514,7 +793,7 @@ WordPress 侧按宝塔的数据库 + 站点备份策略走。
 2. 同时更新后端 `.env` 和 `wp-config.php`；
 3. `systemctl restart l2d-ai-backend`；
 4. 旧 token 立即失效，用户刷新页面即可换新；
-5. 如果只改了其中一处，所有聊天请求会在第二步之后返回 401。
+5. 如果只改了其中一处，所有聊天请求都会返回 401。
 
 ---
 
@@ -527,7 +806,7 @@ WordPress 侧按宝塔的数据库 + 站点备份策略走。
 | 1 | 运行用户 | `l2dai` | 不用 root/www 跑后端 |
 | 2 | 目录与属主 | `/opt/l2d-ai` | 后端不能放在网站根目录 |
 | 3 | `uv` 安装 | `/usr/local/bin/uv` | systemd/普通用户都能找到 |
-| 4 | 后端 `.env` | `backend/.env`，`640` | DeepSeek Key、JWT 密钥、站点地址 |
+| 4 | 后端 `.env` | `backend/.env`，`640` | DeepSeek Key、JWT 密钥、每日额度、站点地址 |
 | 5 | JWT 密钥 | `.env` + `wp-config.php` | 两处必须一致 |
 | 6 | 知识库同步 | `backend/data/kb.sqlite3` | 发布文章后要重跑 |
 | 7 | systemd 服务 | `/etc/systemd/system/l2d-ai-backend.service` | 开机自启、崩溃重启 |
@@ -551,7 +830,16 @@ WordPress 侧按宝塔的数据库 + 站点备份策略走。
 | 设置页提示密钥未配置 | `wp-config.php` 没有 `define` 或拼写错误 | 确认常量名是 `L2D_AI_JWT_SECRET`，位置在 stop editing 之前 |
 | token 接口 500 | 插件读不到密钥，或密钥短于 32 字符 | 看 WordPress 调试日志；设置页会提示 |
 | token 接口 403 | nonce 过期、页面被缓存成访客版、WAF 拦截 | 刷新页面；排除缓存；检查 `X-WP-Nonce` |
+| token 接口 404 | 插件未启用、REST 被禁用、固定链接形式 | 试 `?rest_route=/l2d-ai/v1/token`；确认插件已启用 |
+| `/wp-json/` 404 但 `?rest_route=/` 200 | 固定链接是“朴素”模式 | 功能正常；想要漂亮地址可改固定链接并配伪静态 |
+| 服务 `203/EXEC` | `ExecStart` 路径不对、`.venv` 不存在 | 对照实际目录，执行 `daemon-reload` |
+| 服务 `200/CHDIR` | `WorkingDirectory` 路径不对 | 改成实际的 `backend/` 目录 |
+| 插件能读不能更新 | 插件目录/`assets` 属主是 root | `chown -R www:www` 插件目录 |
 | 登录后仍是登录门 | 页面缓存把访客 HTML 发给了登录用户 | 缓存插件按登录 Cookie 排除 |
+| 登录后聊天 401 | 两处 JWT 密钥不一致、token 过期、服务器时间偏差 | 对比密钥长度/内容；`timedatectl` 校时；刷新页面换 token |
+| 聊天 503 | 后端 `.env` 没有 `L2D_AI_JWT_SECRET` 或短于 32 字符 | 补齐后重启；看 `/api/health` 的 `auth_configured` |
+| 聊天 429 | 当天额度用完 | 正常行为；等零点重置，或调 `DAILY_QUOTA` |
+| 回复“查资料次数有点多” | agent 触发了防循环上限 | 正常保护；确认不是模型反复检索，必要时小幅调高上限 |
 | 回复一次性出现 | Nginx/CDN 缓冲 | `proxy_buffering off`，CDN 关缓冲 |
 | `mock:true` | 后端没读到 `.env` | 检查 `WorkingDirectory`、文件权限、Key |
 | 502 Bad Gateway | 后端没启动或端口不对 | `systemctl status`、`ss -lntp`、日志 |
@@ -572,14 +860,15 @@ WordPress 侧按宝塔的数据库 + 站点备份策略走。
 - [ ] `backend/.env` 权限 `640`，属主 `l2dai`；
 - [ ] `wp-config.php` 权限 `640`，属主 `www:www`；
 - [ ] DeepSeek Key 和 JWT 密钥没有出现在 Git、聊天记录、日志中；
-- [ ] 插件目录属主 `www:www`，没有多余的可写权限；
+- [ ] systemd unit 文件属主 `root:root`、权限 `644`（`www` 不能改自己的启动命令）；
+- [ ] 插件目录属主 `www:www`，包括 `assets/` 子目录，没有多余的可写权限；
 - [ ] token 接口能被未登录请求正确拒绝（401）；
 - [ ] 缓存/CDN 排除了 `/wp-json/l2d-ai/*` 和 `/ai-api/*`；
-- [ ] 已配置备份，知道怎么恢复 `.env` 和 `data/`；
-- [ ] 清楚“第二步完成前后端仍不校验 token”这个事实。
-
-> 第二步会加入：后端 JWT 验签、按 WordPress 用户 ID 的每日额度、管理员绕过、
-> 失败退款与并发扣减。完成后，本文第 11.5 节的限制才会消失。
+- [ ] 已配置备份，知道怎么恢复 `.env` 和 `data/`（知识库 + 额度库）；
+- [ ] 未登录 curl `/ai-api/chat` 返回 401；
+- [ ] 普通用户额度用完返回 429，管理员账号不受限；
+- [ ] `AGENT_MAX_MODEL_CALLS` / `AGENT_MAX_TOOL_CALLS` / `AGENT_MAX_SECONDS`
+      没有被误设成很大的值（它们是防止单次请求失控烧 token 的保险丝）。
 
 ---
 

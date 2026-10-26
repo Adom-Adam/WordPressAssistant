@@ -31,6 +31,14 @@ logging.basicConfig(
 
 settings = get_settings()
 
+# 启动时就检查登录密钥，而不是等第一个用户来聊天才发现。
+# 这里只记警告、不让进程退出：健康检查、知识库同步等功能仍然可用；
+# 但 /api/chat 会明确返回 503（见 app/api/deps.py 的 require_user）。
+if not settings.jwt_configured:
+    logging.getLogger(__name__).warning(
+        "L2D_AI_JWT_SECRET 未配置或短于 32 字符：所有聊天请求都会返回 503"
+    )
+
 app = FastAPI(
     title="Live2D AI Assistant Backend",
     version="0.1.0",
@@ -67,6 +75,9 @@ async def health() -> dict[str, object]:
         "ok": True,
         "mock": settings.mock_enabled,
         "model": settings.deepseek_model,
+        # 只暴露“有没有配好”，不暴露密钥本身。
+        # 部署后用 curl 看一眼就知道聊天接口会不会 503。
+        "auth_configured": settings.jwt_configured,
     }
 
 

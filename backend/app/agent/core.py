@@ -67,6 +67,10 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
+from app.agent.limits import (
+    FriendlyModelCallLimitMiddleware,
+    FriendlyToolCallLimitMiddleware,
+)
 from app.agent.model import build_chat_model
 from app.agent.prompts import build_system_prompt
 from app.agent.tools import TOOLS
@@ -114,10 +118,44 @@ def _build_agent(page_url: str | None, page_title: str | None) -> Any:
     如果以后追求极致性能，可以用 LangGraph 的 middleware 或
     `context_schema` 把页面信息改成运行时参数。
     """
+    # ------------------------------------------------------------------
+    # 防失控：给 agent 的循环装上“保险丝”。
+    #
+    # 模型调用工具的过程是一个循环：
+    #     模型思考 → 要求调用工具 → 工具返回 → 模型再思考 → ……
+    # 正常情况下两三步就结束，但模型偶尔会陷入“再查一次”“再试一次”
+    # 的死循环。如果没有上限，一次请求可能烧掉大量 token，甚至一直不结束。
+    #
+    # LangChain 1.x 提供了现成的 Middleware（中间件）机制：
+    # 它可以在每次模型调用/工具调用前后插入逻辑，而不需要改 agent 内部代码。
+    #
+    # - ModelCallLimitMiddleware：限制“模型被调用几次”；
+    # - ToolCallLimitMiddleware：限制“工具被执行几次”；
+    # - run_limit：本次请求内的上限（thread_limit 是跨多次请求的累计，
+    #   这里不用，因为我们的“一次聊天”就是独立的一轮）；
+    # - exit_behavior="end"：达到上限时停止循环，并生成一条说明消息，
+    #   而不是抛异常让用户看到 500。
+    #
+    # 注意：这两个限制对管理员同样生效。
+    # 管理员免的是“每日条数”，不是“防失控”——管理员账号触发 bug 一样危险。
+    # ------------------------------------------------------------------
+    settings = get_settings()
+    safeguards = [
+        FriendlyModelCallLimitMiddleware(
+            run_limit=settings.agent_max_model_calls,
+            exit_behavior="end",
+        ),
+        FriendlyToolCallLimitMiddleware(
+            run_limit=settings.agent_max_tool_calls,
+            exit_behavior="end",
+        ),
+    ]
+
     return create_agent(
         model=build_chat_model(),
         tools=TOOLS,
         system_prompt=build_system_prompt(page_url, page_title),
+        middleware=safeguards,
     )
 
 
@@ -240,9 +278,15 @@ async def stream_reply(
         ):
             if mode == "messages":
                 chunk, _metadata = payload
-                # 只把模型生成的 AI 消息片段交给前端。
-                # 工具调用片段的内容为空，会在 _extract_text 后自然被过滤掉。
-                if not isinstance(chunk, AIMessageChunk):
+                # 只把“AI 说的话”交给前端。
+                #
+                # 正常情况下模型流式输出的是 AIMessageChunk（一小段一小段）；
+                # 但 middleware 拦下失控循环时，会直接注入一条完整的 AIMessage。
+                # 两种都要接收，否则用户看不到“我先停下来了”的提示。
+                #
+                # ToolMessage 不在这里处理：它是工具返回给模型看的内容，
+                # 不应该直接出现在聊天窗口里。
+                if not isinstance(chunk, (AIMessageChunk, AIMessage)):
                     continue
                 text = _extract_text(chunk.content)
                 if text:

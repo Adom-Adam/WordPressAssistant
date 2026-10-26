@@ -144,15 +144,14 @@ location /ai-api/ {
 }
 ```
 
-保存后 Nginx 会重载。验证：
+保存后 Nginx 会重载。验证反代用健康检查：
 
 ```bash
-curl -N -X POST https://你的域名/ai-api/chat \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"hi"}]}'
+curl -s https://你的域名/ai-api/health
 ```
 
-应看到逐条 `data: {...}` 输出。
+聊天接口现在要求 JWT，直接 `curl` 会返回 401；请在登录后的浏览器里测试流式回复。
+完整的认证/额度验证见 [deployment-walkthrough.md](deployment-walkthrough.md) 第 11 节。
 
 > 注意 `proxy_pass http://127.0.0.1:18080/api/;` 末尾的 `/`：它把 `/ai-api/chat`
 > 重写为 `/api/chat`。少写斜杠会变成 `/ai-api/api/chat`。

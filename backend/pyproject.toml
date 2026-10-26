@@ -15,6 +15,7 @@ dependencies = [
   "beautifulsoup4>=4.15.0",
   "openai>=3.37.0",
   "httpx>=0.28.1",
+  "pyjwt>=2.15.1",
 ]
 
 [dependency-groups]
@@ -32,3 +33,6 @@ default = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# 把 backend/ 加入导入路径，让测试里可以直接 `from app...`。
+# （项目不是安装型包，uv 不会自动把源码目录放进 sys.path。）
+pythonpath = ["."]

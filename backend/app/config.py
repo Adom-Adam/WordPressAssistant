@@ -55,6 +55,60 @@ class Settings(BaseSettings):
     agent_max_history: int = 20
 
     # ------------------------------------------------------------------
+    # Agent 防失控（第二步新增）
+    # ------------------------------------------------------------------
+    # 一轮对话里最多允许模型“思考”几次。
+    # 每次“模型 → 工具 → 模型”的往返都会让这个数字 +1。
+    # 模型偶尔会陷入“再查一次”的循环；有上限才能保证最坏情况也有尽头。
+    # 典型问答只需 2 次（一次检索 + 一次总结），6 次已经留足余量。
+    agent_max_model_calls: int = 6
+
+    # 一轮对话里最多执行几个工具。
+    # 和模型调用上限分开设置：一次模型回复可能同时要求调用多个工具。
+    agent_max_tool_calls: int = 6
+
+    # 一轮对话从开始到结束最多允许的秒数。
+    # 调用次数上限管的是“循环多少次”，这里管的是“卡住多久”，
+    # 两者互补：工具本身卡死时，调用次数并不会增加。
+    agent_max_seconds: float = 90.0
+
+    # ------------------------------------------------------------------
+    # 登录凭证（与 WordPress 插件共享）
+    # ------------------------------------------------------------------
+    # 必须和 wp-config.php 里的 L2D_AI_JWT_SECRET 完全相同，至少 32 个字符。
+    # 这个值只用于“验证 token 是不是 WordPress 签发的”，不会发给前端。
+    l2d_ai_jwt_secret: str = ""
+
+    # 下面两项是 JWT 的标准声明（claim）：
+    # iss = issuer（谁签发），aud = audience（签给谁用）。
+    # 验证时必须和插件里的常量一致，否则说明 token 来自别处。
+    l2d_ai_jwt_issuer: str = "l2d-ai-wordpress"
+    l2d_ai_jwt_audience: str = "l2d-ai-backend"
+
+    # token 有效期（秒）。插件签发 900 秒；这里只用于文档说明和健康检查，
+    # PyJWT 会直接读取 token 里的 exp，不需要我们重新计算。
+    l2d_ai_jwt_ttl_seconds: int = 900
+
+    # 允许的时钟偏差（秒）。服务器和 WordPress 可能差几秒，
+    # 留一点余量可以避免“刚签发就过期”的误判。
+    l2d_ai_jwt_leeway_seconds: int = 30
+
+    # ------------------------------------------------------------------
+    # 每日聊天额度（第二步新增）
+    # ------------------------------------------------------------------
+    # 每个普通用户每天最多发几条消息。管理员不受限制。
+    # 0 表示普通用户完全不能聊天（管理员仍可用）。
+    daily_quota: int = 20
+
+    # 额度计数数据库。和知识库分开存放：
+    # 知识库删掉可以重建，额度记录删掉会“重置所有人用量”，两者生命周期不同。
+    quota_db_path: str = "data/quota.sqlite3"
+
+    # 按哪个时区判断“新的一天”。用北京时间，符合博客读者的直觉。
+    # 依赖 Python 3.9+ 的 zoneinfo；Windows 上需要 tzdata（项目已安装）。
+    quota_timezone: str = "Asia/Shanghai"
+
+    # ------------------------------------------------------------------
     # 站内知识库
     # ------------------------------------------------------------------
     # WordPress 站点地址，例如 https://374969782.xyz。
@@ -102,6 +156,17 @@ class Settings(BaseSettings):
     def mock_enabled(self) -> bool:
         """没有 API Key 或显式开启 MOCK_MODE 时，进入 mock 模式。"""
         return self.mock_mode or not self.deepseek_api_key.strip()
+
+    @property
+    def jwt_configured(self) -> bool:
+        """JWT 密钥是否可用。
+
+        为什么要求至少 32 个字符：
+        HS256 的安全性完全依赖密钥的随机性。太短的密钥可以被暴力猜测，
+        攻击者就能自己伪造任意用户的 token（包括管理员）。
+        插件端也做了同样的长度检查，两边保持一致。
+        """
+        return len(self.l2d_ai_jwt_secret.strip()) >= 32
 
     @property
     def cors_origin_list(self) -> list[str]:

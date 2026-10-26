@@ -85,6 +85,7 @@ cd backend
 cp .env.example .env          # 填入 DEEPSEEK_API_KEY；不填则自动 mock
 uv sync
 uv run uvicorn app.main:app --reload --port 18080
+uv run pytest -q               # 认证、额度、防循环测试（不调用真实模型）
 ```
 
 **2. 建立知识库索引**
@@ -135,7 +136,8 @@ pnpm build
 - [x] mock 模式（无 Key 也能离线联调）
 - [x] WordPress 插件接入（设置页、资源注入、不改主题）
 - [x] WordPress 登录态注入 + 短时 JWT 换取（前端登录门已生效）
-- [ ] 后端 JWT 校验、每日额度与管理员不限量
+- [x] 后端 JWT 校验、每日额度、管理员不限量、失败退款
+- [x] agent 防失控（模型/工具调用上限 + 单轮超时）
 - [ ] WordPress 后台配置模型、额度与 API Key（端口只读）
 - [ ] 上传图片找相似图（CLIP / 向量检索）
 - [ ] AI 语音播报（TTS）

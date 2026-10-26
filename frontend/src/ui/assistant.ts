@@ -409,6 +409,12 @@ export class AssistantApp {
       if (error instanceof ChatHttpError && (error.status === 401 || error.status === 403)) {
         resetAuthToken();
         bubble.textContent = '登录状态过期了，刷新一下页面再和我聊天吧～';
+      } else if (error instanceof ChatHttpError && error.status === 429) {
+        // 后端在流开始前就返回 429，说明今天这条额度已经用完。
+        bubble.textContent = '今天的聊天额度已经用完啦，明天再来找我玩吧～';
+      } else if (error instanceof ChatHttpError && error.status === 503) {
+        // 服务端没配 JWT 密钥，用户自己解决不了，提示联系站长。
+        bubble.textContent = '小助手还没准备好登录凭证，先联系站长看看吧～';
       } else {
         bubble.textContent = '呜…我这边连接不上后端。检查一下 AI 服务是否启动了好不好？';
       }
