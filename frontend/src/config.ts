@@ -43,12 +43,14 @@ export interface AssistantConfig {
   apiBase: string;
   /** Live2D 资源根地址，必须以 / 结尾 */
   assetBase: string;
-  /** 站点名，用于对话面板标题 */
-  title: string;
+  /** 人设名字（例如“梅林”），用于对话面板标题和提示文案 */
+  assistantName: string;
   /** 语音识别语言 */
   voiceLang: string;
   /** 形象尺寸 */
   appearance: AssistantAppearance;
+  /** 后台选定的 Live2D 模型 id；空字符串表示使用 manifest 默认值 */
+  live2dModel: string;
   /** 登录相关配置 */
   auth: AssistantAuthConfig;
 }
@@ -56,9 +58,10 @@ export interface AssistantConfig {
 interface InjectedConfig {
   apiBase?: string;
   assetBase?: string;
-  title?: string;
+  assistantName?: string;
   voiceLang?: string;
   appearance?: Partial<AssistantAppearance> | null;
+  live2dModel?: string;
   auth?: Partial<AssistantAuthConfig> | null;
 }
 
@@ -124,18 +127,36 @@ function normalizeAppearance(
   };
 }
 
+/**
+ * 还原 WordPress 内联脚本里的 URL。
+ *
+ * 典型情况：wp_logout_url() 里的 & 被缓存/优化插件输出成 &amp;。
+ * 如果直接赋给 href，浏览器会把 `_wpnonce` 当成 `amp;_wpnonce`，
+ * WordPress 认为 nonce 缺失，于是先跳到“确认退出”页。
+ */
+function normalizeUrl(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value.replace(/&amp;/gi, '&').replace(/&#0*38;/g, '&');
+}
+
 function normalizeAuth(injected: InjectedConfig['auth']): AssistantAuthConfig {
   if (!injected) return DEV_AUTH;
   return {
     required: injected.required ?? true,
     loggedIn: injected.loggedIn ?? false,
     user: injected.user ?? null,
-    loginUrl: injected.loginUrl ?? '',
-    registerUrl: injected.registerUrl ?? '',
-    logoutUrl: injected.logoutUrl ?? '',
-    tokenUrl: injected.tokenUrl ?? '',
+    loginUrl: normalizeUrl(injected.loginUrl),
+    registerUrl: normalizeUrl(injected.registerUrl),
+    logoutUrl: normalizeUrl(injected.logoutUrl),
+    tokenUrl: normalizeUrl(injected.tokenUrl),
     nonce: injected.nonce ?? '',
   };
+}
+
+/** 人设名字：后台没填或只填了空格时，退回默认的“梅林”。 */
+function normalizeAssistantName(value: unknown): string {
+  if (typeof value !== 'string') return '梅林';
+  return value.trim() || '梅林';
 }
 
 export function getConfig(): AssistantConfig {
@@ -143,9 +164,10 @@ export function getConfig(): AssistantConfig {
   return {
     apiBase: (injected.apiBase ?? '/ai-api').replace(/\/$/, ''),
     assetBase: withTrailingSlash(injected.assetBase ?? '/live2d/'),
-    title: injected.title ?? '博客小助手',
+    assistantName: normalizeAssistantName(injected.assistantName),
     voiceLang: injected.voiceLang ?? 'zh-CN',
     appearance: normalizeAppearance(injected.appearance),
+    live2dModel: typeof injected.live2dModel === 'string' ? injected.live2dModel : '',
     auth: normalizeAuth(injected.auth),
   };
 }

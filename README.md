@@ -50,7 +50,8 @@ frontend/public/live2d/models/
 { "name": "梅林", "scale": 1.0, "offsetX": 0, "offsetY": 0 }
 ```
 
-放好后 `pnpm dev` 或 `pnpm build` 会自动生成 `manifest.json`，页面上的「更换模型」上拉框会列出全部模型。
+放好后 `pnpm dev` 或 `pnpm build` 会自动生成 `manifest.json`。前台不提供换模型按钮；
+管理员在 WordPress 后台「设置 → Live2D 小助手 → Live2D 形象」里从清单中选择一个，所有访客都会看到它。
 **不要**用 Cubism 2 的 `.model.json` 格式，本项目只带 Cubism 3/4 运行时。
 
 ## 本地开发
@@ -123,7 +124,7 @@ pnpm build
 
 ## 当前状态
 
-- [x] Live2D 渲染、视线跟随、更换模型上拉框
+- [x] Live2D 渲染、视线跟随、管理员后台选择模型
 - [x] 形象大小三档预设 + 自定义像素（WordPress 后台可调）
 - [x] 半透明悬浮控件（悬停显示）
 - [x] 文本对话（SSE 流式）

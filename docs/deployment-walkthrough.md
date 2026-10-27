@@ -655,7 +655,10 @@ chown -R www:www /www/wwwroot/<站点目录>/wp-content/plugins/wp-live2d-ai
 1. WordPress 后台 → 插件 → 启用「Live2D AI 小助手」；
 2. 设置 → Live2D 小助手；
 3. AI 服务地址保持 `/ai-api`；
-4. 确认「登录凭证」区域显示 JWT 密钥**已配置**。
+4. 确认「登录凭证」区域显示 JWT 密钥**已配置**；
+5. 在「人设名字」里确认显示名（默认“梅林”，会出现在对话面板左上角）；
+6. 在「Live2D 形象」下拉框里选择要展示的模型（选项来自构建后的
+   `assets/app/live2d/models/manifest.json`）。
 
 插件版本号 `0.2.0` 会作为静态资源查询参数，升级后浏览器不会继续用旧缓存。
 以后改了前端但没升版本号，可能出现“代码更新了页面没变”，把 `VERSION` 加一即可。
@@ -730,12 +733,20 @@ curl -i -X POST "https://你的域名/?rest_route=/l2d-ai/v1/token"
 ### 11.4 浏览器
 
 1. 未登录打开博客，点聊天按钮 → 应看到“登录后就能聊天啦”和登录/注册按钮；
-2. 登录后刷新 → 标题下出现昵称，管理员带“管理员”标记；
-3. 打开开发者工具 → Network：
+2. 从导航登录 → 应回到站点首页，而不是后台个人资料页；
+   从文章页的助手登录门登录 → 应回到原来那篇文章；
+3. 登录后刷新 → 标题下出现昵称，管理员带“管理员”标记；
+   主导航出现“个人”和“退出”，“登录 / 注册”消失；
+4. 打开开发者工具 → Network：
    - `POST /wp-json/l2d-ai/v1/token` 返回 200，响应里有 `token`、`expires_at`；
    - `POST /ai-api/chat` 的请求头带 `Authorization: Bearer ...`；
    - 响应类型是 `text/event-stream`，文字逐段出现；
-4. 退出登录 → 登录门重新出现。
+5. 点“退出”→ 第一次点击就应该有反应：正常会直接退出
+   （导航里的“退出”回首页，聊天面板里的“退出”回当前页）；
+   即使站点策略要求确认，也应立刻出现确认页，而不是第二次点击才出现；
+6. 打开聊天面板 → 左上角标题应是后台设置的人设名字（默认“梅林”）；
+   右上角只显示昵称、剩余额度和“退出”，没有“更换模型”按钮；
+   访客看到的形象由后台设置决定。
 
 ### 11.5 未登录请求必须被拒绝
 
@@ -772,8 +783,10 @@ curl -i -X POST https://你的域名/ai-api/chat \
 
 1. **显示设置**（保存到 WordPress options）
    - AI 服务地址；
+   - 人设名字：默认“梅林”，显示在对话面板左上角；留空会恢复默认值；
    - 形象大小：小 / 中 / 大 / 自定义；
-   - 自定义宽高（160–420 px、260–720 px）。
+   - 自定义宽高（160–420 px、260–720 px）；
+   - Live2D 形象：从构建清单里选一个，所有访客共用；前台没有切换入口。
    这一类只影响浏览器，保存后访客刷新页面即可看到。
 
 2. **聊天额度与运行参数**（保存到后端 `runtime_settings.json`）
@@ -814,7 +827,10 @@ runuser -u l2dai -- env UV_CACHE_DIR=/opt/l2d-ai/.uv-cache /usr/local/bin/uv syn
 systemctl restart l2d-ai-backend
 journalctl -u l2d-ai-backend -n 50 --no-pager
 ```
-
+直接git的时候可能遇到属主保护，可以改为以下代码拉取github代码：
+```bash
+sudo -u l2dai git -C /opt/l2d-ai/WordPressAssistant pull
+```
 ### 12.2 更新插件
 
 本地重新 `pnpm build`，重新上传整个文件夹，覆盖后：

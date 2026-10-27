@@ -6,7 +6,7 @@
 
 - 形象在最上层，但**不拦截下层页面的点击、滚动、文本选择**；
 - 鼠标未悬停时控件半透明，悬停时清晰；
-- 支持换模型、文本对话、语音输入；
+- 支持管理员在后台选择 Live2D 形象、文本对话、语音输入；
 - AI 能回答站内文章相关问题，**给出引用来源与跳转按钮**；
 - 最终可平滑迁移到云服务器上的现有 WordPress，不破坏原有主题与功能。
 
@@ -29,9 +29,10 @@
 
 1. 在**前台页面** enqueue 构建产物 `assets/app/app.js`、`app.css`、Cubism Core；
 2. 通过 `wp_add_inline_script` 注入运行时配置
-   （API 地址、资源地址、站点名、语言、形象尺寸、登录态）；
-3. 提供「设置 → Live2D 小助手」页面：显示设置保存到 WordPress options；
-   额度/模型等运行参数由服务器端签 2 分钟管理员 JWT 后转发给 Python 后端。
+   （API 地址、资源地址、人设名字、语言、形象尺寸、模型、登录态）；
+3. 提供「设置 → Live2D 小助手」页面：显示设置（含人设名字、形象和模型）
+   保存到 WordPress options；额度等运行参数由服务器端签 2 分钟管理员 JWT
+   后转发给 Python 后端。
 
 它不包含任何 AI 逻辑，也不修改 Argon 主题文件。主题升级、WordPress 升级都不受影响。
 可用过滤器：
@@ -50,7 +51,8 @@
   只有按钮、菜单、对话面板 `pointer-events: auto`。因此形象覆盖在页面上但不影响下层交互。
 - **视线跟随**：监听 `mousemove` 手动调用 `model.focus()`，不依赖 PIXI 的交互系统。
 - **控件透明度**：默认 `opacity: .28`，`:hover` / `:focus-within` / 对话打开时变为 `1`；触屏设备默认更高不透明度。
-- **换模型**：构建前扫描 `public/live2d/models/**/*.model3.json` 生成 `manifest.json`，上拉框由此渲染。
+- **选择模型**：构建前扫描 `public/live2d/models/**/*.model3.json` 生成 `manifest.json`；
+  管理员在插件设置页从中选一个，插件把 id 注入前端，前台不提供切换入口。
 - **故障隔离**：Live2D 管理器用动态 `import()` 加载。Cubism Core 缺失或模型损坏时，
   只有形象加载失败并弹提示，聊天面板、语音和来源浮层仍然可用。
 - **语音输入**：浏览器 `SpeechRecognition` / `webkitSpeechRecognition`，识别结果填入输入框，用户确认后发送。

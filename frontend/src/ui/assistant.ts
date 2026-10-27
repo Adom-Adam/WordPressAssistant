@@ -10,7 +10,6 @@ import type { Live2DManager } from '../live2d/manager';
 import type { ChatMessage, Citation, ModelEntry, ModelManifest, StreamEvent } from '../types';
 
 const ICON = {
-  models: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3.5l1.7 4.8 4.8 1.7-4.8 1.7L12 16.5l-1.7-4.8-4.8-1.7 4.8-1.7L12 3.5z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z" fill="currentColor" opacity=".65"/></svg>`,
   chat: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 5.8h14a1.7 1.7 0 011.7 1.7v8.2a1.7 1.7 0 01-1.7 1.7H10l-4.6 3.2a.6.6 0 01-.94-.5v-2.7H5a1.7 1.7 0 01-1.7-1.7V7.5A1.7 1.7 0 015 5.8z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><circle cx="8.6" cy="11.7" r="1.05" fill="currentColor"/><circle cx="12" cy="11.7" r="1.05" fill="currentColor"/><circle cx="15.4" cy="11.7" r="1.05" fill="currentColor"/></svg>`,
   mic: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="9" y="3.5" width="6" height="10.5" rx="3" stroke="currentColor" stroke-width="1.7"/><path d="M5.8 11.2a6.2 6.2 0 0012.4 0M12 17.4v3.1M9.2 20.5h5.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>`,
   close: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>`,
@@ -22,12 +21,7 @@ const TEMPLATE = `
     <canvas class="l2d-canvas" aria-hidden="true"></canvas>
 
     <div class="l2d-dock">
-      <div class="l2d-model-menu" hidden>
-        <div class="l2d-model-menu__title">换个形象</div>
-        <div class="l2d-model-menu__list"></div>
-      </div>
       <div class="l2d-dock__buttons">
-        <button type="button" class="l2d-btn" data-action="models" aria-label="更换模型" title="更换模型">${ICON.models}</button>
         <button type="button" class="l2d-btn" data-action="voice" aria-label="语音输入" title="语音输入">${ICON.mic}</button>
         <button type="button" class="l2d-btn l2d-btn--primary" data-action="chat" aria-label="打开对话" title="和我聊聊">${ICON.chat}</button>
       </div>
@@ -37,22 +31,22 @@ const TEMPLATE = `
       <header class="l2d-chat__header">
         <div class="l2d-chat__title">
           <span class="l2d-status-dot"></span>
-          <span class="l2d-chat__name">小助手</span>
+          <span class="l2d-chat__name">梅林</span>
         </div>
         <button type="button" class="l2d-chat__close" data-action="close" aria-label="收起对话" title="收起">${ICON.close}</button>
       </header>
       <div class="l2d-chat__userbar" hidden>
         <span class="l2d-chat__user"></span>
         <span class="l2d-chat__quota" hidden></span>
-        <a class="l2d-chat__logout" href="#" rel="nofollow">退出</a>
+        <a class="l2d-chat__logout" href="#" rel="nofollow" no-pjax>退出</a>
       </div>
       <div class="l2d-chat__messages" role="log" aria-live="polite"></div>
       <div class="l2d-gate" hidden>
         <div class="l2d-gate__title">登录后就能聊天啦</div>
         <p class="l2d-gate__text">用博客账号登录后，就能和我聊天啦～</p>
         <div class="l2d-gate__actions">
-          <a class="l2d-gate__btn l2d-gate__btn--primary" data-auth="login" href="#">去登录</a>
-          <a class="l2d-gate__btn" data-auth="register" href="#" hidden>注册账号</a>
+          <a class="l2d-gate__btn l2d-gate__btn--primary" data-auth="login" href="#" no-pjax>去登录</a>
+          <a class="l2d-gate__btn" data-auth="register" href="#" no-pjax hidden>注册账号</a>
         </div>
       </div>
       <form class="l2d-chat__form">
@@ -92,6 +86,7 @@ export class AssistantApp {
   private readonly root: HTMLElement;
   private readonly canvas: HTMLCanvasElement;
   private readonly chatPanel: HTMLElement;
+  private readonly chatName: HTMLElement;
   private readonly messagesEl: HTMLElement;
   private readonly form: HTMLFormElement;
   private readonly userbar: HTMLElement;
@@ -103,15 +98,11 @@ export class AssistantApp {
   private readonly gateRegister: HTMLAnchorElement;
   private readonly input: HTMLTextAreaElement;
   private readonly sendBtn: HTMLButtonElement;
-  private readonly modelsBtn: HTMLButtonElement;
   private readonly voiceBtn: HTMLButtonElement;
   private readonly chatBtn: HTMLButtonElement;
-  private readonly modelMenu: HTMLElement;
-  private readonly modelList: HTMLElement;
   private readonly toast: HTMLElement;
 
   private l2d: Live2DManager | null = null;
-  private manifest: ModelManifest | null = null;
   private quota: QuotaInfo | null = null;
   private history: ChatMessage[] = [];
   private busy = false;
@@ -141,6 +132,10 @@ export class AssistantApp {
 
     this.canvas = must<HTMLCanvasElement>(this.root, '.l2d-canvas');
     this.chatPanel = must(this.root, '.l2d-chat');
+    // 面板标题跟着人设走：后台改了名字，这里只改文本，不需要改模板。
+    this.chatName = must(this.root, '.l2d-chat__name');
+    this.chatName.textContent = config.assistantName;
+    this.chatPanel.setAttribute('aria-label', `${config.assistantName}的对话面板`);
     this.messagesEl = must(this.root, '.l2d-chat__messages');
     this.form = must<HTMLFormElement>(this.root, '.l2d-chat__form');
     this.userbar = must(this.root, '.l2d-chat__userbar');
@@ -152,11 +147,8 @@ export class AssistantApp {
     this.gateRegister = must<HTMLAnchorElement>(this.root, '[data-auth="register"]');
     this.input = must<HTMLTextAreaElement>(this.root, '.l2d-chat__input');
     this.sendBtn = must<HTMLButtonElement>(this.root, '.l2d-chat__send');
-    this.modelsBtn = must<HTMLButtonElement>(this.root, '[data-action="models"]');
     this.voiceBtn = must<HTMLButtonElement>(this.root, '[data-action="voice"]');
     this.chatBtn = must<HTMLButtonElement>(this.root, '[data-action="chat"]');
-    this.modelMenu = must(this.root, '.l2d-model-menu');
-    this.modelList = must(this.root, '.l2d-model-menu__list');
     this.toast = must(this.root, '.l2d-toast');
 
     this.applyAuthState();
@@ -246,7 +238,6 @@ export class AssistantApp {
   }
 
   private bindEvents(): void {
-    this.modelsBtn.addEventListener('click', () => this.toggleModelMenu());
     this.chatBtn.addEventListener('click', () => this.toggleChat());
     must(this.root, '[data-action="close"]').addEventListener('click', () => this.closeChat());
     this.voiceBtn.addEventListener('click', () => this.toggleVoice());
@@ -270,16 +261,11 @@ export class AssistantApp {
       const onCite = target instanceof Element && target.closest('.l2d-cite');
       const inPopover = this.citePopover?.contains(target) ?? false;
       if (!onCite && !inPopover) this.hideCitationPopover();
-
-      if (this.modelMenu.hidden) return;
-      if (this.modelMenu.contains(target) || this.modelsBtn.contains(target)) return;
-      this.modelMenu.hidden = true;
     });
 
     document.addEventListener('keydown', (event) => {
       if (event.key !== 'Escape') return;
       this.hideCitationPopover();
-      this.modelMenu.hidden = true;
       if (!this.chatPanel.hidden) this.closeChat();
     });
 
@@ -295,57 +281,28 @@ export class AssistantApp {
     if (!response.ok) throw new Error(`模型清单不可用（${response.status}）`);
 
     const manifest = (await response.json()) as ModelManifest;
-    this.manifest = manifest;
-    this.renderModelMenu();
 
     if (!manifest.models?.length) {
       this.showToast('还没找到模型：把模型文件夹放进 models/ 目录后重新构建～', 7000);
       return;
     }
 
-    const first = manifest.models.find((item) => item.id === manifest.default) ?? manifest.models[0];
+    // 模型由管理员在 WordPress 后台选定，普通访客没有切换入口。
+    // 依次尝试：后台选定的模型 → manifest 的默认值 → 清单里的第一个。
+    const configured = manifest.models.find((item) => item.id === this.config.live2dModel);
+    const fallback = manifest.models.find((item) => item.id === manifest.default);
+    const first = configured ?? fallback ?? manifest.models[0];
     await this.selectModel(first);
-  }
-
-  private renderModelMenu(): void {
-    this.modelList.replaceChildren();
-    const models = this.manifest?.models ?? [];
-    if (!models.length) {
-      const empty = document.createElement('div');
-      empty.className = 'l2d-model-empty';
-      empty.textContent = '暂无模型';
-      this.modelList.appendChild(empty);
-      return;
-    }
-    for (const model of models) {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'l2d-model-item';
-      button.dataset.modelId = model.id;
-      button.textContent = model.name;
-      button.addEventListener('click', () => {
-        void this.selectModel(model);
-      });
-      this.modelList.appendChild(button);
-    }
   }
 
   private async selectModel(model: ModelEntry): Promise<void> {
     if (!this.l2d) return;
     try {
       await this.l2d.load(model);
-      for (const item of this.modelList.querySelectorAll<HTMLElement>('.l2d-model-item')) {
-        item.classList.toggle('is-active', item.dataset.modelId === model.id);
-      }
-      this.modelMenu.hidden = true;
     } catch (error) {
       console.error('[l2d-ai] 模型加载失败', error);
       this.showToast(`「${model.name}」加载失败，检查模型文件是否完整～`, 6000);
     }
-  }
-
-  private toggleModelMenu(): void {
-    this.modelMenu.hidden = !this.modelMenu.hidden;
   }
 
   private toggleChat(): void {
@@ -471,7 +428,7 @@ export class AssistantApp {
         void this.refreshQuota();
       } else if (error instanceof ChatHttpError && error.status === 503) {
         // 服务端没配 JWT 密钥，用户自己解决不了，提示联系站长。
-        bubble.textContent = '小助手还没准备好登录凭证，先联系站长看看吧～';
+        bubble.textContent = `${this.config.assistantName}还没准备好登录凭证，先联系站长看看吧～`;
       } else {
         bubble.textContent = '呜…我这边连接不上后端。检查一下 AI 服务是否启动了好不好？';
       }

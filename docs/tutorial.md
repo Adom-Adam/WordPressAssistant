@@ -12,7 +12,7 @@
 
 ```
 浏览器
-  ├─ Live2D 形象 / 对话 / 语音 / 换模型 UI   →  frontend（Vite + TS + PixiJS）
+  ├─ Live2D 形象 / 对话 / 语音 UI           →  frontend（Vite + TS + PixiJS）
   └─ fetch /ai-api/chat（SSE 流式）
         └─ Python AI 服务                    →  backend（FastAPI + LangChain + DeepSeek）
               └─ 知识库 / 站内检索（后续）    →  backend/knowledge
@@ -148,7 +148,7 @@ curl -fsSL -o frontend/public/live2d/core/live2dcubismcore.min.js \
 | `frontend/src/config.ts` | 读取插件注入的运行时配置 |
 | `frontend/src/api/chat.ts` | SSE 客户端 |
 | `frontend/src/live2d/manager.ts` | PIXI + Live2D 加载、缩放、视线跟随 |
-| `frontend/src/ui/assistant.ts` | 悬浮按钮、换模型、对话、语音 |
+| `frontend/src/ui/assistant.ts` | 悬浮按钮、对话、语音 |
 | `frontend/src/style.css` | 天蓝色主题，全部作用域在 `.l2d-root` |
 | `frontend/src/main.ts` | 启动入口 |
 
@@ -421,8 +421,8 @@ data: {"type": "delta", "content": "7"}
 插件只有三个职责，别把 AI 逻辑写进 PHP：
 
 1. `wp_enqueue_script` / `wp_enqueue_style` 加载 `assets/app/`；
-2. `wp_add_inline_script` 注入 `window.L2D_AI_CONFIG`（API 地址、资源地址、语言）；
-3. 后台设置页配置 AI 服务地址。
+2. `wp_add_inline_script` 注入 `window.L2D_AI_CONFIG`（API 地址、资源地址、语言、人设名字、模型）；
+3. 后台设置页配置 AI 服务地址、人设名字和 Live2D 形象。
 
 关键判断：构建产物不存在时直接 return，避免开发环境 404：
 
@@ -929,8 +929,13 @@ Argon 的导航仍然使用 WordPress 的菜单系统，不需要改主题文件
 
 几个容易踩的点：
 
-- **登录后默认会进 wp-admin**。如果希望登录后回到当前文章，链接必须由代码动态生成：
+- **登录后默认会进 wp-admin**。WordPress 登录表单会把 `redirect_to` 默认填成
+  `/wp-admin/`（不是空字符串）。插件用 `login_redirect` 过滤器把它改成站点首页；
+  如果希望登录后回到当前文章，链接必须由代码动态生成：
   `wp_login_url( get_permalink() )`。静态菜单链接做不到“知道当前页面”。
+- **登录/退出链接要加 `no-pjax`**。Argon 会用 PJAX 拦截普通 `<a>` 做局部刷新，
+  但 `wp-login.php` 不是普通文章页，第一次点击会看起来“没反应”，第二次才落到确认页。
+  加 `no-pjax` 属性后，主题就把这个链接交回浏览器正常跳转。
 - **菜单项不会自动隐藏**。WordPress 原生菜单没有“登录后隐藏登录按钮”的逻辑；
   需要条件显示时，要么装菜单可见性插件，要么由我们自己的插件输出。
 - **不要手写退出链接**。`wp-login.php?action=logout` 需要 nonce；

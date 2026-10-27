@@ -132,59 +132,6 @@
   animation: l2d-pulse 1.2s ease-in-out infinite;
 }
 
-/* ---------- 模型选择上拉框 ---------- */
-.l2d-model-menu {
-  pointer-events: auto;
-  width: 196px;
-  max-height: 232px;
-  overflow: auto;
-  padding: 8px;
-  border-radius: 18px;
-  border: 1px solid rgba(162, 221, 249, 0.85);
-  background: rgba(255, 255, 255, 0.94);
-  backdrop-filter: blur(14px);
-  box-shadow: 0 14px 34px rgba(47, 135, 184, 0.22);
-  animation: l2d-pop 0.18s ease-out;
-}
-
-.l2d-model-menu__title {
-  padding: 2px 8px 7px;
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  color: var(--l2d-sky-600);
-}
-
-.l2d-model-item {
-  display: block;
-  width: 100%;
-  padding: 8px 10px;
-  border: 0;
-  border-radius: 11px;
-  background: transparent;
-  text-align: left;
-  font-size: 13px;
-  line-height: 1.4;
-  cursor: pointer;
-  transition: background 0.15s ease;
-}
-
-.l2d-model-item:hover {
-  background: var(--l2d-sky-100);
-}
-
-.l2d-model-item.is-active {
-  background: var(--l2d-sky-200);
-  font-weight: 600;
-}
-
-.l2d-model-empty {
-  padding: 10px;
-  font-size: 12px;
-  color: #7fa5b8;
-  text-align: center;
-}
-
 /* ---------- 对话面板 ---------- */
 .l2d-chat {
   position: absolute;

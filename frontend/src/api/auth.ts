@@ -51,7 +51,7 @@ export async function getAuthToken(auth: AssistantAuthConfig): Promise<string | 
   if (!auth.loggedIn) {
     // required=false 时允许访客继续（是否放行由后端决定），不强行换 token。
     if (!auth.required) return null;
-    throw new AuthError('请先登录后再和小助手聊天', 401, 'l2d_ai_not_logged_in');
+    throw new AuthError('请先登录后再聊天', 401, 'l2d_ai_not_logged_in');
   }
 
   const key = `${auth.tokenUrl}|${auth.user?.id ?? 0}`;
@@ -106,7 +106,7 @@ async function requestToken(auth: AssistantAuthConfig, key: string): Promise<str
     const { message, code } = readError(data);
     const fallback =
       response.status === 401
-        ? '请先登录后再和小助手聊天'
+        ? '请先登录后再聊天'
         : response.status === 403
           ? '登录状态已过期，请刷新页面'
           : `无法获取登录凭证（${response.status}）`;

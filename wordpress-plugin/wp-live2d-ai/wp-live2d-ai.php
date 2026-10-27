@@ -3,7 +3,7 @@
  * Plugin Name:       Live2D AI 小助手
  * Plugin URI:        https://github.com/Adom-Adam/WordPressAssistant
  * Description:       在博客左下角显示 Live2D AI 助手。前端只负责展示与交互，AI 逻辑由独立的 Python 服务提供。
- * Version:           0.3.1
+ * Version:           0.3.3
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * Author:            Adom
@@ -14,11 +14,15 @@ defined( 'ABSPATH' ) || exit;
 
 final class L2D_AI_Plugin {
 
-	const VERSION          = '0.3.1';
+	const VERSION          = '0.3.3';
 	const OPTION_API_BASE  = 'l2d_ai_api_base';
+	const OPTION_NAME      = 'l2d_ai_assistant_name';
 	const OPTION_SIZE      = 'l2d_ai_size_preset';
+	const OPTION_MODEL     = 'l2d_ai_live2d_model';
 	const OPTION_WIDTH     = 'l2d_ai_size_width';
 	const OPTION_HEIGHT    = 'l2d_ai_size_height';
+	/** 没有单独设置时使用的人设名字。改人设时只需改这里或后台设置。 */
+	const DEFAULT_NAME     = '梅林';
 	const SETTINGS_GROUP   = 'l2d_ai_settings';
 	const REST_NAMESPACE   = 'l2d-ai/v1';
 	const JWT_TTL          = 900; // 15 分钟；过期后前端重新向 WordPress 换新 token。
@@ -40,7 +44,11 @@ final class L2D_AI_Plugin {
 		add_action( 'admin_init', array( __CLASS__, 'register_settings' ) );
 		add_action( 'admin_post_l2d_ai_save_backend_settings', array( __CLASS__, 'save_backend_settings' ) );
 		add_action( 'wp_head', array( __CLASS__, 'hide_auth_nav_for_logged_in' ) );
+		add_action( 'wp_footer', array( __CLASS__, 'render_pjax_optout_script' ) );
+		add_action( 'wp_footer', array( __CLASS__, 'render_auth_nav_script' ) );
 		add_filter( 'wp_nav_menu_items', array( __CLASS__, 'append_logout_link' ), 10, 2 );
+		// 主题可能在登录后默认把人送进后台个人资料页；这里用较高优先级覆盖。
+		add_filter( 'login_redirect', array( __CLASS__, 'login_redirect_to_home' ), 999, 3 );
 		add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), array( __CLASS__, 'action_links' ) );
 	}
 
@@ -84,12 +92,13 @@ final class L2D_AI_Plugin {
 		$config = apply_filters(
 			'l2d_ai_frontend_config',
 			array(
-				'apiBase'   => self::api_base(),
-				'assetBase' => $app_url . 'live2d/',
-				'title'     => get_bloginfo( 'name' ),
-				'voiceLang' => 0 === strpos( get_locale(), 'zh' ) ? 'zh-CN' : 'en-US',
-				'appearance' => self::appearance_config(),
-				'auth'      => self::auth_config(),
+				'apiBase'       => self::api_base(),
+				'assetBase'     => $app_url . 'live2d/',
+				'assistantName' => self::assistant_name(),
+				'voiceLang'     => 0 === strpos( get_locale(), 'zh' ) ? 'zh-CN' : 'en-US',
+				'appearance'    => self::appearance_config(),
+				'live2dModel'   => self::live2d_model(),
+				'auth'          => self::auth_config(),
 			)
 		);
 
@@ -115,6 +124,22 @@ final class L2D_AI_Plugin {
 		}
 		// 允许同域相对路径，例如 /ai-api
 		return '/' . ltrim( sanitize_text_field( $value ), '/' );
+	}
+
+	/**
+	 * 人设名字，用于对话面板左上角等前台文案。
+	 *
+	 * 单独抽成选项而不是写死在前端，换人设时只改后台设置即可；
+	 * 以后如果还要显示“馆员名”“角色名”之类，也可以复用同一个值。
+	 */
+	public static function assistant_name() {
+		$value = trim( (string) get_option( self::OPTION_NAME, self::DEFAULT_NAME ) );
+		return '' !== $value ? $value : self::DEFAULT_NAME;
+	}
+
+	public static function sanitize_assistant_name( $value ) {
+		$value = trim( sanitize_text_field( (string) $value ) );
+		return '' !== $value ? $value : self::DEFAULT_NAME;
 	}
 
 	/** 当前档位。只接受四个已知值，写错时回退到 medium。 */
@@ -169,6 +194,88 @@ final class L2D_AI_Plugin {
 	}
 
 	/**
+	 * 读取构建后的 Live2D 模型清单。
+	 *
+	 * 前台不再让用户选模型，管理员在设置页从这里列出的模型里选一个。
+	 * 清单由 `frontend/scripts/gen-model-manifest.mjs` 在构建时生成。
+	 */
+	private static function live2d_manifest() {
+		static $manifest = null;
+		if ( is_array( $manifest ) ) {
+			return $manifest;
+		}
+
+		$path = plugin_dir_path( __FILE__ ) . 'assets/app/live2d/models/manifest.json';
+		if ( ! is_readable( $path ) ) {
+			$manifest = array();
+			return $manifest;
+		}
+
+		$data     = json_decode( (string) file_get_contents( $path ), true );
+		$manifest = is_array( $data ) ? $data : array();
+		return $manifest;
+	}
+
+	/** 返回 id => 显示名，供后台下拉框使用。 */
+	private static function live2d_models() {
+		$manifest = self::live2d_manifest();
+		$models   = array();
+
+		if ( empty( $manifest['models'] ) || ! is_array( $manifest['models'] ) ) {
+			return $models;
+		}
+
+		foreach ( $manifest['models'] as $model ) {
+			if ( ! is_array( $model ) || empty( $model['id'] ) ) {
+				continue;
+			}
+			$id   = (string) $model['id'];
+			$name = isset( $model['name'] ) && '' !== (string) $model['name']
+				? (string) $model['name']
+				: $id;
+
+			$models[ $id ] = $name;
+		}
+
+		return $models;
+	}
+
+	/** 清单里的默认模型；清单丢失时返回空字符串。 */
+	private static function live2d_default_model() {
+		$models = self::live2d_models();
+		if ( ! $models ) {
+			return '';
+		}
+
+		$manifest = self::live2d_manifest();
+		$default  = isset( $manifest['default'] ) ? (string) $manifest['default'] : '';
+		if ( '' !== $default && isset( $models[ $default ] ) ) {
+			return $default;
+		}
+
+		return (string) array_key_first( $models );
+	}
+
+	/** 当前生效的模型。保存过的 id 失效时自动回退到清单默认值。 */
+	public static function live2d_model() {
+		$value  = (string) get_option( self::OPTION_MODEL, '' );
+		$models = self::live2d_models();
+
+		if ( '' !== $value && isset( $models[ $value ] ) ) {
+			return $value;
+		}
+
+		return self::live2d_default_model();
+	}
+
+	public static function sanitize_live2d_model( $value ) {
+		$value  = sanitize_text_field( (string) $value );
+		$models = self::live2d_models();
+
+		return isset( $models[ $value ] ) ? $value : self::live2d_default_model();
+	}
+
+	/**
 	 * 当前页面地址，用于登录后回到原文章。
 	 *
 	 * 用 $wp->request 而不是原始 REQUEST_URI：后者已经包含
@@ -213,6 +320,62 @@ final class L2D_AI_Plugin {
 	}
 
 	/**
+	 * 登录后默认回到站点首页。
+	 *
+	 * 为什么需要这个过滤器：
+	 * 导航里的登录链接是手工加的 `wp-login.php`，没有带 redirect_to。
+	 * WordPress/Argon 在没有目标时可能把用户送进后台个人资料页，
+	 * 对普通读者来说很突兀。
+	 *
+	 * 处理规则：
+	 * - 从导航/登录页直接登录：WordPress 登录表单默认把 redirect_to
+	 *   填成 /wp-admin/（不是空字符串），这里把它和空目标一起改成首页；
+	 * - 从文章页的助手登录门进来时，wp_login_url() 会带 redirect_to，
+	 *   仍然回到那篇文章；
+	 * - 主题即使拿到了首页/文章目标，仍可能把 $redirect_to 改到后台
+	 *   （常见是 profile.php）；这种情况下改回用户原本的目标；
+	 * - 用户明确打开后台页面时保持原目标。
+	 */
+	public static function login_redirect_to_home( $redirect_to, $requested_redirect_to, $user ) {
+		if ( is_wp_error( $user ) ) {
+			return $redirect_to;
+		}
+
+		$requested_path = '';
+		if ( is_string( $requested_redirect_to ) && '' !== $requested_redirect_to ) {
+			$requested_path = (string) wp_parse_url( $requested_redirect_to, PHP_URL_PATH );
+		}
+
+		$redirect_path = is_string( $redirect_to )
+			? (string) wp_parse_url( $redirect_to, PHP_URL_PATH )
+			: '';
+
+		// 用 admin_url() 的路径，兼容 WordPress 装在子目录的情况。
+		$admin_path = untrailingslashit( (string) wp_parse_url( admin_url(), PHP_URL_PATH ) );
+		if ( '' === $admin_path ) {
+			$admin_path = '/wp-admin';
+		}
+		$admin_prefix = $admin_path . '/';
+
+		// 登录表单默认目标就是后台首页，对读者来说等于“没有目标”。
+		if ( '' === $requested_path || $requested_path === $admin_path || $requested_path === $admin_prefix ) {
+			return esc_url_raw( home_url( '/' ) );
+		}
+
+		$requested_is_admin = ( 0 === strpos( $requested_path, $admin_prefix ) );
+		$redirect_is_admin  = ( 0 === strpos( $redirect_path, $admin_prefix ) );
+
+		// 用户本来要去前台文章/首页，主题却把结果改到后台：
+		// 用用户原本的目标覆盖。wp_validate_redirect() 会拦掉外部域名，
+		// 非法时退回首页。
+		if ( $redirect_is_admin && ! $requested_is_admin ) {
+			return wp_validate_redirect( $requested_redirect_to, home_url( '/' ) );
+		}
+
+		return $redirect_to;
+	}
+
+	/**
 	 * 登录后隐藏导航里的“登录 / 注册”。
 	 *
 	 * 这两个链接是 Argon 菜单里的普通链接，不是主题模板逻辑。
@@ -230,32 +393,184 @@ final class L2D_AI_Plugin {
 	}
 
 	/**
-	 * 在 Argon 主导航末尾追加“退出”链接。
+	 * 在 Argon 主导航末尾追加“个人”和“退出”链接。
 	 *
 	 * 为什么用 wp_logout_url()：
 	 * WordPress 的退出动作需要 nonce，直接写 /wp-login.php?action=logout
 	 * 会多一步确认页，某些安全插件下还可能失败。
 	 *
-	 * 为什么只认 navbar-nav-hover：
-	 * wp_nav_menu_items 会对页脚、侧栏等所有菜单触发；
-	 * 只给 Argon 的主导航加，避免同一份“退出”出现在多个菜单位置。
+	 * 为什么不看 menu_class：
+	 * Argon 的菜单可能是自定义遍历渲染的，最终 <ul> 的 class
+	 * 不一定原样出现在 $args->menu_class 里。这里改为看菜单内容：
+	 * 只给包含登录/注册链接的那个菜单追加，避免落到页脚菜单。
 	 */
 	public static function append_logout_link( $items, $args ) {
 		if ( ! is_user_logged_in() ) {
 			return $items;
 		}
 
-		$menu_class = is_object( $args ) && isset( $args->menu_class ) ? (string) $args->menu_class : '';
-		if ( false === strpos( $menu_class, 'navbar-nav-hover' ) ) {
+		if ( false === strpos( $items, 'wp-login.php' ) ) {
 			return $items;
 		}
 
-		$items .= '<li class="nav-item l2d-ai-logout">'
-			. '<a class="nav-link" href="' . esc_url( wp_logout_url( home_url( '/' ) ) ) . '">'
+		// `no-pjax` 是 Argon 主题的“别接管这个链接”标记。
+		// 不加的话，主题会用 AJAX 局部刷新 wp-login.php，
+		// 第一次点击看起来毫无反应，第二次才落到确认页。
+		$account_link = '<li class="nav-item l2d-ai-account">'
+			. '<a class="nav-link" no-pjax href="' . esc_url( admin_url( 'profile.php' ) ) . '">'
+			. '<span class="nav-link-inner--text">个人</span>'
+			. '</a></li>';
+		$logout_link  = '<li class="nav-item l2d-ai-logout">'
+			. '<a class="nav-link" no-pjax href="' . esc_url( wp_logout_url( home_url( '/' ) ) ) . '">'
 			. '<span class="nav-link-inner--text">退出</span>'
 			. '</a></li>';
 
+		if ( false === strpos( $items, 'l2d-ai-account' ) ) {
+			$items .= $account_link;
+		}
+		if ( false === strpos( $items, 'action=logout' ) ) {
+			$items .= $logout_link;
+		}
+
 		return $items;
+	}
+
+	/**
+	 * 让登录/退出链接绕开 Argon 的 PJAX。
+	 *
+	 * Argon 的主题脚本会拦截页面上所有普通 `<a>`：
+	 * `$(document).pjax("a[href]:not([no-pjax])...")`。
+	 * `wp-login.php` 不是普通文章页，PJAX 找不到它要的容器，
+	 * 第一次点击看起来“没反应”，第二次才落到确认页。
+	 *
+	 * 给链接加 `no-pjax` 是主题自己提供的退出开关。这里对访客和登录用户
+	 * 都输出一次，覆盖主题菜单里原本就有的登录/注册链接。
+	 */
+	public static function render_pjax_optout_script() {
+		?>
+		<script id="l2d-ai-pjax-optout">
+		(function () {
+			document.querySelectorAll('a[href*="wp-login.php"]').forEach(function (link) {
+				link.setAttribute('no-pjax', '');
+			});
+		})();
+		</script>
+		<?php
+	}
+
+	/**
+	 * 前端兜底：有些主题会自己遍历菜单项，不经过 wp_nav_menu_items。
+	 *
+	 * 这段脚本只在登录状态输出，做三件事：
+	 * 1. 隐藏导航里的登录/注册；
+	 * 2. 补“个人”入口；
+	 * 3. 补“退出”链接。
+	 *
+	 * 退出地址由 PHP 生成，仍然带 nonce；脚本本身不拼 URL。
+	 */
+	public static function render_auth_nav_script() {
+		if ( ! is_user_logged_in() ) {
+			return;
+		}
+
+		$logout_url   = wp_logout_url( home_url( '/' ) );
+		$personal_url = admin_url( 'profile.php' );
+		?>
+		<script id="l2d-ai-auth-nav">
+		(function () {
+			var logoutUrl = <?php echo wp_json_encode( $logout_url ); ?>;
+			var personalUrl = <?php echo wp_json_encode( $personal_url ); ?>;
+
+			function decodeUrl(url) {
+				// 有些缓存/优化插件会把内联脚本里的 & 转成 &amp;。
+				// 直接拿它当 href，WordPress 会认为 nonce 参数名是
+				// amp;_wpnonce，于是先落到“确认退出”页。
+				return String(url).replace(/&amp;/gi, '&').replace(/&#0*38;/g, '&');
+			}
+
+			function ensureItem(nav, className, url, label) {
+				if (nav.querySelector('.' + className)) {
+					return;
+				}
+
+				var item = document.createElement('li');
+				item.className = 'nav-item ' + className;
+
+				var link = document.createElement('a');
+				link.className = 'nav-link';
+				// 关键：告诉 Argon 的 PJAX 不要接管这个链接。
+				link.setAttribute('no-pjax', '');
+				link.href = decodeUrl(url);
+
+				var text = document.createElement('span');
+				text.className = 'nav-link-inner--text';
+				text.textContent = label;
+
+				link.appendChild(text);
+				item.appendChild(link);
+
+				// “个人”放在“退出”前面；如果退出已经存在，就插在它前面。
+				var logout = nav.querySelector('.l2d-ai-logout');
+				if (logout && className !== 'l2d-ai-logout') {
+					nav.insertBefore(item, logout);
+				} else {
+					nav.appendChild(item);
+				}
+			}
+
+			function updateNav(nav) {
+				// 已经存在的退出链接（主题自带或 PHP 过滤器加的）统一换成
+				// 本次页面加载生成的新地址。这样即使主题漏了 nonce，
+				// 或缓存/优化插件把 & 二次转义，第一次点击也能直接退出。
+				// 先修好 href，下面的“隐藏登录”才知道它是退出、不该隐藏。
+				nav.querySelectorAll('a[href*="action=logout"]').forEach(function (link) {
+					link.href = decodeUrl(logoutUrl);
+					// 主题可能自己加过退出链接；一并标记为不交给 PJAX。
+					link.setAttribute('no-pjax', '');
+					var item = link.closest('li');
+					if (item) {
+						item.classList.add('l2d-ai-logout');
+					}
+				});
+
+				// 隐藏登录/注册；保留退出。
+				nav.querySelectorAll('a[href*="wp-login.php"]').forEach(function (link) {
+					if (link.href.indexOf('action=logout') !== -1) {
+						return;
+					}
+					var item = link.closest('li');
+					if (item) {
+						item.style.display = 'none';
+					}
+				});
+
+				ensureItem(nav, 'l2d-ai-account', personalUrl, '个人');
+				ensureItem(nav, 'l2d-ai-logout', logoutUrl, '退出');
+			}
+
+			function init() {
+				var navs = document.querySelectorAll('.navbar-nav-hover');
+				if (!navs.length) {
+					// 没找到 Argon 的主导航类名时，只选包含登录链接的菜单，
+					// 避免把“退出”挂到搜索框旁边的空导航上。
+					navs = [];
+					document.querySelectorAll('.navbar-nav').forEach(function (nav) {
+						if (nav.querySelector('a[href*="wp-login.php"]')) {
+							navs.push(nav);
+						}
+					});
+				}
+				navs.forEach(updateNav);
+			}
+
+			if (document.readyState === 'loading') {
+				document.addEventListener('DOMContentLoaded', init);
+			} else {
+				init();
+			}
+		})();
+		</script>
+		<?php
 	}
 
 	/**
@@ -626,11 +941,31 @@ final class L2D_AI_Plugin {
 
 		register_setting(
 			self::SETTINGS_GROUP,
+			self::OPTION_NAME,
+			array(
+				'type'              => 'string',
+				'sanitize_callback' => array( __CLASS__, 'sanitize_assistant_name' ),
+				'default'           => self::DEFAULT_NAME,
+			)
+		);
+
+		register_setting(
+			self::SETTINGS_GROUP,
 			self::OPTION_SIZE,
 			array(
 				'type'              => 'string',
 				'sanitize_callback' => array( __CLASS__, 'sanitize_size_preset' ),
 				'default'           => 'medium',
+			)
+		);
+
+		register_setting(
+			self::SETTINGS_GROUP,
+			self::OPTION_MODEL,
+			array(
+				'type'              => 'string',
+				'sanitize_callback' => array( __CLASS__, 'sanitize_live2d_model' ),
+				'default'           => '',
 			)
 		);
 
@@ -708,6 +1043,24 @@ final class L2D_AI_Plugin {
 						</td>
 					</tr>
 					<tr>
+						<th scope="row">
+							<label for="l2d-ai-assistant-name">人设名字</label>
+						</th>
+						<td>
+							<input
+								type="text"
+								id="l2d-ai-assistant-name"
+								name="<?php echo esc_attr( self::OPTION_NAME ); ?>"
+								value="<?php echo esc_attr( self::assistant_name() ); ?>"
+								class="regular-text"
+								placeholder="<?php echo esc_attr( self::DEFAULT_NAME ); ?>"
+							/>
+							<p class="description">
+								显示在对话面板左上角。改成人设的名字即可；留空会恢复默认的“<?php echo esc_html( self::DEFAULT_NAME ); ?>”。
+							</p>
+						</td>
+					</tr>
+					<tr>
 						<th scope="row">Live2D 形象大小</th>
 						<td>
 							<select name="<?php echo esc_attr( self::OPTION_SIZE ); ?>" id="l2d-ai-size-preset">
@@ -757,6 +1110,32 @@ final class L2D_AI_Plugin {
 								px
 							</p>
 							<p class="description">自定义范围：宽 160–420 px，高 260–720 px。手机端会自动缩小。</p>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row">
+							<label for="l2d-ai-live2d-model">Live2D 形象</label>
+						</th>
+						<td>
+							<?php $live2d_models = self::live2d_models(); ?>
+							<?php if ( $live2d_models ) : ?>
+								<select name="<?php echo esc_attr( self::OPTION_MODEL ); ?>" id="l2d-ai-live2d-model">
+									<?php foreach ( $live2d_models as $model_id => $model_name ) : ?>
+										<option value="<?php echo esc_attr( $model_id ); ?>" <?php selected( self::live2d_model(), $model_id ); ?>>
+											<?php echo esc_html( $model_name ); ?>
+										</option>
+									<?php endforeach; ?>
+								</select>
+								<p class="description">
+									所有访客都会看到这个形象；前台不再提供“更换模型”按钮。
+									模型清单来自构建后的 <code>manifest.json</code>。
+								</p>
+							<?php else : ?>
+								<p class="description">
+									没有找到 <code>assets/app/live2d/models/manifest.json</code>。
+									先执行 <code>pnpm --dir frontend build</code>，再刷新此页。
+								</p>
+							<?php endif; ?>
 						</td>
 					</tr>
 				</table>
