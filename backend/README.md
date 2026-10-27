@@ -148,8 +148,33 @@ uv run pytest -q
 - `test_chat_api.py`：401 / 200 / 429（个人与全站）/ 503 / 失败退款 / `GET /quota`；
 - `test_runtime_settings.py`：后台参数范围、非法值整批拒绝、损坏文件逐字段回退；
 - `test_admin_api.py`：非管理员 403、读取与更新设置；
-- `test_prompts.py`：管理员身份、页面上下文清洗、提示词注入边界；
+- `test_prompts.py`：管理员身份、页面上下文清洗、提示词注入边界、工具规则与防编造底线；
 - `test_agent_limits.py`：用假模型模拟“无限调工具”，验证保险丝会断、提示是中文。
+
+## 不登录 WordPress，本地预览提示词
+
+改完提示词后，不必先部署才能看真实语气。`scripts/chat_preview.py` 直接调用
+`stream_reply()`，跳过 FastAPI 的 JWT 校验和额度扣减，但仍然使用 `.env` 里的
+DeepSeek Key 与本地知识库：
+
+```bash
+cd backend
+
+# 单轮
+uv run python scripts/chat_preview.py "你好呀"
+
+# 连续多轮，会保留上下文
+uv run python scripts/chat_preview.py "你好" "这里都有什么" "帮我找一篇讲 DDS 的文章"
+
+# 不传问题进入交互模式；支持 /reset、/admin、/guest、exit
+uv run python scripts/chat_preview.py
+
+# 以普通访客身份测试
+uv run python scripts/chat_preview.py --guest "你能做什么？"
+```
+
+它会真实调用 DeepSeek，产生少量 token 费用；如果 `MOCK_MODE=true` 或没有 Key，
+回答来自假模型，测不出人设。脚本会同时打印检索来源和跳转按钮，方便确认工具是否被调用。
 
 ## 知识库：已实现的部分
 

@@ -52,6 +52,10 @@ _SELECT = f"""
     FROM chunks
 """
 
+# 这些词单独出现时，用户通常是在问“最近有什么”，而不是检索某个词。
+# 例如“最近”可能碰巧出现在某篇正文里，但用户想看的其实是时间顺序的目录。
+_RECENT_WORDS = {"最近", "最新", "更新", "新东西", "东西"}
+
 
 def _row_to_result(row: sqlite3.Row, tokens: list[str]) -> dict[str, Any]:
     """把一行 SQLite 结果转成前端/工具使用的字典。"""
@@ -164,16 +168,88 @@ def _matched_token_count(text: str, tokens: list[str]) -> int:
     return sum(1 for token in tokens if token in lower)
 
 
+def list_recent(limit: int = 4) -> list[dict[str, Any]]:
+    """按最后修改时间列出最近文章，供“这里都有什么”这类宽泛问题使用。
+
+    为什么需要它：
+    search_site 依赖关键词，但用户只问“这里有什么”“最近写了什么”时，
+    问题里没有可检索的具体词。以前会退化成整句 LIKE，几乎查不到东西；
+    现在改为按时间列几篇真实文章，让模型基于标题和正文开头概括，
+    而不是凭印象编一个“文章、图片、笔记”的分类。
+
+    `posts.modified` 来自 WordPress；如果旧数据没有这个字段，
+    就退回同步时间 `synced_at`，保证顺序仍然稳定。
+    """
+
+    settings = get_settings()
+    limit = max(1, min(limit or settings.kb_top_k, 10))
+
+    db.init_schema()
+    conn = db.connect()
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+                p.post_id,
+                p.title,
+                p.url,
+                (
+                    SELECT c.body
+                    FROM chunks AS c
+                    WHERE c.post_id = p.post_id AND c.kind = 'text'
+                    ORDER BY c.chunk_index
+                    LIMIT 1
+                ) AS body
+            FROM posts AS p
+            ORDER BY COALESCE(p.modified, p.synced_at) DESC, p.post_id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            body = str(row["body"] or "")
+            results.append(
+                {
+                    "post_id": int(row["post_id"]),
+                    "title": str(row["title"] or ""),
+                    "url": str(row["url"] or ""),
+                    # 没有关键词时，make_excerpt 会取正文开头，正好适合做目录摘要。
+                    "excerpt": make_excerpt(body, [], width=160),
+                    "kind": "article",
+                    "image_url": None,
+                    "score": 0.0,
+                }
+            )
+        return results
+    finally:
+        conn.close()
+
+
 def search_site(query: str, limit: int | None = None) -> list[dict[str, Any]]:
     """检索站内文章，返回最多 limit 条来源。"""
 
     query = (query or "").strip()
-    if not query:
-        return []
-
     settings = get_settings()
     limit = max(1, min(limit or settings.kb_top_k, 10))
+
+    # 问题里没有有效关键词（例如“这里都有什么”）时，直接列最近文章。
+    # 这比用整句 LIKE 去碰运气更可靠，也让模型有真实内容可以概括。
+    # 至少给四篇：模型经常只传 limit=1，拿一篇当全部会误判“馆里没几篇”。
     tokens = tokenize(query)
+    if not tokens:
+        return list_recent(max(limit, 4))
+
+    # “最近”“最近有什么新东西”这类问题没有具体主题，
+    # 即使“最近”碰巧命中了某篇正文，也应该按时间列目录。
+    if "最近" in query and all(token in _RECENT_WORDS for token in tokens):
+        return list_recent(max(limit, 4))
+
+    # 带具体主题时（例如“最近 DDS 有什么更新”），时间词不参与检索。
+    # 否则“更新”可能碰巧命中另一篇文章，把真正要找的 DDS 挤掉。
+    if "最近" in query:
+        tokens = [token for token in tokens if token not in _RECENT_WORDS] or tokens
 
     db.init_schema()
     conn = db.connect()

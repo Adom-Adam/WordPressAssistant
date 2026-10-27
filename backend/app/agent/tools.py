@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from langchain_core.tools import tool
 
 from app.config import get_settings
-from app.kb.search import format_results
+from app.kb.search import format_results, list_recent
 from app.kb.search import search_site as kb_search
 
 
@@ -86,16 +86,24 @@ def search_site(query: str, limit: int = 4) -> tuple[str, list[dict]]:
     来源卡片由系统自动附上，**不要在回答里自己编链接**。
     如果没有结果，就如实告诉用户站内没有找到。
 
+    如果用户只是问“这里有什么”“最近写了什么”这类宽泛问题，没有具体关键词，
+    可以把 query 传成空字符串或“最近”，工具会按时间返回最近的文章目录。
+
     Args:
         query: 检索关键词。用用户问题里的核心技术词，不要把整句口语原样塞进来。
         limit: 最多返回几篇文章，默认 4，范围 1~10。
     """
     # 参数来自模型，可能为空、可能超出范围，工具内部要先做一次兜底。
     query = (query or "").strip()
-    if not query:
-        return ("没有提供检索关键词，无法检索。", [])
-
     limit = max(1, min(int(limit or 4), 10))
+
+    # 宽泛问题没有关键词可检索，直接列最近文章，避免模型凭印象编分类。
+    # 和 kb.search 一样至少取四篇：模型有时会传 limit=1，
+    # 只看到一篇就容易误判“馆里没几篇”。
+    if not query:
+        results = list_recent(max(limit, 4))
+        return (format_results(results), results)
+
     try:
         results = kb_search(query, limit=limit)
     except Exception as exc:  # noqa: BLE001 - 工具不应把异常抛给 agent
