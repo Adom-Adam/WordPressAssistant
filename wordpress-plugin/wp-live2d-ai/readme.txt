@@ -2,7 +2,7 @@
 Contributors: adom
 Requires at least: 6.0
 Requires PHP: 7.4
-Stable tag: 0.2.0
+Stable tag: 0.3.1
 License: GPLv2 or later
 
 在博客左下角显示 Live2D AI 助手，对话由独立的 Python 服务提供。
@@ -43,3 +43,10 @@ License: GPLv2 or later
 
 把 Cubism 3/4 模型放到 `frontend/public/live2d/models/<模型名>/`，
 构建时会自动复制到插件的 `assets/app/live2d/models/`。
+
+== 更新日志 ==
+
+= 0.3.1 =
+
+- 登录后隐藏 Argon 导航里的“登录 / 注册”链接。
+- 登录后在主导航末尾追加带 nonce 的“退出”链接。

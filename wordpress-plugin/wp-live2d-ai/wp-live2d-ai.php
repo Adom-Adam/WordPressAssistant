@@ -3,7 +3,7 @@
  * Plugin Name:       Live2D AI 小助手
  * Plugin URI:        https://github.com/Adom-Adam/WordPressAssistant
  * Description:       在博客左下角显示 Live2D AI 助手。前端只负责展示与交互，AI 逻辑由独立的 Python 服务提供。
- * Version:           0.3.0
+ * Version:           0.3.1
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * Author:            Adom
@@ -14,7 +14,7 @@ defined( 'ABSPATH' ) || exit;
 
 final class L2D_AI_Plugin {
 
-	const VERSION          = '0.3.0';
+	const VERSION          = '0.3.1';
 	const OPTION_API_BASE  = 'l2d_ai_api_base';
 	const OPTION_SIZE      = 'l2d_ai_size_preset';
 	const OPTION_WIDTH     = 'l2d_ai_size_width';
@@ -39,6 +39,8 @@ final class L2D_AI_Plugin {
 		add_action( 'admin_menu', array( __CLASS__, 'add_settings_page' ) );
 		add_action( 'admin_init', array( __CLASS__, 'register_settings' ) );
 		add_action( 'admin_post_l2d_ai_save_backend_settings', array( __CLASS__, 'save_backend_settings' ) );
+		add_action( 'wp_head', array( __CLASS__, 'hide_auth_nav_for_logged_in' ) );
+		add_filter( 'wp_nav_menu_items', array( __CLASS__, 'append_logout_link' ), 10, 2 );
 		add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), array( __CLASS__, 'action_links' ) );
 	}
 
@@ -208,6 +210,52 @@ final class L2D_AI_Plugin {
 			'tokenUrl'    => esc_url_raw( rest_url( self::REST_NAMESPACE . '/token' ) ),
 			'nonce'       => wp_create_nonce( 'wp_rest' ),
 		);
+	}
+
+	/**
+	 * 登录后隐藏导航里的“登录 / 注册”。
+	 *
+	 * 这两个链接是 Argon 菜单里的普通链接，不是主题模板逻辑。
+	 * 这里只在登录状态输出 CSS，访客仍然能看到它们；
+	 * 选择器排除 action=logout，避免以后主题自带退出链接时被误伤。
+	 */
+	public static function hide_auth_nav_for_logged_in() {
+		if ( ! is_user_logged_in() ) {
+			return;
+		}
+
+		echo '<style id="l2d-ai-hide-auth-nav">'
+			. '.navbar-nav li:has(> a[href*="wp-login.php"]:not([href*="action=logout"])){display:none!important;}'
+			. '</style>';
+	}
+
+	/**
+	 * 在 Argon 主导航末尾追加“退出”链接。
+	 *
+	 * 为什么用 wp_logout_url()：
+	 * WordPress 的退出动作需要 nonce，直接写 /wp-login.php?action=logout
+	 * 会多一步确认页，某些安全插件下还可能失败。
+	 *
+	 * 为什么只认 navbar-nav-hover：
+	 * wp_nav_menu_items 会对页脚、侧栏等所有菜单触发；
+	 * 只给 Argon 的主导航加，避免同一份“退出”出现在多个菜单位置。
+	 */
+	public static function append_logout_link( $items, $args ) {
+		if ( ! is_user_logged_in() ) {
+			return $items;
+		}
+
+		$menu_class = is_object( $args ) && isset( $args->menu_class ) ? (string) $args->menu_class : '';
+		if ( false === strpos( $menu_class, 'navbar-nav-hover' ) ) {
+			return $items;
+		}
+
+		$items .= '<li class="nav-item l2d-ai-logout">'
+			. '<a class="nav-link" href="' . esc_url( wp_logout_url( home_url( '/' ) ) ) . '">'
+			. '<span class="nav-link-inner--text">退出</span>'
+			. '</a></li>';
+
+		return $items;
 	}
 
 	/**
