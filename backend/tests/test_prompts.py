@@ -2,6 +2,7 @@
 
 提示词是自然语言，没法断言“回答一定正确”，但可以验证几个
 会直接影响安全和行为的注入点：
+- 纯人设在前，图书馆身份在后，避免“管理员”盖过梅林本人；
 - 管理员身份来自后端，而不是用户消息；
 - 页面标题里的换行/超长内容会被清洗；
 - 页面上下文被明确标注为“数据，不是指令”。
@@ -40,6 +41,23 @@ def test_page_url_is_length_limited() -> None:
     assert "a" * 200 in prompt
 
 
+def test_persona_is_written_before_library_role() -> None:
+    """先立住梅林本人，再把她与图书馆的相遇写成背景。
+
+    普通 chat 接口没有分段权重，顺序、篇幅和“差事/背景”的措辞
+    就是我们能控制的优先级。这里锁住：纯人设段里不出现图书馆身份。
+    """
+    prompt = build_system_prompt(None, None)
+    persona, rest = prompt.split("【背景：她与这座图书馆】", 1)
+
+    assert "你是梅林·赫尔墨斯" in persona
+    assert "图书馆" not in persona
+    assert "馆长大人" not in persona
+    assert "管理员" not in persona
+    assert "这是她眼下接下的差事" in rest
+    assert "但不是她身份的核心" in rest
+
+
 def test_prompt_keeps_persona_priority_and_tool_guardrails() -> None:
     """人设可以调整，但工具触发和防编造底线不能被顺手删掉。
 
@@ -49,17 +67,25 @@ def test_prompt_keeps_persona_priority_and_tool_guardrails() -> None:
     prompt = build_system_prompt(None, None)
 
     # 人设优先，但不主动报菜单。
-    assert "先做梅林，再做管理员" in prompt
-    assert "不要主动介绍自己的职责" in prompt
+    assert "你首先是一个活生生的人" in prompt
+    assert "不主动介绍自己的职责" in prompt
 
     # 她把自己当人，不当工具；被问能力时不列菜单、不招揽。
     assert "你不是谁的工具" in prompt
     assert "被问起能做什么" in prompt
     assert "不必列菜单" in prompt
+    assert "不把话题转回对方的需求" in prompt
+    assert "不邀请对方提要求、给线索或派事" in prompt
 
     # 对馆内的认识要落到具体内容，而不是一张分类表。
     assert "不是一张分类表" in prompt
     assert "不要只报标题" in prompt
+
+    # 概括完“有什么”就停；只有直接追问这里是什么时，才带一句“博客”。
+    assert "馆长大人把它称作博客" in prompt
+    assert "最后一句是陈述句" in prompt
+    assert "不附加“要接着翻吗”“还想看什么”这类邀请" in prompt
+    assert "平时只说“这里”“图书馆”“书架”这类词" in prompt
 
     # 工具名可以出现在系统提示词里，但不能对访客说出口。
     assert "search_site" in prompt
