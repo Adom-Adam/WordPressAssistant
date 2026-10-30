@@ -1,6 +1,6 @@
 import { AuthError, getAuthToken, resetAuthToken } from '../api/auth';
 import { ChatHttpError, streamChat } from '../api/chat';
-import { fetchQuota, type QuotaInfo } from '../api/quota';
+import { fetchQuota, redeemCode, type QuotaInfo } from '../api/quota';
 import type { AssistantConfig } from '../config';
 // 只导入类型，不产生运行时 import。
 // Live2D 管理器依赖 Cubism Core，如果 Core 没加载，静态导入会在模块求值阶段
@@ -52,7 +52,10 @@ const TEMPLATE = `
       </header>
       <div class="l2d-chat__userbar" hidden>
         <span class="l2d-chat__user"></span>
-        <span class="l2d-chat__quota" hidden></span>
+        <span class="l2d-chat__quota" hidden>
+          <span class="l2d-chat__quota-text"></span>
+          <button type="button" class="l2d-chat__redeem" hidden>兑换</button>
+        </span>
         <a class="l2d-chat__logout" href="#" rel="nofollow" no-pjax>退出</a>
       </div>
       <div class="l2d-chat__messages" role="log" aria-live="polite"></div>
@@ -108,6 +111,8 @@ export class AssistantApp {
   private readonly userbar: HTMLElement;
   private readonly userLabel: HTMLElement;
   private readonly quotaEl: HTMLElement;
+  private readonly quotaTextEl: HTMLElement;
+  private readonly redeemBtn: HTMLButtonElement;
   private readonly logoutLink: HTMLAnchorElement;
   private readonly gate: HTMLElement;
   private readonly gateLogin: HTMLAnchorElement;
@@ -158,6 +163,8 @@ export class AssistantApp {
     this.userbar = must(this.root, '.l2d-chat__userbar');
     this.userLabel = must(this.root, '.l2d-chat__user');
     this.quotaEl = must(this.root, '.l2d-chat__quota');
+    this.quotaTextEl = must(this.root, '.l2d-chat__quota-text');
+    this.redeemBtn = must<HTMLButtonElement>(this.root, '.l2d-chat__redeem');
     this.logoutLink = must<HTMLAnchorElement>(this.root, '.l2d-chat__logout');
     this.gate = must(this.root, '.l2d-gate');
     this.gateLogin = must<HTMLAnchorElement>(this.root, '[data-auth="login"]');
@@ -288,27 +295,51 @@ export class AssistantApp {
     }
 
     this.quotaEl.hidden = false;
-    this.quotaEl.classList.toggle('is-empty', !quota.unlimited && quota.remaining === 0);
+    // 每日额度用完、存量也没有了，才标成“已用尽”。
+    this.quotaEl.classList.toggle(
+      'is-empty',
+      !quota.unlimited && quota.remaining === 0 && quota.credit === 0,
+    );
+    // 管理员不需要兑换入口：他的额度本来就不限。
+    this.redeemBtn.hidden = quota.unlimited;
 
     if (quota.unlimited) {
-      this.quotaEl.textContent = '管理员 · 不限量';
+      this.quotaTextEl.textContent = '管理员 · 不限量';
       this.quotaEl.title = '管理员不受每日额度限制';
       return;
     }
 
     const remaining = quota.remaining ?? 0;
-    this.quotaEl.textContent = remaining > 0 ? `今日剩余 ${remaining} 条` : '今日额度已用完';
+    const parts = [remaining > 0 ? `今日剩余 ${remaining} 条` : '今日额度已用完'];
+    if (quota.credit > 0) parts.push(`额外 ${quota.credit} 条`);
+    this.quotaTextEl.textContent = parts.join(' · ');
+
     const globalText =
       quota.globalRemaining !== null && quota.globalLimit > 0
         ? `；全站剩余 ${quota.globalRemaining} 条`
         : '';
-    this.quotaEl.title = `每人每日 ${quota.limit} 条${globalText}`;
+    const tierText = quota.tier === 'member' ? '（会员）' : '';
+    this.quotaEl.title = `每人每日 ${quota.limit} 条${tierText}${globalText}`;
+  }
+
+  /** 弹窗输入兑换码，成功后立刻刷新额度条。 */
+  private async redeem(): Promise<void> {
+    const input = window.prompt('请输入兑换码');
+    const code = input ? input.trim() : '';
+    if (!code) return;
+
+    const result = await redeemCode(this.config.apiBase, this.config.auth, code);
+    if (result.ok) await this.refreshQuota();
+    // 用 alert 而不是在面板里插一条消息：兑换结果需要用户确认，
+    // 插进对话流会被误当成 AI 说的话。
+    window.alert(result.message);
   }
 
   private bindEvents(): void {
     this.chatBtn.addEventListener('click', () => this.toggleChat());
     must(this.root, '[data-action="close"]').addEventListener('click', () => this.closeChat());
     this.voiceBtn.addEventListener('click', () => this.toggleVoice());
+    this.redeemBtn.addEventListener('click', () => void this.redeem());
 
     this.input.addEventListener('input', () => this.autoGrowInput());
     this.input.addEventListener('keydown', (event) => {
