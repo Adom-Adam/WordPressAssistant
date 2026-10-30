@@ -51,10 +51,15 @@
   只有按钮、菜单、对话面板 `pointer-events: auto`。因此形象覆盖在页面上但不影响下层交互。
 - **视线跟随**：监听 `mousemove` 手动调用 `model.focus()`，不依赖 PIXI 的交互系统。
 - **控件透明度**：默认 `opacity: .28`，`:hover` / `:focus-within` / 对话打开时变为 `1`；触屏设备默认更高不透明度。
-- **选择模型**：构建前扫描 `public/live2d/models/**/*.model3.json` 生成 `manifest.json`；
-  管理员在插件设置页从中选一个，插件把 id 注入前端，前台不提供切换入口。
-- **故障隔离**：Live2D 管理器用动态 `import()` 加载。Cubism Core 缺失或模型损坏时，
-  只有形象加载失败并弹提示，聊天面板、语音和来源浮层仍然可用。
+- **选择模型**：构建前扫描 `public/live2d/models/**/*.model3.json` 和
+  `public/spine/models/**/*.json`，分别生成 `manifest.json`；
+  管理员在插件设置页选择形象引擎和具体模型，插件把 id 注入前端，前台不提供切换入口。
+- **Spine**：`@esotericsoftware/spine-player@4.2.120` 在独立的 `.l2d-spine` 容器里
+  创建自己的 canvas/WebGL 上下文，只播放骨架自带的循环动画；由于官方 Pixi 运行时
+  面向 Pixi 7/8，没有为了 Spine 升级现有的 PixiJS 6。Spine 失败时自动回退 Live2D。
+  构建时只复制 `.json/.atlas/图片`，不会把素材目录里的脚本和备份文件发布出去。
+- **故障隔离**：Live2D/Spine 管理器都用动态 `import()` 加载。Cubism Core 缺失、
+  模型损坏或 Spine 加载失败时，形象层单独降级，聊天面板、语音和来源浮层仍然可用。
 - **语音输入**：浏览器 `SpeechRecognition` / `webkitSpeechRecognition`，识别结果填入输入框，用户确认后发送。
 - **样式**：全部作用域在 `.l2d-root` 下，使用 CSS 变量（天蓝色系），不会污染主题样式。
 - **尺寸**：插件注入 `--l2d-width/--l2d-height`；900px 以下再按视口收缩，

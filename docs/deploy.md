@@ -67,7 +67,8 @@ pnpm build          # 产物输出到 wordpress-plugin/wp-live2d-ai/assets/app/
 
 然后在 WordPress 后台 **插件 → 启用 Live2D AI 小助手**。
 
-> 模型要先放进 `frontend/public/live2d/models/` 再 build，否则插件里没有模型。
+> 模型要先放进 `frontend/public/live2d/models/`（Spine 放
+> `frontend/public/spine/models/`）再 build，否则插件里没有模型。
 > `assets/app/` 已被 `.gitignore` 忽略，部署时是随构建产物而不是 Git 提交同步。
 
 ## 2. 部署 Python 后端

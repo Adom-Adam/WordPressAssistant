@@ -53,6 +53,24 @@
   pointer-events: none;
 }
 
+/*
+ * Spine 的官方 player 会自己创建 canvas 和 WebGL 上下文。
+ * 这里只提供一块和 Live2D 完全重叠的独立容器，两者同一时间只显示一个。
+ */
+.l2d-spine {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.l2d-spine > .spine-player,
+.l2d-spine .spine-player-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
 /* ---------- 操作按钮 ---------- */
 .l2d-dock {
   position: absolute;

@@ -670,10 +670,12 @@ pnpm build
 wordpress-plugin/wp-live2d-ai/assets/app/
 ├─ app.js
 ├─ app.css
-└─ live2d/            ← Cubism Core 和模型
+├─ live2d/            ← Cubism Core 和 Live2D 模型
+└─ spine/             ← Spine 模型和 manifest（如果放了模型）
 ```
 
-模型必须先放进 `frontend/public/live2d/models/` 再构建，否则服务器上不会有模型。
+模型必须先放进 `frontend/public/live2d/models/`（或
+`frontend/public/spine/models/`）再构建，否则服务器上不会有模型。
 `assets/app/` 不纳入 Git，所以**必须在本地构建后上传**，不能只靠服务器 `git pull`。
 
 ### 10.2 上传
@@ -704,8 +706,9 @@ chown -R www:www /www/wwwroot/<站点目录>/wp-content/plugins/wp-live2d-ai
 3. AI 服务地址保持 `/ai-api`；
 4. 确认「登录凭证」区域显示 JWT 密钥**已配置**；
 5. 在「人设名字」里确认显示名（默认“梅林”，会出现在对话面板左上角）；
-6. 在「Live2D 形象」下拉框里选择要展示的模型（选项来自构建后的
-   `assets/app/live2d/models/manifest.json`）。
+6. 在「形象引擎」里选择 Live2D 或 Spine；再在对应下拉框里选择具体模型
+   （选项分别来自 `assets/app/live2d/models/manifest.json` 和
+   `assets/app/spine/models/manifest.json`）。Spine 加载失败会自动回退 Live2D。
 
 插件版本号 `0.2.0` 会作为静态资源查询参数，升级后浏览器不会继续用旧缓存。
 以后改了前端但没升版本号，可能出现“代码更新了页面没变”，把 `VERSION` 加一即可。
@@ -1128,7 +1131,8 @@ journalctl -u l2d-ai-backend --since "-5min" --no-pager | grep -E "channels/qq|s
 | 回复一次性出现 | Nginx/CDN 缓冲 | `proxy_buffering off`，CDN 关缓冲 |
 | `mock:true` | 后端没读到 `.env` | 检查 `WorkingDirectory`、文件权限、Key |
 | 502 Bad Gateway | 后端没启动或端口不对 | `systemctl status`、`ss -lntp`、日志 |
-| 插件按钮出现但没形象 | 模型没构建进去或路径 404 | 检查 `assets/app/live2d/models/manifest.json` |
+| 插件按钮出现但没形象 | 模型没构建进去或路径 404 | 检查 `assets/app/live2d/models/manifest.json`；选 Spine 时再查 `assets/app/spine/models/manifest.json` 和同名 `.atlas` |
+| 选了 Spine 却出现 Live2D | Spine 加载失败，前端已自动回退 | 看浏览器控制台 `[l2d-ai] Spine` 报错；确认 `.atlas` 与骨架同名、贴图路径正确 |
 | 控制台 Cubism Core 未定义 | Core 脚本没上传/被缓存 | 检查 `live2d/core/live2dcubismcore.min.js` |
 | 语音按钮没反应 | 浏览器不支持或非 HTTPS | 用 Chrome/Edge，确认 HTTPS |
 | `permission denied` 改 `.env` | 文件属主是 `l2dai` | 用 root/宝塔终端，或先 `chown` |

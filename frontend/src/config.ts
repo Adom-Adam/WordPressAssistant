@@ -38,11 +38,18 @@ export interface AssistantAppearance {
   height: number;
 }
 
+/** 形象引擎：Live2D 或 Spine。两者共用同一个容器和聊天 UI。 */
+export type AvatarEngine = 'live2d' | 'spine';
+
 export interface AssistantConfig {
   /** AI 后端地址，例如 /ai-api */
   apiBase: string;
   /** Live2D 资源根地址，必须以 / 结尾 */
   assetBase: string;
+  /** Spine 资源根地址，必须以 / 结尾 */
+  spineAssetBase: string;
+  /** 当前使用的形象引擎 */
+  avatarType: AvatarEngine;
   /** 人设名字（例如“梅林”），用于对话面板标题和提示文案 */
   assistantName: string;
   /** 语音识别语言 */
@@ -51,6 +58,8 @@ export interface AssistantConfig {
   appearance: AssistantAppearance;
   /** 后台选定的 Live2D 模型 id；空字符串表示使用 manifest 默认值 */
   live2dModel: string;
+  /** 后台选定的 Spine 模型 id；空字符串表示使用 manifest 默认值 */
+  spineModel: string;
   /** 登录相关配置 */
   auth: AssistantAuthConfig;
 }
@@ -58,10 +67,13 @@ export interface AssistantConfig {
 interface InjectedConfig {
   apiBase?: string;
   assetBase?: string;
+  spineAssetBase?: string;
+  avatarType?: string;
   assistantName?: string;
   voiceLang?: string;
   appearance?: Partial<AssistantAppearance> | null;
   live2dModel?: string;
+  spineModel?: string;
   auth?: Partial<AssistantAuthConfig> | null;
 }
 
@@ -74,6 +86,21 @@ declare global {
 
 function withTrailingSlash(value: string): string {
   return value.endsWith('/') ? value : `${value}/`;
+}
+
+/**
+ * 从 Live2D 资源地址推出同级的 Spine 地址。
+ *
+ * WordPress 插件会把两者都显式注入；这里只是给本地开发和旧版插件兜底。
+ * 例如 `/assets/app/live2d/` → `/assets/app/spine/`。
+ */
+function siblingAssetBase(assetBase: string, name: string): string {
+  try {
+    const url = new URL(assetBase, window.location.href);
+    return withTrailingSlash(new URL(`../${name}/`, url).href);
+  } catch {
+    return withTrailingSlash(`/${name}/`);
+  }
 }
 
 /**
@@ -161,13 +188,20 @@ function normalizeAssistantName(value: unknown): string {
 
 export function getConfig(): AssistantConfig {
   const injected = window.L2D_AI_CONFIG ?? {};
+  const assetBase = withTrailingSlash(injected.assetBase ?? '/live2d/');
   return {
     apiBase: (injected.apiBase ?? '/ai-api').replace(/\/$/, ''),
-    assetBase: withTrailingSlash(injected.assetBase ?? '/live2d/'),
+    assetBase,
+    spineAssetBase: injected.spineAssetBase
+      ? withTrailingSlash(injected.spineAssetBase)
+      : siblingAssetBase(assetBase, 'spine'),
+    // 只认明确的 spine；其余情况一律回到 Live2D，避免后台填错导致没有形象。
+    avatarType: injected.avatarType === 'spine' ? 'spine' : 'live2d',
     assistantName: normalizeAssistantName(injected.assistantName),
     voiceLang: injected.voiceLang ?? 'zh-CN',
     appearance: normalizeAppearance(injected.appearance),
     live2dModel: typeof injected.live2dModel === 'string' ? injected.live2dModel : '',
+    spineModel: typeof injected.spineModel === 'string' ? injected.spineModel : '',
     auth: normalizeAuth(injected.auth),
   };
 }

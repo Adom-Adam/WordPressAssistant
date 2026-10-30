@@ -3,7 +3,7 @@
  * Plugin Name:       Live2D AI 小助手
  * Plugin URI:        https://github.com/Adom-Adam/WordPressAssistant
  * Description:       在博客左下角显示 Live2D AI 助手。前端只负责展示与交互，AI 逻辑由独立的 Python 服务提供。
- * Version:           0.3.3
+ * Version:           0.3.4
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * Author:            Adom
@@ -14,11 +14,13 @@ defined( 'ABSPATH' ) || exit;
 
 final class L2D_AI_Plugin {
 
-	const VERSION          = '0.3.3';
+	const VERSION          = '0.3.4';
 	const OPTION_API_BASE  = 'l2d_ai_api_base';
 	const OPTION_NAME      = 'l2d_ai_assistant_name';
 	const OPTION_SIZE      = 'l2d_ai_size_preset';
+	const OPTION_AVATAR    = 'l2d_ai_avatar_type';
 	const OPTION_MODEL     = 'l2d_ai_live2d_model';
+	const OPTION_SPINE     = 'l2d_ai_spine_model';
 	const OPTION_WIDTH     = 'l2d_ai_size_width';
 	const OPTION_HEIGHT    = 'l2d_ai_size_height';
 	/** 没有单独设置时使用的人设名字。改人设时只需改这里或后台设置。 */
@@ -92,13 +94,16 @@ final class L2D_AI_Plugin {
 		$config = apply_filters(
 			'l2d_ai_frontend_config',
 			array(
-				'apiBase'       => self::api_base(),
-				'assetBase'     => $app_url . 'live2d/',
-				'assistantName' => self::assistant_name(),
-				'voiceLang'     => 0 === strpos( get_locale(), 'zh' ) ? 'zh-CN' : 'en-US',
-				'appearance'    => self::appearance_config(),
-				'live2dModel'   => self::live2d_model(),
-				'auth'          => self::auth_config(),
+				'apiBase'        => self::api_base(),
+				'assetBase'      => $app_url . 'live2d/',
+				'spineAssetBase' => $app_url . 'spine/',
+				'avatarType'     => self::avatar_type(),
+				'assistantName'  => self::assistant_name(),
+				'voiceLang'      => 0 === strpos( get_locale(), 'zh' ) ? 'zh-CN' : 'en-US',
+				'appearance'     => self::appearance_config(),
+				'live2dModel'    => self::live2d_model(),
+				'spineModel'     => self::spine_model(),
+				'auth'           => self::auth_config(),
 			)
 		);
 
@@ -175,6 +180,17 @@ final class L2D_AI_Plugin {
 		return max( 260, min( 720, absint( $value ) ) );
 	}
 
+	/** 当前形象引擎。只接受 live2d / spine，写错时回到 Live2D。 */
+	public static function avatar_type() {
+		$value = sanitize_key( (string) get_option( self::OPTION_AVATAR, 'live2d' ) );
+		return 'spine' === $value ? 'spine' : 'live2d';
+	}
+
+	public static function sanitize_avatar_type( $value ) {
+		$value = sanitize_key( (string) $value );
+		return 'spine' === $value ? 'spine' : 'live2d';
+	}
+
 	/** 注入前端的尺寸：预设换算成实际像素，custom 才用管理员填写的值。 */
 	public static function appearance_config() {
 		$preset = self::size_preset();
@@ -194,32 +210,41 @@ final class L2D_AI_Plugin {
 	}
 
 	/**
-	 * 读取构建后的 Live2D 模型清单。
+	 * 读取构建后的模型清单。
 	 *
-	 * 前台不再让用户选模型，管理员在设置页从这里列出的模型里选一个。
 	 * 清单由 `frontend/scripts/gen-model-manifest.mjs` 在构建时生成。
+	 * 用静态缓存避免同一次请求里反复读盘（设置页会调用好几次）。
 	 */
-	private static function live2d_manifest() {
-		static $manifest = null;
-		if ( is_array( $manifest ) ) {
-			return $manifest;
+	private static function read_manifest( $relative_path ) {
+		static $cache = array();
+
+		$relative_path = ltrim( (string) $relative_path, '/' );
+		if ( array_key_exists( $relative_path, $cache ) ) {
+			return $cache[ $relative_path ];
 		}
 
-		$path = plugin_dir_path( __FILE__ ) . 'assets/app/live2d/models/manifest.json';
+		$path = plugin_dir_path( __FILE__ ) . 'assets/app/' . $relative_path;
 		if ( ! is_readable( $path ) ) {
-			$manifest = array();
-			return $manifest;
+			$cache[ $relative_path ] = array();
+			return $cache[ $relative_path ];
 		}
 
-		$data     = json_decode( (string) file_get_contents( $path ), true );
-		$manifest = is_array( $data ) ? $data : array();
-		return $manifest;
+		$data = json_decode( (string) file_get_contents( $path ), true );
+		$cache[ $relative_path ] = is_array( $data ) ? $data : array();
+		return $cache[ $relative_path ];
 	}
 
-	/** 返回 id => 显示名，供后台下拉框使用。 */
-	private static function live2d_models() {
-		$manifest = self::live2d_manifest();
-		$models   = array();
+	private static function live2d_manifest() {
+		return self::read_manifest( 'live2d/models/manifest.json' );
+	}
+
+	private static function spine_manifest() {
+		return self::read_manifest( 'spine/models/manifest.json' );
+	}
+
+	/** 从任意清单里提取 id => 显示名，供后台下拉框使用。 */
+	private static function manifest_models( $manifest ) {
+		$models = array();
 
 		if ( empty( $manifest['models'] ) || ! is_array( $manifest['models'] ) ) {
 			return $models;
@@ -241,14 +266,12 @@ final class L2D_AI_Plugin {
 	}
 
 	/** 清单里的默认模型；清单丢失时返回空字符串。 */
-	private static function live2d_default_model() {
-		$models = self::live2d_models();
+	private static function manifest_default( $manifest, $models ) {
 		if ( ! $models ) {
 			return '';
 		}
 
-		$manifest = self::live2d_manifest();
-		$default  = isset( $manifest['default'] ) ? (string) $manifest['default'] : '';
+		$default = isset( $manifest['default'] ) ? (string) $manifest['default'] : '';
 		if ( '' !== $default && isset( $models[ $default ] ) ) {
 			return $default;
 		}
@@ -256,7 +279,15 @@ final class L2D_AI_Plugin {
 		return (string) array_key_first( $models );
 	}
 
-	/** 当前生效的模型。保存过的 id 失效时自动回退到清单默认值。 */
+	private static function live2d_models() {
+		return self::manifest_models( self::live2d_manifest() );
+	}
+
+	private static function spine_models() {
+		return self::manifest_models( self::spine_manifest() );
+	}
+
+	/** 当前生效的 Live2D 模型。保存过的 id 失效时自动回退到清单默认值。 */
 	public static function live2d_model() {
 		$value  = (string) get_option( self::OPTION_MODEL, '' );
 		$models = self::live2d_models();
@@ -265,14 +296,37 @@ final class L2D_AI_Plugin {
 			return $value;
 		}
 
-		return self::live2d_default_model();
+		return self::manifest_default( self::live2d_manifest(), $models );
 	}
 
 	public static function sanitize_live2d_model( $value ) {
 		$value  = sanitize_text_field( (string) $value );
 		$models = self::live2d_models();
 
-		return isset( $models[ $value ] ) ? $value : self::live2d_default_model();
+		return isset( $models[ $value ] )
+			? $value
+			: self::manifest_default( self::live2d_manifest(), $models );
+	}
+
+	/** 当前生效的 Spine 模型；规则与 Live2D 相同。 */
+	public static function spine_model() {
+		$value  = (string) get_option( self::OPTION_SPINE, '' );
+		$models = self::spine_models();
+
+		if ( '' !== $value && isset( $models[ $value ] ) ) {
+			return $value;
+		}
+
+		return self::manifest_default( self::spine_manifest(), $models );
+	}
+
+	public static function sanitize_spine_model( $value ) {
+		$value  = sanitize_text_field( (string) $value );
+		$models = self::spine_models();
+
+		return isset( $models[ $value ] )
+			? $value
+			: self::manifest_default( self::spine_manifest(), $models );
 	}
 
 	/**
@@ -961,10 +1015,30 @@ final class L2D_AI_Plugin {
 
 		register_setting(
 			self::SETTINGS_GROUP,
+			self::OPTION_AVATAR,
+			array(
+				'type'              => 'string',
+				'sanitize_callback' => array( __CLASS__, 'sanitize_avatar_type' ),
+				'default'           => 'live2d',
+			)
+		);
+
+		register_setting(
+			self::SETTINGS_GROUP,
 			self::OPTION_MODEL,
 			array(
 				'type'              => 'string',
 				'sanitize_callback' => array( __CLASS__, 'sanitize_live2d_model' ),
+				'default'           => '',
+			)
+		);
+
+		register_setting(
+			self::SETTINGS_GROUP,
+			self::OPTION_SPINE,
+			array(
+				'type'              => 'string',
+				'sanitize_callback' => array( __CLASS__, 'sanitize_spine_model' ),
 				'default'           => '',
 			)
 		);
@@ -1061,7 +1135,37 @@ final class L2D_AI_Plugin {
 						</td>
 					</tr>
 					<tr>
-						<th scope="row">Live2D 形象大小</th>
+						<th scope="row">形象引擎</th>
+						<td>
+							<fieldset>
+								<label>
+									<input
+										type="radio"
+										name="<?php echo esc_attr( self::OPTION_AVATAR ); ?>"
+										value="live2d"
+										<?php checked( self::avatar_type(), 'live2d' ); ?>
+									/>
+									Live2D
+								</label>
+								&nbsp;&nbsp;
+								<label>
+									<input
+										type="radio"
+										name="<?php echo esc_attr( self::OPTION_AVATAR ); ?>"
+										value="spine"
+										<?php checked( self::avatar_type(), 'spine' ); ?>
+									/>
+									Spine
+								</label>
+							</fieldset>
+							<p class="description">
+								Live2D 支持视线跟随，适合 Cubism 模型；Spine 目前只循环播放自带动画，
+								没有口型/眨眼参数。Spine 加载失败时会自动回退到 Live2D。
+							</p>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row">形象大小</th>
 						<td>
 							<select name="<?php echo esc_attr( self::OPTION_SIZE ); ?>" id="l2d-ai-size-preset">
 								<?php
@@ -1114,7 +1218,7 @@ final class L2D_AI_Plugin {
 					</tr>
 					<tr>
 						<th scope="row">
-							<label for="l2d-ai-live2d-model">Live2D 形象</label>
+							<label for="l2d-ai-live2d-model">Live2D 模型</label>
 						</th>
 						<td>
 							<?php $live2d_models = self::live2d_models(); ?>
@@ -1127,13 +1231,41 @@ final class L2D_AI_Plugin {
 									<?php endforeach; ?>
 								</select>
 								<p class="description">
-									所有访客都会看到这个形象；前台不再提供“更换模型”按钮。
+									只在“形象引擎”选择 Live2D 时生效；前台不再提供“更换模型”按钮。
 									模型清单来自构建后的 <code>manifest.json</code>。
 								</p>
 							<?php else : ?>
 								<p class="description">
 									没有找到 <code>assets/app/live2d/models/manifest.json</code>。
 									先执行 <code>pnpm --dir frontend build</code>，再刷新此页。
+								</p>
+							<?php endif; ?>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row">
+							<label for="l2d-ai-spine-model">Spine 模型</label>
+						</th>
+						<td>
+							<?php $spine_models = self::spine_models(); ?>
+							<?php if ( $spine_models ) : ?>
+								<select name="<?php echo esc_attr( self::OPTION_SPINE ); ?>" id="l2d-ai-spine-model">
+									<?php foreach ( $spine_models as $model_id => $model_name ) : ?>
+										<option value="<?php echo esc_attr( $model_id ); ?>" <?php selected( self::spine_model(), $model_id ); ?>>
+											<?php echo esc_html( $model_name ); ?>
+										</option>
+									<?php endforeach; ?>
+								</select>
+								<p class="description">
+									只在“形象引擎”选择 Spine 时生效。清单来自
+									<code>assets/app/spine/models/manifest.json</code>；
+									默认循环播放构建时选定的动画。
+								</p>
+							<?php else : ?>
+								<p class="description">
+									没有找到 <code>assets/app/spine/models/manifest.json</code>。
+									把 Spine 4.2 模型放进 <code>frontend/public/spine/models/</code>，
+									再执行 <code>pnpm --dir frontend build</code>。
 								</p>
 							<?php endif; ?>
 						</td>

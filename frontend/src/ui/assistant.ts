@@ -7,7 +7,20 @@ import type { AssistantConfig } from '../config';
 // 直接抛错，连聊天面板都来不及创建。改成在 start() 里动态导入后，
 // 即使 Live2D 挂了，聊天、语音等 UI 仍然可用，只是没有形象。
 import type { Live2DManager } from '../live2d/manager';
-import type { ChatMessage, Citation, ModelEntry, ModelManifest, StreamEvent } from '../types';
+import type { SpineManager } from '../spine/manager';
+import type {
+  ChatMessage,
+  Citation,
+  ModelManifest,
+  SpineModelEntry,
+  SpineModelManifest,
+  StreamEvent,
+} from '../types';
+
+/** Live2D 和 Spine 渲染器共有的最小接口，上层只关心“能不能销毁”。 */
+interface AvatarController {
+  destroy(): void;
+}
 
 const ICON = {
   chat: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 5.8h14a1.7 1.7 0 011.7 1.7v8.2a1.7 1.7 0 01-1.7 1.7H10l-4.6 3.2a.6.6 0 01-.94-.5v-2.7H5a1.7 1.7 0 01-1.7-1.7V7.5A1.7 1.7 0 015 5.8z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><circle cx="8.6" cy="11.7" r="1.05" fill="currentColor"/><circle cx="12" cy="11.7" r="1.05" fill="currentColor"/><circle cx="15.4" cy="11.7" r="1.05" fill="currentColor"/></svg>`,
@@ -19,6 +32,8 @@ const ICON = {
 const TEMPLATE = `
   <div class="l2d-stage">
     <canvas class="l2d-canvas" aria-hidden="true"></canvas>
+    <!-- Spine 使用自己的 canvas/WebGL 上下文，和 Live2D 的 Pixi canvas 隔离 -->
+    <div class="l2d-spine" hidden aria-hidden="true"></div>
 
     <div class="l2d-dock">
       <div class="l2d-dock__buttons">
@@ -85,6 +100,7 @@ function must<T extends HTMLElement>(root: ParentNode, selector: string): T {
 export class AssistantApp {
   private readonly root: HTMLElement;
   private readonly canvas: HTMLCanvasElement;
+  private readonly spineContainer: HTMLElement;
   private readonly chatPanel: HTMLElement;
   private readonly chatName: HTMLElement;
   private readonly messagesEl: HTMLElement;
@@ -102,7 +118,7 @@ export class AssistantApp {
   private readonly chatBtn: HTMLButtonElement;
   private readonly toast: HTMLElement;
 
-  private l2d: Live2DManager | null = null;
+  private avatar: AvatarController | null = null;
   private quota: QuotaInfo | null = null;
   private history: ChatMessage[] = [];
   private busy = false;
@@ -131,6 +147,7 @@ export class AssistantApp {
     document.body.appendChild(this.root);
 
     this.canvas = must<HTMLCanvasElement>(this.root, '.l2d-canvas');
+    this.spineContainer = must(this.root, '.l2d-spine');
     this.chatPanel = must(this.root, '.l2d-chat');
     // 面板标题跟着人设走：后台改了名字，这里只改文本，不需要改模板。
     this.chatName = must(this.root, '.l2d-chat__name');
@@ -156,15 +173,66 @@ export class AssistantApp {
   }
 
   async start(): Promise<void> {
+    // 管理员在后台选择形象引擎。Spine 失败时不把整个助手拖下水：
+    // 清掉半成品，回退到 Live2D，聊天功能始终可用。
+    if (this.config.avatarType === 'spine') {
+      const loaded = await this.startSpine();
+      if (loaded) return;
+      this.showToast('Spine 模型没加载起来，先用 Live2D 顶上～', 6000);
+    }
+    await this.startLive2D();
+  }
+
+  private async startLive2D(): Promise<void> {
     try {
       // 动态 import：Cubism Core 缺失时，错误只落在 try/catch 里，
       // 不会影响构造函数已经创建好的聊天 UI。
       const { Live2DManager: Manager } = await import('../live2d/manager');
-      this.l2d = new Manager(this.canvas, this.config.assetBase);
-      await this.loadModels();
+      const manager = new Manager(this.canvas, this.config.assetBase);
+      this.avatar = manager;
+      this.spineContainer.hidden = true;
+      this.canvas.hidden = false;
+      await this.loadLive2DModels(manager);
     } catch (error) {
       console.error('[l2d-ai] Live2D 初始化失败', error);
       this.showToast('Live2D 没加载起来，检查模型文件和 Cubism Core 是否就位～', 6000);
+    }
+  }
+
+  /**
+   * 尝试加载 Spine。返回 false 表示“这次没成，可以回退到 Live2D”。
+   *
+   * 注意：Spine 的官方 player 会在自身内部抛异常（错误先经过 error 回调），
+   * 所以这里必须同时处理 Promise reject 和同步 throw。
+   */
+  private async startSpine(): Promise<boolean> {
+    let manager: SpineManager | null = null;
+    try {
+      const manifest = await this.fetchManifest<SpineModelManifest>(this.config.spineAssetBase);
+      if (!manifest.models?.length) {
+        console.warn('[l2d-ai] Spine 清单为空');
+        return false;
+      }
+
+      const configured = manifest.models.find((item) => item.id === this.config.spineModel);
+      const fallback = manifest.models.find((item) => item.id === manifest.default);
+      const model: SpineModelEntry | undefined = configured ?? fallback ?? manifest.models[0];
+      if (!model) return false;
+
+      const { SpineManager } = await import('../spine/manager');
+      manager = new SpineManager(this.spineContainer, this.config.spineAssetBase);
+      // 先藏 Live2D 的 canvas，避免两个渲染器同时存在时出现重影。
+      this.canvas.hidden = true;
+      this.spineContainer.hidden = false;
+      await manager.load(model);
+      this.avatar = manager;
+      return true;
+    } catch (error) {
+      console.error('[l2d-ai] Spine 初始化失败', error);
+      manager?.destroy();
+      this.spineContainer.hidden = true;
+      this.canvas.hidden = false;
+      return false;
     }
   }
 
@@ -275,12 +343,16 @@ export class AssistantApp {
     window.addEventListener('resize', () => this.hideCitationPopover());
   }
 
-  private async loadModels(): Promise<void> {
-    const manifestUrl = new URL(`${this.config.assetBase}models/manifest.json`, window.location.href).href;
+  /** 读取 `models/manifest.json`；两种形象的清单结构不同，由调用方指定类型。 */
+  private async fetchManifest<T>(base: string): Promise<T> {
+    const manifestUrl = new URL(`${base}models/manifest.json`, window.location.href).href;
     const response = await fetch(manifestUrl, { cache: 'no-cache' });
     if (!response.ok) throw new Error(`模型清单不可用（${response.status}）`);
+    return (await response.json()) as T;
+  }
 
-    const manifest = (await response.json()) as ModelManifest;
+  private async loadLive2DModels(manager: Live2DManager): Promise<void> {
+    const manifest = await this.fetchManifest<ModelManifest>(this.config.assetBase);
 
     if (!manifest.models?.length) {
       this.showToast('还没找到模型：把模型文件夹放进 models/ 目录后重新构建～', 7000);
@@ -292,16 +364,11 @@ export class AssistantApp {
     const configured = manifest.models.find((item) => item.id === this.config.live2dModel);
     const fallback = manifest.models.find((item) => item.id === manifest.default);
     const first = configured ?? fallback ?? manifest.models[0];
-    await this.selectModel(first);
-  }
-
-  private async selectModel(model: ModelEntry): Promise<void> {
-    if (!this.l2d) return;
     try {
-      await this.l2d.load(model);
+      await manager.load(first);
     } catch (error) {
       console.error('[l2d-ai] 模型加载失败', error);
-      this.showToast(`「${model.name}」加载失败，检查模型文件是否完整～`, 6000);
+      this.showToast(`「${first.name}」加载失败，检查模型文件是否完整～`, 6000);
     }
   }
 

@@ -2,7 +2,7 @@
 Contributors: adom
 Requires at least: 6.0
 Requires PHP: 7.4
-Stable tag: 0.3.3
+Stable tag: 0.3.4
 License: GPLv2 or later
 
 在博客左下角显示 Live2D AI 助手，对话由独立的 Python 服务提供。
@@ -44,7 +44,19 @@ License: GPLv2 or later
 把 Cubism 3/4 模型放到 `frontend/public/live2d/models/<模型名>/`，
 构建时会自动复制到插件的 `assets/app/live2d/models/`。
 
+Spine 4.2 模型放在 `frontend/public/spine/models/<模型文件夹>/`，
+需要骨架 JSON、同名 atlas 和贴图。构建时会生成
+`assets/app/spine/models/manifest.json`，只复制运行所需文件。
+在「设置 → Live2D 小助手 → 形象引擎」里切换 Live2D / Spine；
+Spine 加载失败会自动回退 Live2D。
+
 == 更新日志 ==
+
+= 0.3.4 =
+
+- 新增 Spine 4.2 形象引擎：独立 canvas 渲染、循环动画、加载失败回退 Live2D。
+- 后台新增「形象引擎」和「Spine 模型」设置；构建时过滤 Spine 素材目录里的
+  `test.py`、`.bak`、`desktop.ini` 等非运行文件。
 
 = 0.3.3 =
 

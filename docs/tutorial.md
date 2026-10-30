@@ -248,6 +248,21 @@ pnpm run prepare:models
 
 `pnpm dev` / `pnpm build` 会自动先跑这一步，所以正常流程不用单独执行。
 
+Spine 模型放在另一个目录，结构不同：
+
+```text
+frontend/public/spine/models/<模型文件夹>/
+├── <骨架>.json          ← 必需，含 skeleton / animations
+├── <骨架>.atlas         ← 必需，和骨架同名
+├── 贴图.png
+└── model.json           ← 可选：{"name","animation","loop","scale","offsetX","offsetY"}
+```
+
+脚本会为它生成 `public/spine/models/manifest.json`，并在构建时只复制
+`.json/.atlas/图片`。后台「形象引擎」选择 Spine 后才生效；加载失败会自动回退 Live2D。
+字段和现有模型动画清单见
+[frontend/public/spine/models/README.md](../frontend/public/spine/models/README.md)。
+
 ### 3.5 类型检查与构建（踩坑 2：CSS 文件没生成）
 
 ```bash
@@ -1048,6 +1063,7 @@ pnpm install
 pnpm approve-builds --all -y
 pnpm install
 # 放入模型：frontend/public/live2d/models/<模型名>/
+# 可选 Spine：frontend/public/spine/models/<模型文件夹>/
 pnpm run prepare:models
 pnpm exec tsc --noEmit
 pnpm build

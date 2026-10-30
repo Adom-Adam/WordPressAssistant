@@ -54,6 +54,41 @@ frontend/public/live2d/models/
 管理员在 WordPress 后台「设置 → Live2D 小助手 → Live2D 形象」里从清单中选择一个，所有访客都会看到它。
 **不要**用 Cubism 2 的 `.model.json` 格式，本项目只带 Cubism 3/4 运行时。
 
+### Spine 模型（可选，已接入）
+
+Spine 4.2 模型放在：
+
+```
+frontend/public/spine/models/<模型文件夹>/
+├── <骨架>.json          ← 必需，包含 skeleton / animations
+├── <骨架>.atlas         ← 必需，和骨架同名
+├── 贴图.png
+└── model.json           ← 可选：显示名、默认动画、是否循环、偏移
+```
+
+`model.json` 可选内容：
+
+```json
+{
+  "name": "月之拾忆少女",
+  "animation": "主体动画",
+  "loop": true,
+  "scale": 1,
+  "offsetX": 0,
+  "offsetY": 0
+}
+```
+
+`pnpm dev` / `pnpm build` 会自动生成 `spine/models/manifest.json`。管理员在
+「设置 → Live2D 小助手 → 形象引擎」选择 Spine，再从「Spine 模型」里选具体模型；
+Spine 加载失败时会自动回退到 Live2D，聊天功能不受影响。
+
+现有 Spine 模型只有自带动画循环，没有 Live2D 那种口型、眨眼和表情参数，
+所以目前是“会动的立绘”。构建时只复制 `.json` / `.atlas` / 图片，
+`test.py`、`.bak`、`desktop.ini` 之类的杂项不会进入插件产物。
+模型清单、动画情况和授权说明见
+[frontend/public/spine/models/README.md](frontend/public/spine/models/README.md)。
+
 ## 本地开发
 
 需要：Node 20+、pnpm、Python 3.11+、uv。
@@ -127,13 +162,14 @@ cd frontend
 pnpm build
 ```
 
-产物输出到 `wordpress-plugin/wp-live2d-ai/assets/app/`（含模型与 Cubism Core）。
+产物输出到 `wordpress-plugin/wp-live2d-ai/assets/app/`（含 Live2D/Spine 模型与 Cubism Core）。
 整个 `wp-live2d-ai` 文件夹丢进 `wp-content/plugins/` 启用即可。
 服务器上要手动改哪些配置、怎么验证，见 [docs/deployment-walkthrough.md](docs/deployment-walkthrough.md)。
 
 ## 当前状态
 
 - [x] Live2D 渲染、视线跟随、管理员后台选择模型
+- [x] Spine 4.2 渲染与动画循环（可选引擎，失败自动回退 Live2D）
 - [x] 形象大小三档预设 + 自定义像素（WordPress 后台可调）
 - [x] 半透明悬浮控件（悬停显示）
 - [x] 文本对话（SSE 流式）
