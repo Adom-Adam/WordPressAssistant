@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -92,3 +93,64 @@ def test_set_user_clears_expiry(tmp_path) -> None:
 
     assert store.set_tier(42, "user", days=None) is None
     assert store.tier_of(42) == ("user", None)
+
+
+# ---------------------------------------------------------------------------
+# 额外额度
+# ---------------------------------------------------------------------------
+
+
+def test_grant_and_balance(tmp_path) -> None:
+    store = make_store(tmp_path)
+    assert store.balance_of(7) == 0
+    assert store.grant_credits(7, 5, "admin_grant") == 5
+    assert store.grant_credits(7, -2, "admin_grant") == 3
+    assert store.balance_of(7) == 3
+
+
+def test_grant_never_goes_negative(tmp_path) -> None:
+    store = make_store(tmp_path)
+    store.grant_credits(7, 2, "admin_grant")
+
+    with pytest.raises(ValueError):
+        store.grant_credits(7, -3, "admin_grant")
+
+    assert store.balance_of(7) == 2
+
+
+def test_grant_respects_max_per_user(tmp_path) -> None:
+    store = make_store(tmp_path)  # max_credits=1000
+
+    with pytest.raises(ValueError):
+        store.grant_credits(7, 1001, "admin_grant")
+
+    assert store.balance_of(7) == 0
+
+
+def test_ledger_records_every_change(tmp_path) -> None:
+    store = make_store(tmp_path)
+    store.grant_credits(7, 5, "admin_grant")
+    store.grant_credits(7, -1, "chat")
+
+    with sqlite3.connect(tmp_path / "quota.sqlite3") as conn:
+        rows = conn.execute(
+            "SELECT delta, reason FROM credit_ledger WHERE user_id = 7 ORDER BY id"
+        ).fetchall()
+
+    assert rows == [(5, "admin_grant"), (-1, "chat")]
+
+
+def test_profile_snapshot_handles_unknown_and_empty(tmp_path) -> None:
+    store = make_store(tmp_path)
+    store.set_tier(7, "member", days=3)
+    store.grant_credits(7, 4, "admin_grant")
+
+    snapshot = store.profile_snapshot([7, 99])
+
+    assert snapshot[7].tier == "member"
+    assert snapshot[7].credit == 4
+    # 完全没有记录的用户也要有一份默认档案，后台页才好统一渲染
+    assert snapshot[99].tier == "user"
+    assert snapshot[99].credit == 0
+    # 空输入不发 SQL
+    assert store.profile_snapshot([]) == {}

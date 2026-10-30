@@ -31,8 +31,9 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -104,6 +105,18 @@ class RedeemError(Exception):
     失败原因要原样显示给用户（“已过期”“已用完”“你兑换过”），
     接口层只负责把它转成 400。
     """
+
+
+@dataclass(frozen=True, slots=True)
+class Profile:
+    """一个用户在后台看到的全部“后端侧”信息（不含邮箱）。"""
+
+    user_id: int
+    tier: str
+    tier_expires_at: str | None
+    credit: int
+    note: str | None
+    qq_uin: str | None
 
 
 class CreditStore:
@@ -251,6 +264,172 @@ class CreditStore:
         """设置等级，返回新的到期时间（普通用户返回 None）。"""
         with self._connection() as conn:
             return self._set_tier_locked(conn, user_id, tier, days)
+
+    # ------------------------------------------------------------------
+    # 额外额度
+    # ------------------------------------------------------------------
+    def balance_of(self, user_id: int) -> int:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT balance FROM credit_balance WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            return int(row["balance"]) if row else 0
+
+    def _grant_locked(
+        self,
+        conn: sqlite3.Connection,
+        user_id: int,
+        delta: int,
+        reason: str,
+        ref: str | None = None,
+    ) -> int:
+        """在调用方的事务里增减余额，返回新余额。
+
+        “够不够扣”和“有没有超上限”都写进 UPDATE 的 WHERE 里，
+        让 SQLite 原子地判断并修改——先 SELECT 再 UPDATE 会在并发下算错。
+        """
+        if delta == 0:
+            raise ValueError("没有需要变更的额度")
+
+        stamped = self._now_iso()
+        conn.execute(
+            """
+            INSERT INTO credit_balance (user_id, balance, updated_at)
+            VALUES (?, 0, ?)
+            ON CONFLICT(user_id) DO NOTHING
+            """,
+            (user_id, stamped),
+        )
+
+        if delta > 0:
+            row = conn.execute(
+                """
+                UPDATE credit_balance
+                   SET balance = balance + ?, updated_at = ?
+                 WHERE user_id = ? AND balance + ? <= ?
+                RETURNING balance
+                """,
+                (delta, stamped, user_id, delta, self.max_credits),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"单个用户的额外额度上限是 {self.max_credits} 条")
+        else:
+            row = conn.execute(
+                """
+                UPDATE credit_balance
+                   SET balance = balance + ?, updated_at = ?
+                 WHERE user_id = ? AND balance + ? >= 0
+                RETURNING balance
+                """,
+                (delta, stamped, user_id, delta),
+            ).fetchone()
+            if row is None:
+                raise ValueError("余额不足，不能扣成负数")
+
+        balance = int(row["balance"])
+        conn.execute(
+            """
+            INSERT INTO credit_ledger (user_id, delta, reason, ref, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user_id, delta, reason, ref, stamped),
+        )
+        return balance
+
+    def grant_credits(
+        self,
+        user_id: int,
+        delta: int,
+        reason: str,
+        ref: str | None = None,
+    ) -> int:
+        """增减额外额度并记账，返回新余额。delta 为负表示扣减。"""
+        with self._connection() as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                balance = self._grant_locked(conn, user_id, delta, reason, ref)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return balance
+
+    def _known_user_ids_locked(self, conn: sqlite3.Connection) -> list[int]:
+        rows = conn.execute(
+            """
+            SELECT user_id FROM user_profile
+            UNION
+            SELECT user_id FROM credit_balance
+            """
+        ).fetchall()
+        return [int(row["user_id"]) for row in rows]
+
+    def known_user_ids(self) -> list[int]:
+        """后端“有记录”的用户集合。
+
+        后端不知道 WordPress 的全部用户，所以后台页只拿这个集合做合并；
+        没有记录的用户按默认档案处理。
+        """
+        with self._connection() as conn:
+            return self._known_user_ids_locked(conn)
+
+    def profile_snapshot(self, user_ids: Iterable[int]) -> dict[int, Profile]:
+        """一次取齐一批用户的等级与余额，避免后台页 N+1 查询。"""
+        ids = [int(item) for item in user_ids]
+        if not ids:
+            return {}
+
+        placeholders = ",".join("?" for _ in ids)
+        with self._connection() as conn:
+            profile_rows = conn.execute(
+                f"""
+                SELECT user_id, tier, tier_expires_at, note, qq_uin
+                  FROM user_profile
+                 WHERE user_id IN ({placeholders})
+                """,
+                ids,
+            ).fetchall()
+            balance_rows = conn.execute(
+                f"""
+                SELECT user_id, balance
+                  FROM credit_balance
+                 WHERE user_id IN ({placeholders})
+                """,
+                ids,
+            ).fetchall()
+
+        balances = {int(row["user_id"]): int(row["balance"]) for row in balance_rows}
+        profiles: dict[int, Profile] = {}
+        for row in profile_rows:
+            user_id = int(row["user_id"])
+            tier = str(row["tier"])
+            expires = row["tier_expires_at"]
+            # 列表里也要显示“到期就是普通用户”，否则后台会误以为会员还在。
+            if tier == "member" and expires and self._expired(str(expires)):
+                tier, expires = "user", None
+            profiles[user_id] = Profile(
+                user_id=user_id,
+                tier=tier,
+                tier_expires_at=str(expires) if expires else None,
+                credit=balances.get(user_id, 0),
+                note=row["note"],
+                qq_uin=row["qq_uin"],
+            )
+
+        for user_id in ids:
+            profiles.setdefault(
+                user_id,
+                Profile(
+                    user_id=user_id,
+                    tier="user",
+                    tier_expires_at=None,
+                    credit=balances.get(user_id, 0),
+                    note=None,
+                    qq_uin=None,
+                ),
+            )
+        return profiles
 
 
 @lru_cache(maxsize=1)
