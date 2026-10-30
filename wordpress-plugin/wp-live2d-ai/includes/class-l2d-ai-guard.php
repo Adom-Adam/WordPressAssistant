@@ -49,6 +49,9 @@ final class L2D_AI_Guard {
 		// 4 个参数：$errors, $sanitize_user, $user_login, $user_email。
 		add_filter( 'registration_errors', array( __CLASS__, 'check_registration' ), 10, 4 );
 		add_action( 'user_register', array( __CLASS__, 'record_registration' ) );
+
+		add_action( 'admin_menu', array( __CLASS__, 'add_page' ) );
+		add_action( 'admin_post_l2d_ai_save_guard', array( __CLASS__, 'save_settings' ) );
 	}
 
 	/**
@@ -159,7 +162,8 @@ final class L2D_AI_Guard {
 		$key   = md5( $ip );
 
 		// 两次注册之间的最小间隔。unknown 是拿不到 IP 时的兜底桶，
-		// 对它用间隔限制会把互不相关的访客串在一起，所以只做全天计数。
+		// 对它用间隔限制会把互不相关的访客串在一起，所以跳过间隔检查，
+		// 只保留次数计数。
 		if ( 'unknown' !== $ip && $limit['min_interval_seconds'] > 0 ) {
 			$last = (int) get_transient( 'l2d_ai_reg_' . $key . '_t' );
 			if ( $last > 0 && ( time() - $last ) < $limit['min_interval_seconds'] ) {
@@ -262,5 +266,146 @@ final class L2D_AI_Guard {
 		$log = array_slice( $log, 0, self::LOG_MAX );
 		// autoload=no：只有后台页用到，不要让它跟着每个请求一起加载。
 		update_option( self::OPTION_LOG, $log, false );
+	}
+
+	// ------------------------------------------------------------------
+	// 后台页面
+	// ------------------------------------------------------------------
+
+	public static function add_page() {
+		add_options_page(
+			'Live2D 小助手 · 注册防护',
+			'Live2D 小助手 · 注册防护',
+			'manage_options',
+			'l2d-ai-guard',
+			array( __CLASS__, 'render_page' )
+		);
+	}
+
+	/** 本页地址，供保存后跳回。 */
+	private static function page_url( array $args = array() ) {
+		return add_query_arg(
+			array_merge( array( 'page' => 'l2d-ai-guard' ), $args ),
+			admin_url( 'options-general.php' )
+		);
+	}
+
+	/**
+	 * 保存设置。
+	 *
+	 * 用 admin-post.php 而不是 options.php：这几个选项的校验规则
+	 * （数字范围、域名清洗）比较特殊，独立处理比塞进 register_setting 更清楚。
+	 */
+	public static function save_settings() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( '需要管理员权限', '无权限', array( 'response' => 403 ) );
+		}
+		check_admin_referer( 'l2d_ai_guard' );
+
+		// 黑名单原样存文本：一行一个，清洗掉控制字符和多余空白，
+		// 保留 # 开头的注释行，方便站长自己写说明。
+		$domains = isset( $_POST['domains'] ) ? (string) wp_unslash( $_POST['domains'] ) : '';
+		$lines   = preg_split( '/\r\n|\r|\n/', $domains );
+		$clean   = array();
+		foreach ( (array) $lines as $line ) {
+			$line = trim( sanitize_text_field( $line ) );
+			if ( '' !== $line ) {
+				$clean[] = $line;
+			}
+		}
+		update_option( self::OPTION_DOMAINS, implode( "\n", $clean ) );
+
+		$limit = array(
+			'per_ip_hour'          => isset( $_POST['per_ip_hour'] ) ? absint( $_POST['per_ip_hour'] ) : self::DEFAULT_LIMIT['per_ip_hour'],
+			'per_ip_day'           => isset( $_POST['per_ip_day'] ) ? absint( $_POST['per_ip_day'] ) : self::DEFAULT_LIMIT['per_ip_day'],
+			'min_interval_seconds' => isset( $_POST['min_interval_seconds'] ) ? absint( $_POST['min_interval_seconds'] ) : self::DEFAULT_LIMIT['min_interval_seconds'],
+		);
+		update_option( self::OPTION_LIMIT, $limit );
+
+		wp_safe_redirect( self::page_url( array( 'l2d_ai_notice' => 'saved' ) ) );
+		exit;
+	}
+
+	public static function render_page() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			return;
+		}
+
+		$domains = (string) get_option( self::OPTION_DOMAINS, '' );
+		$limit   = self::register_limit();
+		$log     = get_option( self::OPTION_LOG, array() );
+		$log     = is_array( $log ) ? $log : array();
+
+		$saved = isset( $_GET['l2d_ai_notice'] ) && 'saved' === sanitize_key( wp_unslash( $_GET['l2d_ai_notice'] ) );
+		?>
+		<div class="wrap">
+			<h1>注册防护</h1>
+
+			<?php if ( $saved ) : ?>
+				<div class="notice notice-success is-dismissible"><p>设置已保存。</p></div>
+			<?php endif; ?>
+
+			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+				<input type="hidden" name="action" value="l2d_ai_save_guard" />
+				<?php wp_nonce_field( 'l2d_ai_guard' ); ?>
+
+				<h2>邮箱域名黑名单</h2>
+				<p class="description">
+					一行一个域名；子域同样会被拦截（写 <code>example.com</code> 会连 <code>mail.example.com</code> 一起拦）。
+					以 <code>#</code> 开头的行是注释，不会生效。
+				</p>
+				<textarea name="domains" rows="8" class="large-text code" placeholder="example.com&#10;# 一次性邮箱&#10;mailinator.com"><?php echo esc_textarea( $domains ); ?></textarea>
+
+				<h2>同一 IP 的注册频率</h2>
+				<p class="description">填 0 表示不限制该项。办公室、学校等共用出口的访客会共享同一个 IP，数值别设得太紧。</p>
+				<table class="form-table" role="presentation">
+					<tr>
+						<th scope="row"><label for="per_ip_hour">每小时最多</label></th>
+						<td><input type="number" min="0" max="1000" id="per_ip_hour" name="per_ip_hour" value="<?php echo esc_attr( (string) $limit['per_ip_hour'] ); ?>" class="small-text" /> 个</td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="per_ip_day">每天最多</label></th>
+						<td><input type="number" min="0" max="10000" id="per_ip_day" name="per_ip_day" value="<?php echo esc_attr( (string) $limit['per_ip_day'] ); ?>" class="small-text" /> 个</td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="min_interval_seconds">两次注册至少间隔</label></th>
+						<td><input type="number" min="0" max="86400" id="min_interval_seconds" name="min_interval_seconds" value="<?php echo esc_attr( (string) $limit['min_interval_seconds'] ); ?>" class="small-text" /> 秒</td>
+					</tr>
+				</table>
+
+				<?php submit_button( '保存设置' ); ?>
+			</form>
+
+			<h2>最近的拦截记录</h2>
+			<?php if ( empty( $log ) ) : ?>
+				<p>暂无拦截记录。</p>
+			<?php else : ?>
+				<table class="widefat striped">
+					<thead>
+						<tr>
+							<th>时间</th>
+							<th>邮箱</th>
+							<th>IP</th>
+							<th>原因</th>
+						</tr>
+					</thead>
+					<tbody>
+						<?php foreach ( $log as $entry ) : ?>
+							<tr>
+								<td><?php echo esc_html( isset( $entry['time'] ) ? (string) $entry['time'] : '' ); ?></td>
+								<td><?php echo esc_html( isset( $entry['email'] ) ? (string) $entry['email'] : '' ); ?></td>
+								<td><?php echo esc_html( isset( $entry['ip'] ) ? (string) $entry['ip'] : '' ); ?></td>
+								<td><?php echo esc_html( isset( $entry['reason'] ) ? (string) $entry['reason'] : '' ); ?></td>
+							</tr>
+						<?php endforeach; ?>
+					</tbody>
+				</table>
+			<?php endif; ?>
+
+			<p class="description">
+				要删除或封禁某个用户，请到「用户 → 所有用户」。这里只负责拦截新的注册。
+			</p>
+		</div>
+		<?php
 	}
 }
