@@ -12,6 +12,10 @@
 
 defined( 'ABSPATH' ) || exit;
 
+// 注册防护单独成文件：它和前端展示、聊天 token 完全无关，
+// 只有“有人注册”这一条链路会走到，放在主文件里会让主文件更难读。
+require_once __DIR__ . '/includes/class-l2d-ai-guard.php';
+
 final class L2D_AI_Plugin {
 
 	const VERSION          = '0.3.4';
@@ -52,6 +56,9 @@ final class L2D_AI_Plugin {
 		// 主题可能在登录后默认把人送进后台个人资料页；这里用较高优先级覆盖。
 		add_filter( 'login_redirect', array( __CLASS__, 'login_redirect_to_home' ), 999, 3 );
 		add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), array( __CLASS__, 'action_links' ) );
+
+		// 注册防护：邮箱域名黑名单 + 同一 IP 的频率限制。
+		L2D_AI_Guard::init();
 	}
 
 	/**
@@ -819,7 +826,7 @@ final class L2D_AI_Plugin {
 	 * 调用后端接口。成功返回数组，失败返回 WP_Error。
 	 * 错误信息会带上 HTTP 状态码和后端的 detail，方便在设置页直接看到原因。
 	 */
-	private static function request_backend( $method, $path, $body = null ) {
+	public static function request_backend( $method, $path, $body = null ) {
 		$token = self::admin_token();
 		if ( is_wp_error( $token ) ) {
 			return $token;
