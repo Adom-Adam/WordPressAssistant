@@ -11,7 +11,8 @@ frontend/.env.local
 backend/.env
 backend/.venv/
 
-# ---- Local knowledge base (rebuild with `python -m app.kb.sync`) ----
+# ---- Local knowledge base / quota / private personas ----
+# 包含 data/personas/（真实人设）。这些正文不要提交，也不要 git add -f。
 backend/data/
 
 # ---- Build output ----
@@ -23,6 +24,12 @@ wordpress-plugin/wp-live2d-ai/assets/app/
 frontend/public/live2d/models/*
 !frontend/public/live2d/models/README.md
 !frontend/public/live2d/models/.gitkeep
+
+# ---- Spine model assets (large, keep locally; see models/README.md) ----
+# 这些模型同样可能涉及第三方版权，且单个模型有数 MB。
+# 部署时单独上传，不要 git add -f。
+frontend/public/spine/models/*
+!frontend/public/spine/models/README.md
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
