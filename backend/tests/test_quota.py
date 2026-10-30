@@ -216,6 +216,18 @@ def test_credit_used_after_daily_exhausted(tmp_path) -> None:
     assert fourth is None
 
 
+def test_usage_snapshot_counts_only_requested_users(tmp_path) -> None:
+    store = make_store(tmp_path)
+    store.reserve(1, limit=5)
+    store.reserve(1, limit=5)
+    store.reserve(2, limit=5)
+
+    snapshot = store.usage_snapshot([1, 2, 3])
+
+    # 后台页一次要展示一批用户，单独查三次就是 N+1
+    assert snapshot == {1: 2, 2: 1, 3: 0}
+
+
 def test_daily_reservation_still_reports_credit_balance(tmp_path) -> None:
     store = make_store(tmp_path)
     credit_store(tmp_path).grant_credits(7, 5, "admin_grant")

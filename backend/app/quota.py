@@ -436,6 +436,32 @@ class QuotaStore:
             reservation.global_counted,
         )
 
+    def usage_snapshot(
+        self, user_ids: list[int], *, day: str | None = None
+    ) -> dict[int, int]:
+        """一次查出多个用户当天已用次数，缺席的补 0。
+
+        后台用户列表要显示“今日已用 / 剩余”，逐行调 status() 就是
+        N+1 查询。这里用一条 IN 查询取完，缺行的用户说明今天还没聊过。
+        """
+        ids = [int(item) for item in user_ids]
+        if not ids:
+            return {}
+
+        current_day = day or self.today()
+        placeholders = ",".join("?" for _ in ids)
+        with self._connection() as conn:
+            rows = conn.execute(
+                f"SELECT user_id, used FROM daily_usage "
+                f"WHERE day = ? AND user_id IN ({placeholders})",
+                (current_day, *ids),
+            ).fetchall()
+
+        used = {user_id: 0 for user_id in ids}
+        for user_id, count in rows:
+            used[int(user_id)] = int(count)
+        return used
+
     def status(
         self,
         user_id: int,

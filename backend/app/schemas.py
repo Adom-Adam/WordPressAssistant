@@ -62,6 +62,46 @@ class RuntimeSettingsUpdate(BaseModel):
     )
 
 
+class UserPatch(BaseModel):
+    """管理员调整单个用户：等级、会员天数、备注。
+
+    三个字段都可选（PATCH 语义）：只提交要改的那一项。
+    会员必须带天数——等级是“有期限的”，不给期限就没法自动降级。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tier: Literal["user", "member"] | None = None
+    duration_days: int | None = Field(default=None, ge=1, le=3650)
+    note: str | None = Field(default=None, max_length=200)
+
+
+class CreditGrant(BaseModel):
+    """管理员手动增减额外额度。delta 为负表示扣减。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    delta: int = Field(ge=-1_000_000, le=1_000_000)
+    reason: str = Field(min_length=1, max_length=100)
+
+
+class CodeCreate(BaseModel):
+    """批量生成兑换码。
+
+    `value` 的含义随 `kind` 变化：credit 是“条数”，member 是“天数”。
+    这是设计上刻意保留的一个小不对称——用户在兑换页只需要看到一个数字。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["credit", "member"]
+    value: int = Field(ge=1, le=100_000)
+    count: int = Field(default=1, ge=1, le=200)
+    max_uses: int = Field(default=1, ge=1, le=10_000)
+    expires_at: str | None = Field(default=None, max_length=40)
+    note: str | None = Field(default=None, max_length=200)
+
+
 class RedeemRequest(BaseModel):
     """兑换码请求体。
 

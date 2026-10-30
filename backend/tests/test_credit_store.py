@@ -86,6 +86,24 @@ def test_set_member_requires_days(tmp_path) -> None:
         store.set_tier(42, "member", days=None)
 
 
+def test_set_note_stores_and_clears(tmp_path) -> None:
+    store = make_store(tmp_path)
+
+    store.set_note(42, "站长本人")
+    assert store.profile_snapshot([42])[42].note == "站长本人"
+
+    # 传空串等于清空备注，后台页用“留空保存”表达删除
+    store.set_note(42, "")
+    assert store.profile_snapshot([42])[42].note is None
+
+
+def test_set_note_rejects_overlong_text(tmp_path) -> None:
+    store = make_store(tmp_path)
+
+    with pytest.raises(ValueError):
+        store.set_note(42, "字" * 201)
+
+
 def test_set_user_clears_expiry(tmp_path) -> None:
     clock = Clock(datetime(2026, 10, 30, 12, 0, tzinfo=TZ))
     store = make_store(tmp_path, clock)

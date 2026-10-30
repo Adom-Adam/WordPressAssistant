@@ -306,6 +306,23 @@ class CreditStore:
         with self._connection() as conn:
             return self._set_tier_locked(conn, user_id, tier, days)
 
+    def set_note(self, user_id: int, note: str) -> None:
+        """更新管理员备注。空串表示清空（存 NULL 而不是空字符串）。
+
+        备注是给管理员自己看的线索，例如“这是那个 QQ 群的朋友”，
+        不参与任何判断，所以不需要事务或校验以外的处理。
+        """
+        text = note.strip()
+        if len(text) > 200:
+            raise ValueError("备注最多 200 字")
+
+        with self._connection() as conn:
+            self._ensure_profile_row(conn, user_id)
+            conn.execute(
+                "UPDATE user_profile SET note = ?, updated_at = ? WHERE user_id = ?",
+                (text or None, self._now_iso(), user_id),
+            )
+
     # ------------------------------------------------------------------
     # 额外额度
     # ------------------------------------------------------------------
