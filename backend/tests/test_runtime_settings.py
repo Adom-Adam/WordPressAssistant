@@ -91,3 +91,21 @@ def test_bool_is_not_accepted_as_int(tmp_path) -> None:
 
     with pytest.raises(ValueError):
         store.update({"daily_quota": True})
+
+
+def test_member_quota_and_credit_cap_come_from_settings(tmp_path) -> None:
+    store = make_store(tmp_path, member_daily_quota=80, credit_max_per_user=500)
+
+    runtime = store.load()
+
+    assert runtime.member_daily_quota == 80
+    assert runtime.credit_max_per_user == 500
+
+
+def test_member_quota_out_of_range_falls_back(tmp_path) -> None:
+    store = make_store(tmp_path)
+    store.update({"member_daily_quota": 50})
+    # 手工改坏文件：越界字段单独回退默认值，不能影响其他字段
+    store.path.write_text('{"member_daily_quota": -1}', encoding="utf-8")
+
+    assert store.load().member_daily_quota == store.defaults.member_daily_quota

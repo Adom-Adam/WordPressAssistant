@@ -635,4 +635,8 @@ def get_credit_store() -> CreditStore:
     否则会继续用上一个测试的数据库路径。
     """
     settings = get_settings()
-    return CreditStore(settings.quota_db_path, settings.quota_timezone)
+    return CreditStore(
+        settings.quota_db_path,
+        settings.quota_timezone,
+        max_credits=settings.credit_max_per_user,
+    )

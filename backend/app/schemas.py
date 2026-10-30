@@ -48,7 +48,9 @@ class RuntimeSettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     daily_quota: int | None = Field(default=None, ge=0, le=1000)
+    member_daily_quota: int | None = Field(default=None, ge=0, le=1000)
     global_daily_quota: int | None = Field(default=None, ge=0, le=1_000_000)
+    credit_max_per_user: int | None = Field(default=None, ge=0, le=1_000_000)
     agent_max_model_calls: int | None = Field(default=None, ge=1, le=20)
     agent_max_tool_calls: int | None = Field(default=None, ge=1, le=20)
     agent_max_seconds: float | None = Field(default=None, ge=5, le=300)
