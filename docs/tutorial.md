@@ -369,9 +369,14 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 18080
 
 ### 4.4 LangChain agent 是怎么跑起来的
 
-后端代码按“模型 / 提示词 / 工具 / agent 循环”拆成四个文件，
+后端代码按“模型 / 人设 / 工具 / agent 循环”拆成四个部分，
 每个文件都有面向初学者的详细注释，推荐阅读顺序见
 [backend/README.md](../backend/README.md)。
+
+人设正文放在 `backend/data/personas/`（已被 `.gitignore` 忽略），
+代码只负责组装。第一次运行前执行 `cp -r personas.example data/personas`，
+再把示例文字替换成真实人设；格式见
+[backend/personas.example/README.md](../backend/personas.example/README.md)。
 
 核心只有三步：
 

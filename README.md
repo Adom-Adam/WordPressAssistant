@@ -84,10 +84,19 @@ dev.bat doctor     :: 检查 uv、pnpm、.env、索引和端口
 ```bash
 cd backend
 cp .env.example .env          # 填入 DEEPSEEK_API_KEY；不填则自动 mock
+cp -r personas.example data/personas   # 首次：复制人设格式示例，再替换成真实人设
 uv sync
 uv run uvicorn app.main:app --reload --port 18080
 uv run pytest -q               # 认证、额度、防循环测试（不调用真实模型）
 ```
+
+真实人设正文放在 `backend/data/personas/`，该目录已被 `.gitignore` 忽略，
+不会上传到 GitHub。格式和版本切换见
+[backend/personas.example/README.md](backend/personas.example/README.md)。
+
+QQ 通道默认关闭。本地没有 NapCat 时，用 `backend/scripts/mock_onebot.py`
+和 `backend/scripts/qq_simulate.py` 降级联调，步骤见
+[backend/README.md](backend/README.md) 的“QQ 通道”一节。
 
 **2. 建立知识库索引**
 
@@ -130,6 +139,7 @@ pnpm build
 - [x] 文本对话（SSE 流式）
 - [x] 语音输入（浏览器 Web Speech API，单句识别后手动发送）
 - [x] LangChain agent（`create_agent`）+ DeepSeek（`deepseek-flash`）流式对话
+- [x] 人设文件版本化（正文放 `backend/data/personas/`，不进 Git）
 - [x] 工具调用链路（时间 / 站内检索 / 跳转）
 - [x] 站内知识库（WordPress 同步 + SQLite FTS5 + jieba 中文分词）
 - [x] 文章图片理解（`deepseek-flash` 生成描述/OCR，图片可被文字检索）
@@ -145,12 +155,49 @@ pnpm build
 - [x] WordPress 后台配置模型、单用户/全站额度、调用上限与超时（立即生效）
 - [x] 后端端口、API Key、JWT 状态在设置页只读展示
 - [x] 代码块按纯文本渲染（不引入 Markdown 解析器，避免 XSS）
+- [x] QQ OneBot 薄适配器 + 本地 mock（实验性，默认关闭）
+- [x] 服务器 NapCat 连通性验证（2026-10-30：实测群内 @ 可正常回复）
+- [ ] QQ 通道生产接入（独立额度、内容审核、账号绑定，缺一不可）
 - [ ] 上传图片找相似图（CLIP / 向量检索）
 - [ ] AI 语音播报（TTS）
 - [ ] 语音打断（连续收音 + 停止播报 + 取消请求）
 - [ ] 文章发布后自动增量同步
 - [x] 服务器部署（systemd + Nginx 同域反代）
 - [ ] 自动化构建/同步流水线
+
+## 后续待办（尚未排期）
+
+### 知识库自动增量同步
+
+现在文章发布后需要手动跑同步脚本，否则梅林检索不到新内容。目标是：
+
+- WordPress 在文章发布、更新、删除时通知后端；
+- 后端只重建受影响的那一篇，而不是整库重扫；
+- 通知失败可重试，删除文章时同步删除索引；
+- 后台能看到最近一次同步时间和失败原因。
+
+### TTS 语音播报
+
+- 网页端：把回复转成语音播放，可开关、可打断；
+- 优先用云端 TTS（按字符计费），不在 1.6 GB 内存的服务器上跑本地语音模型；
+- 如果接入 QQ，可复用同一套 TTS，把回复作为语音消息发送；
+- 注意缓存常用短句，避免重复计费。
+
+### 多平台接入（设想）
+
+让同一个梅林出现在 QQ、Telegram 等平台，核心 agent、知识库和工具保持不变，
+只增加平台适配层。需要先解决身份映射、独立额度、群聊礼仪和内容审核，
+详见后续设计讨论。
+
+### QQ 账号绑定与主动消息（设想）
+
+- **账号绑定**：WordPress 用户 ID 是现成的唯一标识，但对外使用单独的随机“馆内编号”，
+  避免暴露连续的用户 ID。已登录用户在博客里生成一次性绑定码，再在 QQ 私聊里发给梅林；
+  未绑定的 QQ 不进入对话，只收到绑定提示。绑定后网页与 QQ 共用同一份关系状态和记忆，
+  梅林才能认出“这是同一个人”。
+- **主动消息**：技术上可以通过 OneBot 主动发送私聊/群消息，但必须先有绑定关系、
+  明确的接收意愿、频率上限、静默时段和退订方式；群聊还需要群主同意。
+  该能力风险较高，等绑定和记忆稳定后再单独设计，不随 QQ 通道一起上线。
 
 ## 说明
 

@@ -253,8 +253,9 @@ runuser -u l2dai -- env UV_CACHE_DIR=/opt/l2d-ai/.uv-cache /usr/local/bin/uv syn
 install -d -o l2dai -g l2dai /opt/l2d-ai/WordPressAssistant/backend/data
 ```
 
-> **不要上传本地的 `.venv`、`node_modules`、`data/`**。`.venv` 里是 Windows 的二进制，
-> 到 Linux 不能直接用；知识库建议在服务器上重新同步。
+> **不要整个上传本地的 `.venv`、`node_modules`、`data/`**。`.venv` 里是 Windows 的二进制，
+> 到 Linux 不能直接用；知识库建议在服务器上重新同步，额度库也应由服务器自己生成。
+> 唯一需要单独上传的是 `data/personas/`（真实人设），见 5.1。
 
 ---
 
@@ -297,6 +298,52 @@ nano .env          # 没有 nano 就用 vi，或在宝塔文件管理里编辑
 
 > `.env` 权限必须是 `640` 或 `600`。后端进程按**当前工作目录**找 `.env`，
 > 所以 systemd 的 `WorkingDirectory` 必须是 `backend/`，否则会出现“明明配了 Key 还是 mock”。
+
+### 5.1 部署人设文件（不在 Git 里）
+
+真实人设正文放在 `backend/data/personas/`，该目录被 `.gitignore` 忽略，
+所以 **`git pull` 不会把它带到服务器**，必须单独上传。
+
+先在服务器建目录：
+
+```bash
+install -d -o l2dai -g l2dai -m 700 /opt/l2d-ai/WordPressAssistant/backend/data/personas
+```
+
+然后把本地的 `backend/data/personas/` 上传到同一路径。可以用宝塔文件管理，
+也可以在本地执行（把 `user@host` 换成你的服务器）：
+
+```bash
+scp -r backend/data/personas user@host:/opt/l2d-ai/WordPressAssistant/backend/data/
+```
+
+服务器上修正归属和权限：
+
+```bash
+chown -R l2dai:l2dai /opt/l2d-ai/WordPressAssistant/backend/data/personas
+chmod 700 /opt/l2d-ai/WordPressAssistant/backend/data/personas
+find /opt/l2d-ai/WordPressAssistant/backend/data/personas -type f -exec chmod 600 {} +
+```
+
+至少要有：
+
+```text
+backend/data/personas/
+├── active.json
+└── merlin/
+    └── 1.json
+```
+
+`active.json` 里写 `{"persona_id": "merlin", "version": 1}`。
+改完人设或 `active.json` 后重启后端：
+
+```bash
+systemctl restart l2d-ai-backend
+```
+
+> 不要把真实人设 `git add -f` 进仓库。当前提示词在旧提交里已经出现过；
+> 如果仓库是公开的，想彻底不再暴露，需要把仓库改为私有或重写 Git 历史，
+> 这两种操作都要单独确认，不能只靠新增 `.gitignore`。
 
 ---
 
@@ -859,6 +906,175 @@ WordPress 侧按宝塔的数据库 + 站点备份策略走。
 3. `systemctl restart l2d-ai-backend`；
 4. 旧 token 立即失效，用户刷新页面即可换新；
 5. 如果只改了其中一处，所有聊天请求都会返回 401。
+
+### 12.5 QQ / NapCat 接入（实验性，默认关闭）
+
+这一节是**实测走通之后**整理的，包含了踩过的坑。QQ 通道默认关闭，
+不配置它，网页聊天完全不受影响。
+
+#### 12.5.1 为什么要单独一个用户来跑
+
+NapCat 要登录 QQ，而 QQ 把账号状态、登录凭据都写在 `$HOME` 下。所以做法是：
+
+- 用一个**独立账号** `adom` 运行，独立 `HOME=/opt/l2d-ai/qq`；
+- 程序和数据都放在 `/opt/l2d-ai/qq/` 里，`chown adom`；
+- `/opt/l2d-ai` 本身是 `l2dai:l2dai 750`，要给 adom 加遍历权限：
+  `chmod o+x /opt/l2d-ai`（没有 `setfacl` 时的替代方案）。
+
+这样 QQ 数据（`/opt/l2d-ai/qq/.config/QQ`）、NapCat 配置、后端代码三者互不干扰，
+出问题也可以单独删掉重装，不会碰到 `/root` 下的旧安装。
+
+| 内容 | 位置 |
+| --- | --- |
+| NapCat 程序 | `/opt/l2d-ai/qq/Napcat` |
+| QQ 账号数据 | `/opt/l2d-ai/qq/.config/QQ` |
+| NapCat 配置 | `.../app_launcher/napcat/config/` |
+| WebUI | `127.0.0.1:6099`（只绑本机） |
+| 服务 | systemd **用户单元** `l2d-qq` |
+
+#### 12.5.2 只读预检
+
+动任何东西之前先看清楚现状。`backend/scripts/qq_server_preflight.sh` 只查看
+进程、端口、版本和**配置文件名**，不会启动或修改任何东西：
+
+```bash
+bash /root/qq_server_preflight.sh
+```
+
+手动检查的关键几条：
+
+```bash
+ps -ef | grep -E '[n]apcat|[Q]Q'
+ss -lntp | grep -E '3000|3001|6099'
+```
+
+#### 12.5.3 两种常驻方式，选用户单元
+
+`loginctl enable-linger adom` 让 adom 的用户管理器在没人登录时也活着，
+`l2d-qq` 才会开机自启。**root 的 `systemctl --user` 看不到 adom 的单元**，
+必须切到 adom：
+
+```bash
+su - adom -c 'export XDG_RUNTIME_DIR=/run/user/$(id -u); systemctl --user status l2d-qq'
+```
+
+单元文件在 `~adom/.config/systemd/user/l2d-qq.service`，核心是：
+
+```ini
+Environment=HOME=/opt/l2d-ai/qq
+WorkingDirectory=/opt/l2d-ai/qq/Napcat/opt/QQ
+ExecStart=/usr/bin/xvfb-run -a /opt/l2d-ai/qq/Napcat/opt/QQ/qq --no-sandbox
+Restart=on-failure
+```
+
+无头服务器没有显示器，所以必须用 `xvfb-run`；`--no-sandbox` 是 QQ 在容器/新内核
+上的常规要求。
+
+#### 12.5.4 扫码登录：看 WebUI，不要下载图片
+
+NapCat 会在 `cache/qrcode.png` 落一张二维码，但它**大约每两分钟重写一次**。
+下载/截图后再去扫，十有八九已经过期——这不是 bug，是看错了地方。
+
+正确做法是开 WebUI 页面，二维码会自己刷新：
+
+```bash
+ssh -N -L 6099:127.0.0.1:6099 adom@<服务器>
+# 另一个终端取 token（token 只显示在你本地，不要贴聊天）
+ssh adom@<服务器> "jq -r .token /opt/l2d-ai/qq/Napcat/opt/QQ/resources/app/app_launcher/napcat/config/webui.json"
+```
+
+然后浏览器打开 `http://127.0.0.1:6099/webui?token=<token>`。
+`ssh -N` 没有任何输出是正常的，用 `curl -o /dev/null -w '%{http_code}' http://127.0.0.1:6099/webui`
+验证（返回 301 就说明隧道通了）。
+
+#### 12.5.5 快速登录没有想象中可靠
+
+`webui.json` 里的 `autoLoginAccount` 只是告诉 WebUI“默认登录哪个账号”。
+**QQ 缓存的登录凭据失效时，它并不能代替扫码。** 实测重启 `l2d-qq` 后仍然弹了二维码。
+
+由此得到一个重要推论：**OneBot 适配器是在登录成功之后才启动的。**
+如果重启后发现 `127.0.0.1:3000` 没在监听，先别怀疑端口冲突，先确认 QQ 登录了没有：
+
+```bash
+ss -lntp | grep 3000     # 没有输出 = 适配器没起来，通常是没登录
+```
+
+#### 12.5.6 两条链路，都在 WebUI 的「网络配置」里配
+
+OneBot 11 是双向的，缺一条都不通：
+
+| 适配器 | 作用 | 关键字段 |
+| --- | --- | --- |
+| **HTTP 服务器** | 后端调用 NapCat 发消息 | `127.0.0.1:3000`、token 用 `QQ_ONEBOT_TOKEN` |
+| **HTTP 客户端** | NapCat 把事件推给后端 | `http://127.0.0.1:18080/api/channels/qq/events`、token 用 `QQ_EVENT_TOKEN` |
+
+两条都必须：
+
+- **只绑 `127.0.0.1`**，不能是 `0.0.0.0`，否则等于把 OneBot 接口开给全网；
+- `messagePostFormat` 选 **`array`**。后端只解析数组格式，选了 `string`
+  会被静默忽略，日志里一条错误都没有，最难排查。
+
+#### 12.5.7 鉴权：两个 token，而且 NapCat 用签名
+
+后端 `.env` 里有两个**互不相同**的密钥：
+
+```dotenv
+QQ_ENABLED=true
+QQ_ONEBOT_BASE_URL=http://127.0.0.1:3000
+QQ_ONEBOT_TOKEN=<后端 -> NapCat 用>
+QQ_EVENT_TOKEN=<NapCat -> 后端 用>
+QQ_ALLOWED_GROUPS=<测试群号>
+QQ_ADMIN_USERS=<你自己的 QQ 号>
+QQ_TRIGGER=at
+```
+
+用 `openssl rand -hex 32` 各自生成一个。`.env` 改成 `600`，属主 `l2dai`。
+
+**最容易踩的坑**：NapCat 的反向 HTTP 客户端**不发送 `Authorization: Bearer`**，
+它对请求体做 HMAC-SHA1 后放在 `X-Signature: sha1=<hex>` 头里：
+
+```js
+createHmac("sha1", token).update(body).digest("hex")
+```
+
+所以：
+
+- 后端必须支持签名校验（`app/api/qq.py` 已经支持），并且要用**原始请求体**验证——
+  先 `request.json()` 再序列化，空格和键序会变，签名必然对不上；
+- 排查时**不要用 `curl -H "Authorization: Bearer <token>"` 来判断链路是否通**。
+  它返回 204 只能证明后端认得你手写的 header，证明不了 NapCat 发的东西能过。
+
+#### 12.5.8 验收：看状态码，别猜
+
+```bash
+# 1. 正向：后端能不能调通 NapCat
+curl -sS -H "Authorization: Bearer <QQ_ONEBOT_TOKEN>" http://127.0.0.1:3000/get_login_info
+# 期望 {"status":"ok","data":{"user_id":...,"nickname":"..."}}
+
+# 2. 反向：在测试群 @ 机器人说一句话
+
+# 3. 后端有没有收到、有没有发出去（需要 root）
+journalctl -u l2d-ai-backend --since "-5min" --no-pager | grep -E "channels/qq|send_group_msg"
+```
+
+状态码含义：
+
+| 看到的 | 含义 | 下一步 |
+| --- | --- | --- |
+| `404` | `QQ_ENABLED` 没读到 | 检查 `.env` 是否在服务的工作目录下，重启后端 |
+| `401` | token 或签名不对 | 核对两个 token；确认后端版本支持 `X-Signature` |
+| `204` 但没有回复 | 事件收下了，但被白名单/触发方式过滤，或发送失败 | 看是否有 `send_group_msg` 那行 |
+| `204` + `send_group_msg 200` | 全链路通 | 群里应该看到回复 |
+
+#### 12.5.9 已知边界
+
+- **只处理群聊文本**：私聊、图片、表情、CQ 码字符串都忽略；
+- 不经过网页的每日额度，也**没有内容审核**，所以不能直接接到生产群；
+- 没有账号绑定和长期记忆，短期历史只在内存里，重启即清空；
+- 人设的频道覆盖层（`channels.qq_group`）还没接到适配器，QQ 和网页现在共用一份提示词。
+
+> 启动 NapCat、修改它的配置、把它指向后端，都属于服务器运行状态变更，
+> 需要先征得同意再动。
 
 ---
 

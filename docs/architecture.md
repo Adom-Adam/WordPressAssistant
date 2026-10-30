@@ -73,6 +73,9 @@
   - 默认模型 `deepseek-flash`，同时用于聊天和图片理解；
   - 通过 `extra_body={"thinking": {"type": "disabled"}}` 关闭 V4.1 的思考模式，
     降低延迟和 token 消耗，也避免思维链占满 `max_tokens` 导致正文为空；
+  - 系统提示词不再写死在代码里，而是从 `data/personas/<id>/<version>.json`
+    加载（该目录被 `.gitignore` 忽略）。`app/persona/composer.py` 按
+    “核心人设 → 背景 → 规则 → 频道覆盖 → 访客身份 → 页面上下文”组装；
   - `create_agent(model, tools, system_prompt)` 把「模型 → 工具 → 模型」的循环
     编成 LangGraph 状态图；
   - `agent.astream(..., stream_mode=["messages", "updates"])`：
@@ -239,6 +242,22 @@ WordPress 后台设置页
 - **后端**：纯 Python，`pyproject.toml` + `.env`，可在任意机器用 `uv sync` 重建；部署用 systemd 或 Docker 均可；
 - **路径**：前端资源地址由插件注入，不写死域名；API 默认同域 `/ai-api`，由 Nginx 反代，生产环境无 CORS 问题；
 - **模型**：与文章内容无关，单独目录，替换模型不需要改代码。
+
+## 站外通道（实验性）
+
+QQ 走 OneBot 11，NapCat 只负责 QQ 登录和收发，后端通过薄适配器接入：
+
+```
+NapCat ──事件──▶ POST /api/channels/qq/events ──▶ QQAdapter ──▶ stream_reply()
+   ▲                                                              │
+   └──────────────── send_group_msg ◀────────────────────────────┘
+```
+
+- 适配器只做事件解析、白名单、触发方式、去重、短期历史和消息拆条；
+- 人设、知识库、工具完全复用网页链路，不复制一套提示词；
+- 默认关闭，`QQ_ALLOWED_GROUPS` 为空时不回复任何群；
+- 目前不经过网页额度、没有账号绑定和内容审核，因此**不用于生产**；
+- 本地没有 NapCat 时用 `QQ_MOCK_MODE=true` 或 `scripts/mock_onebot.py` 降级联调。
 
 ## 安全
 
