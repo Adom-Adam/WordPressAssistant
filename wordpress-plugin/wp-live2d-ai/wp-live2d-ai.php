@@ -15,6 +15,7 @@ defined( 'ABSPATH' ) || exit;
 // 注册防护单独成文件：它和前端展示、聊天 token 完全无关，
 // 只有“有人注册”这一条链路会走到，放在主文件里会让主文件更难读。
 require_once __DIR__ . '/includes/class-l2d-ai-guard.php';
+require_once __DIR__ . '/includes/class-l2d-ai-users.php';
 
 final class L2D_AI_Plugin {
 
@@ -59,6 +60,8 @@ final class L2D_AI_Plugin {
 
 		// 注册防护：邮箱域名黑名单 + 同一 IP 的频率限制。
 		L2D_AI_Guard::init();
+		// 用户与额度：后台查看用户、调整等级、发额度、生成兑换码。
+		L2D_AI_Users::init();
 	}
 
 	/**

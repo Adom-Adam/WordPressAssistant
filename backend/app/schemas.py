@@ -96,8 +96,10 @@ class CodeCreate(BaseModel):
 
     kind: Literal["credit", "member"]
     value: int = Field(ge=1, le=100_000)
-    count: int = Field(default=1, ge=1, le=200)
-    max_uses: int = Field(default=1, ge=1, le=10_000)
+    # 上限和 CreditStore.create_codes 的校验保持一致：接口层先拒绝，
+    # 用户看到的是 422 而不是“生成了 0 个码”这种半成功。
+    count: int = Field(default=1, ge=1, le=50)
+    max_uses: int = Field(default=1, ge=1, le=1000)
     expires_at: str | None = Field(default=None, max_length=40)
     note: str | None = Field(default=None, max_length=200)
 
