@@ -939,7 +939,9 @@ final class L2D_AI_Plugin {
 		// 第一层校验：在 WordPress 这边就给出清楚的中文错误，避免把明显不合法的值送出去。
 		$rules = array(
 			'daily_quota'           => array( 0, 1000 ),
+			'member_daily_quota'    => array( 0, 1000 ),
 			'global_daily_quota'    => array( 0, 1000000 ),
+			'credit_max_per_user'   => array( 0, 1000000 ),
 			'agent_max_model_calls' => array( 1, 20 ),
 			'agent_max_tool_calls'  => array( 1, 20 ),
 			'agent_max_seconds'     => array( 5, 300 ),
@@ -1331,6 +1333,50 @@ final class L2D_AI_Plugin {
 								<p class="description">
 									每位普通用户每天最多发起多少次聊天；管理员不受限制。
 									设为 <code>0</code> 表示所有人（含普通用户）都不能聊天。当前默认：<?php echo esc_html( $get( $defaults, 'daily_quota', '—' ) ); ?>。
+								</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-member-quota">会员每日额度</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-member-quota"
+									name="member_daily_quota"
+									value="<?php echo esc_attr( $get( $settings, 'member_daily_quota', 0 ) ); ?>"
+									min="0"
+									max="1000"
+									step="1"
+									class="small-text"
+								/>
+								条 / 天
+								<p class="description">
+									会员等级的用户每天最多发起多少次聊天；用完每日额度后才会动额外额度。
+									会员身份到期后自动回到普通用户额度。当前默认：<?php echo esc_html( $get( $defaults, 'member_daily_quota', '—' ) ); ?>。
+								</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-credit-max">单用户额外额度上限</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-credit-max"
+									name="credit_max_per_user"
+									value="<?php echo esc_attr( $get( $settings, 'credit_max_per_user', 0 ) ); ?>"
+									min="0"
+									max="1000000"
+									step="1"
+									class="small-text"
+								/>
+								条
+								<p class="description">
+									单个用户的额外额度余额最多存多少，防止发放时多打一个零。
+									超过这个数的发放会被拒绝。当前默认：<?php echo esc_html( $get( $defaults, 'credit_max_per_user', '—' ) ); ?>。
 								</p>
 							</td>
 						</tr>

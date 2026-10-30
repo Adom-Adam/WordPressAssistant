@@ -171,56 +171,80 @@ final class L2D_AI_Guard {
 			}
 		}
 
-		if ( $limit['per_ip_hour'] > 0 ) {
-			$hour = self::count_window( 'l2d_ai_reg_' . $key . '_h', 3600 );
-			if ( $hour >= $limit['per_ip_hour'] ) {
-				return '同一 IP 一小时内注册次数已达上限';
-			}
+		if ( $limit['per_ip_hour'] > 0
+			&& self::window_count( 'l2d_ai_reg_' . $key . '_h', 3600 ) >= $limit['per_ip_hour'] ) {
+			return '同一 IP 一小时内注册次数已达上限';
 		}
 
+		if ( $limit['per_ip_day'] > 0
+			&& self::window_count( 'l2d_ai_reg_' . $key . '_d', DAY_IN_SECONDS ) >= $limit['per_ip_day'] ) {
+			return '同一 IP 当天注册次数已达上限';
+		}
+
+		// 两条限制都通过之后才计数：先检查、再自增，
+		// 上限 3 就是「前 3 次放行、第 4 次拦截」。
+		// 如果先自增再比较 >=，第 3 次就会撞上上限，配的 3 只剩 2 个能用。
+		if ( $limit['per_ip_hour'] > 0 ) {
+			self::bump_window( 'l2d_ai_reg_' . $key . '_h', 3600 );
+		}
 		if ( $limit['per_ip_day'] > 0 ) {
-			$day = self::count_window( 'l2d_ai_reg_' . $key . '_d', DAY_IN_SECONDS );
-			if ( $day >= $limit['per_ip_day'] ) {
-				return '同一 IP 当天注册次数已达上限';
-			}
+			self::bump_window( 'l2d_ai_reg_' . $key . '_d', DAY_IN_SECONDS );
 		}
 
 		return '';
 	}
 
 	/**
-	 * 读取一个滑动窗口内的计数，并把这次注册记进去。
+	 * 读取一个固定窗口的状态：起点、已用次数、剩余秒数。
 	 *
 	 * 直接 set_transient( $key, $n + 1, $ttl ) 会把过期时间往后推，
 	 * 高频访问下窗口永远不过期（等于变成累计计数）。所以这里存
 	 * 「窗口起点 + 次数」，过期时间由起点算，窗口是固定的。
+	 *
+	 * 计数和自增拆成两个方法：先检查、再自增，配的额度才是「能注册几次」。
 	 */
-	private static function count_window( $key, $seconds ) {
-		$now      = time();
-		$data     = get_transient( $key );
-		$start    = is_array( $data ) && isset( $data['start'] ) ? (int) $data['start'] : $now;
-		$count    = is_array( $data ) && isset( $data['count'] ) ? (int) $data['count'] : 0;
-		$elapsed  = $now - $start;
-		$remaining = $seconds - $elapsed;
+	private static function window_state( $key, $seconds ) {
+		$now   = time();
+		$data  = get_transient( $key );
+		$start = is_array( $data ) && isset( $data['start'] ) ? (int) $data['start'] : $now;
+		$count = is_array( $data ) && isset( $data['count'] ) ? (int) $data['count'] : 0;
+		$spent = $now - $start;
 
-		if ( $remaining <= 0 ) {
+		if ( $spent >= $seconds ) {
 			// 旧窗口已经过期（transient 可能因对象缓存被清而残留）。
-			$start     = $now;
-			$count     = 0;
-			$remaining = $seconds;
+			return array(
+				'start'     => $now,
+				'count'     => 0,
+				'remaining' => $seconds,
+			);
 		}
 
-		$count++;
+		return array(
+			'start'     => $start,
+			'count'     => $count,
+			'remaining' => $seconds - $spent,
+		);
+	}
+
+	/** 当前窗口内已经用掉的次数（不自增）。 */
+	private static function window_count( $key, $seconds ) {
+		$state = self::window_state( $key, $seconds );
+		return (int) $state['count'];
+	}
+
+	/** 往当前窗口里记一次；沿用窗口起点，不延长过期时间。 */
+	private static function bump_window( $key, $seconds ) {
+		$state = self::window_state( $key, $seconds );
+
+		// set_transient 的 0 表示「永不过期」，所以剩余秒数至少给 1。
 		set_transient(
 			$key,
 			array(
-				'start' => $start,
-				'count' => $count,
+				'start' => (int) $state['start'],
+				'count' => (int) $state['count'] + 1,
 			),
-			$remaining
+			max( 1, (int) $state['remaining'] )
 		);
-
-		return $count;
 	}
 
 	/** 注册成功后记录 IP 与时间，后台用户列表据此判断来源。 */
