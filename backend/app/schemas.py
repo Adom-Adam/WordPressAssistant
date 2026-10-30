@@ -62,6 +62,17 @@ class RuntimeSettingsUpdate(BaseModel):
     )
 
 
+class RedeemRequest(BaseModel):
+    """兑换码请求体。
+
+    长度取宽一点（4~64）：用户可能带空格、小写、漏掉连字符，
+    格式的真正判定交给 `CreditStore.redeem` 里的 `_normalize_code`，
+    这里只拦明显不是兑换码的输入（空串、超长垃圾）。
+    """
+
+    code: str = Field(min_length=4, max_length=64)
+
+
 class Citation(BaseModel):
     """知识库引用的结构。
 
