@@ -14,12 +14,15 @@
 | [app/agent/core.py](app/agent/core.py) | `create_agent` 循环、`astream(stream_mode=[...])`、mock 模式 |
 | [app/auth/jwt.py](app/auth/jwt.py) | JWT 三段结构、HS256 验签、PyJWT 的 `decode` 参数 |
 | [app/api/deps.py](app/api/deps.py) | FastAPI 依赖注入、`HTTPBearer`、401/403/503 的区别 |
-| [app/quota.py](app/quota.py) | SQLite 原子占位、`ON CONFLICT`、个人/全站额度与退款 |
+| [app/quota.py](app/quota.py) | SQLite 原子占位、`ON CONFLICT`、每日/额外/全站三层额度与退款 |
+| [app/credits.py](app/credits.py) | 身份等级、会员到期惰性降级、额外额度流水、兑换码 |
 | [app/runtime_settings.py](app/runtime_settings.py) | 后台可改参数的校验、原子写 JSON、损坏回退 |
 | [app/agent/limits.py](app/agent/limits.py) | LangChain middleware：模型/工具调用次数上限 |
 | [app/api/chat.py](app/api/chat.py) | SSE 协议、`EventSourceResponse`、认证/额度/退款顺序 |
 | [app/api/quota.py](app/api/quota.py) | `GET /api/quota`：不消耗次数的额度查询 |
 | [app/api/admin.py](app/api/admin.py) | `GET/PUT /api/admin/settings`：管理员 JWT + 运行时参数 |
+| [app/api/admin_users.py](app/api/admin_users.py) | 用户档案、等级调整、额度发放、兑换码管理 |
+| [app/api/redeem.py](app/api/redeem.py) | `POST /api/redeem`：用户兑换，含失败限流 |
 | [app/channels/qq/](app/channels/qq/) | OneBot 11/NapCat 薄适配器：事件解析、触发、去重、短期历史 |
 | [app/api/qq.py](app/api/qq.py) | `POST /api/channels/qq/events`：接收 NapCat 回调，token 校验 |
 | [app/schemas.py](app/schemas.py) | Pydantic 校验与提示词注入防护 |
@@ -151,9 +154,12 @@ uv run pytest -q
 
 - `test_jwt.py`：正常、过期、错密钥、错 `aud`、`alg=none`、篡改；
 - `test_quota.py`：个人/全站额度、跨用户、跨天、退款、全站满时个人额度回滚、40 个并发只放行 5 个；
+  还有每日额度用尽后扣额外额度、额外额度跨天不刷新、全站满时额外额度也回滚；
+- `test_credit_store.py`：等级默认值、会员到期自动降级、续期从原到期日相加、余额与流水、兑换码格式与单次使用；
 - `test_chat_api.py`：401 / 200 / 429（个人与全站）/ 503 / 失败退款 / `GET /quota`；
 - `test_runtime_settings.py`：后台参数范围、非法值整批拒绝、损坏文件逐字段回退；
-- `test_admin_api.py`：非管理员 403、读取与更新设置；
+- `test_admin_api.py`：非管理员 403、读取与更新设置、用户档案不含邮箱、等级与额度发放、兑换码批量生成；
+- `test_redeem_api.py`：兑换成功、未知码 400、未登录 401、连续失败 429；
 - `test_prompts.py`：人设分层顺序、频道覆盖、管理员身份、页面上下文清洗；
 - `test_persona_store.py`：版本选择、路径越界、文件损坏、内容与路径不一致；
 - `test_agent_limits.py`：用假模型模拟“无限调工具”，验证保险丝会断、提示是中文；

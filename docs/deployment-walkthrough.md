@@ -280,8 +280,10 @@ nano .env          # 没有 nano 就用 vi，或在宝塔文件管理里编辑
 | `L2D_AI_JWT_TTL_SECONDS` | `900` | 与插件签发有效期一致 |
 | `L2D_AI_JWT_LEEWAY_SECONDS` | `30` | 允许的服务器时钟偏差 |
 | `DAILY_QUOTA` | `20` | 普通用户每天条数；管理员不限量；后台可覆盖 |
-| `GLOBAL_DAILY_QUOTA` | `0` | 全站普通用户每天合计条数；0 = 不限；后台可覆盖 |
-| `QUOTA_DB_PATH` | `data/quota.sqlite3` | 额度计数库；可随时删除重置 |
+| `MEMBER_DAILY_QUOTA` | `60` | 会员每天条数；会员仍限额；后台可覆盖 |
+| `GLOBAL_DAILY_QUOTA` | `0` | 全站每天合计条数（普通用户与会员都计入）；0 = 不限；后台可覆盖 |
+| `QUOTA_DB_PATH` | `data/quota.sqlite3` | 额度、等级、额外额度、兑换码共用的 SQLite 库 |
+| `CREDIT_MAX_PER_USER` | `10000` | 单个用户额外额度的存量上限，防发放时多打一个零；后台可覆盖 |
 | `QUOTA_TIMEZONE` | `Asia/Shanghai` | 按哪个时区判断“新的一天” |
 | `RUNTIME_SETTINGS_PATH` | `data/runtime_settings.json` | 后台保存的运营参数；不存在时用 `.env` 默认值 |
 | `AGENT_MAX_MODEL_CALLS` | `6` | 单轮最多模型调用次数（防循环）；后台可覆盖 |
@@ -346,6 +348,11 @@ systemctl restart l2d-ai-backend
 > 这两种操作都要单独确认，不能只靠新增 `.gitignore`。
 
 ---
+
+> **升级到带“身份分级 / 额外额度”的版本时不需要迁移数据**：
+> 新的表（`user_profile`、`credit_balance`、`credit_ledger`、`redeem_code`、`redeem_log`）
+> 由后端启动时自动创建，直接复用同一个 `quota.sqlite3`。
+> 不要把旧的额度库删掉——那会顺带清空所有人的等级和存量。
 
 ## 6. 对齐 JWT 共享密钥（手动）
 
