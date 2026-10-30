@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import hashlib
+import hmac
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -263,6 +265,69 @@ def test_event_endpoint_rejects_wrong_token(monkeypatch: pytest.MonkeyPatch) -> 
             "/api/channels/qq/events",
             json=make_event(),
             headers={"X-OneBot-Token": "wrong"},
+        )
+
+    assert response.status_code == 401
+
+
+def _napcat_signature(secret: str, body: bytes) -> str:
+    """按 NapCat 的算法算签名：HMAC-SHA1(key=token, msg=原始body)。"""
+    return "sha1=" + hmac.new(secret.encode(), body, hashlib.sha1).hexdigest()
+
+
+def test_event_endpoint_accepts_napcat_signature(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """NapCat 的 HTTP 客户端不发 Bearer，只发 X-Signature，必须能通过。"""
+    outbox = tmp_path / "qq_outbox.jsonl"
+    monkeypatch.setenv("QQ_ENABLED", "true")
+    monkeypatch.setenv("QQ_EVENT_TOKEN", "secret")
+    monkeypatch.setenv("QQ_ALLOWED_GROUPS", "123")
+    monkeypatch.setenv("QQ_TRIGGER", "at")
+    monkeypatch.setenv("QQ_MOCK_MODE", "true")
+    monkeypatch.setenv("QQ_MOCK_OUTBOX", str(outbox))
+    monkeypatch.setenv("MOCK_MODE", "true")
+    get_settings.cache_clear()
+    get_qq_adapter.cache_clear()
+
+    # 签名针对的是“实际发出去的字节”，所以这里必须自己序列化一次。
+    body = json.dumps(make_event("在吗"), ensure_ascii=False).encode("utf-8")
+
+    from app.main import app
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/channels/qq/events",
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Signature": _napcat_signature("secret", body),
+            },
+        )
+
+    assert response.status_code == 204
+    records = [json.loads(line) for line in outbox.read_text(encoding="utf-8").splitlines()]
+    assert records[0]["action"] == "send_group_msg"
+
+
+def test_event_endpoint_rejects_wrong_signature(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("QQ_ENABLED", "true")
+    monkeypatch.setenv("QQ_EVENT_TOKEN", "secret")
+    get_settings.cache_clear()
+
+    body = json.dumps(make_event("在吗"), ensure_ascii=False).encode("utf-8")
+
+    from app.main import app
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/channels/qq/events",
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Signature": _napcat_signature("wrong", body),
+            },
         )
 
     assert response.status_code == 401

@@ -239,6 +239,11 @@ NapCat ◀──正向 HTTP── POST /send_group_msg            （app/channel
 - 同一个 `message_id` 只处理一次，避免 NapCat 重发导致重复回复；
 - 短期历史只存在内存里，进程重启就清空；账号绑定和长期记忆还没做。
 
+**回调鉴权**：`QQ_EVENT_TOKEN` 同时支持三种带法——`Authorization: Bearer`、
+`X-OneBot-Token`，以及 **NapCat 的 HTTP 客户端实际使用的 `X-Signature: sha1=<hex>`**。
+最后一种是 `HMAC-SHA1(key=token, msg=原始请求体)`，NapCat 从不发明文 token，
+所以只校验前两种的话，真实消息会全部收到 401。
+
 **注意**：当前 QQ 消息**不经过**网页的每日额度/全站额度，也没有内容审核。
 在接入生产前必须补上独立额度和限流，否则白名单群里的用户可以无限调用模型。
 这也是它默认关闭的原因。
