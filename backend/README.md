@@ -8,7 +8,8 @@
 | --- | --- |
 | [app/config.py](app/config.py) | pydantic-settings 如何把 `.env` 变成带类型的配置 |
 | [app/agent/model.py](app/agent/model.py) | `ChatDeepSeek` 的每个参数；`BaseChatModel` 的 `invoke / stream / astream` |
-| [app/agent/prompts.py](app/agent/prompts.py) | System / User / Assistant / Tool 四种消息角色的区别 |
+| [app/agent/prompts.py](app/agent/prompts.py) | 系统提示词的兼容入口（正文在 `data/personas/`，不进 Git） |
+| [app/persona/](app/persona/) | 人设版本模型、文件加载、分层组装 |
 | [app/agent/tools.py](app/agent/tools.py) | `@tool` 装饰器、`content_and_artifact`、工具异常处理 |
 | [app/agent/core.py](app/agent/core.py) | `create_agent` 循环、`astream(stream_mode=[...])`、mock 模式 |
 | [app/auth/jwt.py](app/auth/jwt.py) | JWT 三段结构、HS256 验签、PyJWT 的 `decode` 参数 |
@@ -19,9 +20,14 @@
 | [app/api/chat.py](app/api/chat.py) | SSE 协议、`EventSourceResponse`、认证/额度/退款顺序 |
 | [app/api/quota.py](app/api/quota.py) | `GET /api/quota`：不消耗次数的额度查询 |
 | [app/api/admin.py](app/api/admin.py) | `GET/PUT /api/admin/settings`：管理员 JWT + 运行时参数 |
+| [app/channels/qq/](app/channels/qq/) | OneBot 11/NapCat 薄适配器：事件解析、触发、去重、短期历史 |
+| [app/api/qq.py](app/api/qq.py) | `POST /api/channels/qq/events`：接收 NapCat 回调，token 校验 |
 | [app/schemas.py](app/schemas.py) | Pydantic 校验与提示词注入防护 |
 | [app/main.py](app/main.py) | FastAPI 入口、CORS、启动检查 |
-| [tests/](tests/) | JWT、额度并发、agent 防循环、接口 401/429 |
+| [scripts/mock_onebot.py](scripts/mock_onebot.py) | 本地假 NapCat：接收 `send_group_msg` 并落盘 |
+| [scripts/qq_simulate.py](scripts/qq_simulate.py) | 伪造一条群消息发给本地后端 |
+| [scripts/qq_probe.py](scripts/qq_probe.py) | 在服务器上探测 NapCat 的 `get_status` / `get_login_info` |
+| [tests/](tests/) | JWT、额度并发、agent 防循环、接口 401/429、QQ 适配器 |
 | [app/kb/sync.py](app/kb/sync.py) | 从 WordPress REST 拉文章、切块、写入索引（命令行入口） |
 | [app/kb/text.py](app/kb/text.py) | HTML 清洗、图片提取、jieba 分词、切块、摘要 |
 | [app/kb/db.py](app/kb/db.py) | SQLite 连接与 FTS5 表结构、图片描述缓存 |
@@ -148,8 +154,36 @@ uv run pytest -q
 - `test_chat_api.py`：401 / 200 / 429（个人与全站）/ 503 / 失败退款 / `GET /quota`；
 - `test_runtime_settings.py`：后台参数范围、非法值整批拒绝、损坏文件逐字段回退；
 - `test_admin_api.py`：非管理员 403、读取与更新设置；
-- `test_prompts.py`：管理员身份、页面上下文清洗、提示词注入边界、工具规则与防编造底线；
-- `test_agent_limits.py`：用假模型模拟“无限调工具”，验证保险丝会断、提示是中文。
+- `test_prompts.py`：人设分层顺序、频道覆盖、管理员身份、页面上下文清洗；
+- `test_persona_store.py`：版本选择、路径越界、文件损坏、内容与路径不一致；
+- `test_agent_limits.py`：用假模型模拟“无限调工具”，验证保险丝会断、提示是中文；
+- `test_qq_adapter.py`：群白名单、@/前缀触发、重复消息、短期历史、管理员身份、长消息拆条。
+
+## 人设文件放哪里
+
+真实人设正文**不在 Git 里**。后端只保留组装逻辑，正文从
+`backend/data/personas/` 读取；根目录 `.gitignore` 已经忽略了整个
+`backend/data/`。
+
+第一次运行：
+
+```bash
+cd backend
+cp -r personas.example data/personas
+```
+
+然后编辑 `data/personas/merlin/1.json`，把示例文字换成真实人设。
+`data/personas/active.json` 决定当前启用哪个版本：
+
+```json
+{ "persona_id": "merlin", "version": 1 }
+```
+
+没有 `active.json` 时会加载 `PERSONA_ID`（默认 `merlin`）的最新版本。
+每次改人设都建议新增版本号（例如 `2.json`），不要原地改旧文件；
+这样日志、回滚和以后的人设评测才能复现。
+
+字段说明见 [personas.example/README.md](personas.example/README.md)。
 
 ## 不登录 WordPress，本地预览提示词
 
@@ -175,6 +209,105 @@ uv run python scripts/chat_preview.py --guest "你能做什么？"
 
 它会真实调用 DeepSeek，产生少量 token 费用；如果 `MOCK_MODE=true` 或没有 Key，
 回答来自假模型，测不出人设。脚本会同时打印检索来源和跳转按钮，方便确认工具是否被调用。
+
+## QQ 通道（实验性，默认关闭）
+
+QQ 走 OneBot 11 协议，NapCat 负责登录 QQ 和收发消息。我们不把 NapCat 的代码
+嵌入后端，只做一层“薄适配器”：
+
+```
+QQ 群
+  │  @梅林
+  ▼
+NapCat ──反向 HTTP──▶ POST /api/channels/qq/events   （app/api/qq.py）
+                              │
+                              ▼
+                    QQAdapter 解析/去重/白名单
+                              │
+                              ▼
+                    stream_reply()（同一套人设、知识库、工具）
+                              │
+                              ▼
+NapCat ◀──正向 HTTP── POST /send_group_msg            （app/channels/qq/client.py）
+```
+
+这层只处理**白名单群里的文本消息**，默认拒绝：
+- `QQ_ALLOWED_GROUPS` 为空时，任何群都不回；
+- 只处理 `message_type=group`，私聊/图片/表情先忽略；
+- `message` 需要是 OneBot 的数组格式（NapCat 默认就是）；CQ 码字符串暂不解析；
+- 群消息只作为 `role=user` 的内容，不会进入 system prompt，也不会改变管理员身份；
+- 同一个 `message_id` 只处理一次，避免 NapCat 重发导致重复回复；
+- 短期历史只存在内存里，进程重启就清空；账号绑定和长期记忆还没做。
+
+**注意**：当前 QQ 消息**不经过**网页的每日额度/全站额度，也没有内容审核。
+在接入生产前必须补上独立额度和限流，否则白名单群里的用户可以无限调用模型。
+这也是它默认关闭的原因。
+
+### 本地没有 NapCat 怎么联调
+
+有两种模式，按需要选一种：
+
+**A. 纯内存 mock（最少依赖）**
+
+`.env` 里：
+
+```dotenv
+QQ_ENABLED=true
+QQ_ALLOWED_GROUPS=你的测试群号
+QQ_TRIGGER=at
+QQ_EVENT_TOKEN=dev-token
+QQ_MOCK_MODE=true
+QQ_MOCK_OUTBOX=data/qq_mock_outbox.jsonl
+```
+
+启动后端后，用 `scripts/qq_simulate.py` 伪造事件。适配器不会发 HTTP，
+而是把“本来要发的群消息”写进 `data/qq_mock_outbox.jsonl`：
+
+```bash
+uv run uvicorn app.main:app --reload --port 18080
+# 另一个终端
+uv run python scripts/qq_simulate.py --group 你的测试群号 --text "在吗"
+cat data/qq_mock_outbox.jsonl
+```
+
+**B. 假 NapCat（把 HTTP 这一半也走通）**
+
+保持 `QQ_MOCK_MODE=false`，并让后端指向 `scripts/mock_onebot.py`：
+
+```dotenv
+QQ_ONEBOT_BASE_URL=http://127.0.0.1:3000
+QQ_ONEBOT_TOKEN=
+QQ_MOCK_MODE=false
+```
+
+```bash
+# 终端 1：后端
+uv run uvicorn app.main:app --reload --port 18080
+# 终端 2：假 NapCat
+uv run python scripts/mock_onebot.py
+# 终端 3：伪造群消息
+uv run python scripts/qq_simulate.py --group 你的测试群号 --text "在吗"
+```
+
+假 NapCat 会在终端打印 `send_group_msg`，并写入
+`data/qq_mock_outbox.jsonl`。它不连接 QQ，也不会登录账号。
+
+### 服务器上探测 NapCat
+
+NapCat 已经装好但没启动时，`qq_probe.py` 只能告诉你“连不上”，不会替你启动它。
+启动 NapCat 属于服务器运行状态变更，需要先征得同意。启动后，在服务器的
+`backend/` 目录执行：
+
+```bash
+uv run python scripts/qq_probe.py --base-url http://127.0.0.1:3000
+```
+
+它只调用 `get_status` 和 `get_login_info`，默认不发消息。要验证真实发送，
+必须同时加 `--send-test <群号> --confirm`，避免误发到群里。
+
+QQ 通道目前**没有**接入生产：还需要 WordPress 侧的“QQ 通道”设置页、
+群白名单管理、独立额度、账号绑定和内容审核。默认 `QQ_ENABLED=false`，
+不影响现有网页聊天。
 
 ## 知识库：已实现的部分
 

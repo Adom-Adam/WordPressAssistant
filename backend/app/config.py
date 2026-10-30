@@ -113,6 +113,52 @@ class Settings(BaseSettings):
     # 文件不存在时全部使用本文件的默认值。
     runtime_settings_path: str = "data/runtime_settings.json"
 
+    # ------------------------------------------------------------------
+    # 人设文件
+    # ------------------------------------------------------------------
+    # 人设正文属于“私密内容”，放在 data/ 下（整个 data/ 已被 .gitignore 忽略），
+    # 不随公开仓库上传。目录结构见 backend/personas.example/README.md。
+    #
+    # 为什么不用数据库：
+    # 人设版本更新频率低、需要人工审阅和 diff，JSON 文件比数据库更直观；
+    # 以后的关系状态/记忆才需要 SQLite。
+    persona_dir: str = "data/personas"
+
+    # 没有 active.json 时，默认加载这个人设的最新版本。
+    persona_id: str = "merlin"
+
+    # ------------------------------------------------------------------
+    # QQ 通道（实验性）
+    # ------------------------------------------------------------------
+    # 默认关闭。即使打开，也只处理白名单群里的 @ 消息；
+    # 没有白名单时一条都不回，避免误接入陌生群。
+    qq_enabled: bool = False
+
+    # NapCat 的 OneBot 11 HTTP API 地址。只应该监听 127.0.0.1。
+    qq_onebot_base_url: str = "http://127.0.0.1:3000"
+    qq_onebot_token: str = ""
+
+    # NapCat 往 /api/channels/qq/events 发事件时携带的 token。
+    # 为空且不是 mock 模式时，接口会拒绝服务，避免公网裸奔。
+    qq_event_token: str = ""
+
+    # 逗号分隔的群号/QQ 号。群白名单为空时，不响应任何群。
+    qq_allowed_groups: str = ""
+    qq_admin_users: str = ""
+
+    # at：只有 @ 机器人时回复；prefix：消息以 qq_prefix 开头；
+    # all：白名单群里的所有文本消息都回复（不建议在活跃群使用）。
+    qq_trigger: str = "at"
+    qq_prefix: str = "梅林"
+
+    # 每个群+用户最多保留多少轮对话（1 轮 = 用户+助手两条）。
+    qq_history_turns: int = 8
+
+    # 本地没有 NapCat 时，把出站消息写到 outbox，而不是发 HTTP 请求。
+    # 这不是生产模式，只用于 Windows 本地联调和测试。
+    qq_mock_mode: bool = False
+    qq_mock_outbox: str = "data/qq_mock_outbox.jsonl"
+
     # 按哪个时区判断“新的一天”。用北京时间，符合博客读者的直觉。
     # 依赖 Python 3.9+ 的 zoneinfo；Windows 上需要 tzdata（项目已安装）。
     quota_timezone: str = "Asia/Shanghai"
@@ -181,6 +227,35 @@ class Settings(BaseSettings):
     def cors_origin_list(self) -> list[str]:
         """把逗号分隔的字符串拆成列表，CORS 中间件需要 list[str]。"""
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def qq_allowed_group_ids(self) -> set[int]:
+        """群白名单。
+
+        解析失败或为空都返回空集合；适配器看到空集合时不会回复任何群。
+        这是“默认拒绝”的安全默认值：配置写错时宁可不工作，也不要误回陌生群。
+        """
+        return _parse_int_csv(self.qq_allowed_groups)
+
+    @property
+    def qq_admin_user_ids(self) -> set[int]:
+        """可以直接按管理员身份对话的 QQ 号。"""
+        return _parse_int_csv(self.qq_admin_users)
+
+
+def _parse_int_csv(value: str) -> set[int]:
+    """把逗号分隔的 ID 字符串转成整数集合，忽略空白和非法项。
+
+    群号/QQ 号都是纯数字。配置里出现 `123, abc, 456` 时，
+    只保留 123 和 456，并在日志/测试里能看出 abc 被忽略，
+    而不是让整个服务因为一个手滑的字符启动失败。
+    """
+    result: set[int] = set()
+    for item in value.split(","):
+        item = item.strip()
+        if item.isdigit():
+            result.add(int(item))
+    return result
 
 
 @lru_cache
