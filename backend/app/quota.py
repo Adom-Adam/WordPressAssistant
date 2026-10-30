@@ -50,6 +50,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from app.config import get_settings
+from app.credits import CREDIT_SCHEMA_SQL
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,12 @@ class QuotaReservation:
 
     `global_counted` 单独记录“这次是否也占了全站额度”。
     管理员不占全站额度，所以退款时不能盲目去减全站计数。
+
+    `source` 记录这次花的是哪份额度：
+    - admin：管理员，没写数据库；
+    - daily：当天的每日额度（会随日期刷新）；
+    - credit：额外额度（存量，用完不补）。
+    退款必须按 source 退回对应账户，否则会退错地方。
     """
 
     user_id: int
@@ -83,6 +90,8 @@ class QuotaReservation:
     global_limit: int = 0
     global_counted: bool = False
     global_remaining: int | None = None
+    source: str = "daily"
+    credit_balance: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +107,7 @@ class QuotaStatus:
     global_limit: int
     global_used: int | None
     global_remaining: int | None
+    credit_balance: int = 0
 
 
 class QuotaStore:
@@ -177,6 +187,10 @@ class QuotaStore:
                 )
                 """
             )
+            # 等级、额外额度和兑换码的表定义放在 app/credits.py。
+            # 这里执行同一份 SQL 的原因：`reserve()` 要在自己的事务里
+            # 扣减 credit_balance，必须保证表在任何一次占位之前就已建好。
+            conn.executescript(CREDIT_SCHEMA_SQL)
 
     def today(self) -> str:
         """返回当前时区下的日期字符串，例如 "2026-10-26"。
@@ -184,6 +198,13 @@ class QuotaStore:
         用字符串存日期，排序和比较都是字典序，简单直观。
         """
         return datetime.now(self.timezone).date().isoformat()
+
+    def _now_iso(self) -> str:
+        """当前时间戳，写进额外额度的流水表。
+
+        精确到秒就够了：同一秒内的两条流水靠自增主键区分顺序。
+        """
+        return datetime.now(self.timezone).isoformat(timespec="seconds")
 
     def seconds_until_reset(self) -> int:
         """距离“额度重置”（下一个零点）还有多少秒。
@@ -209,6 +230,7 @@ class QuotaStore:
         *,
         is_admin: bool = False,
         global_limit: int = 0,
+        allow_credits: bool = True,
         day: str | None = None,
     ) -> QuotaReservation | None:
         """尝试占用一次额度。
@@ -218,10 +240,14 @@ class QuotaStore:
         - 普通用户自己的额度用完：None；
         - 全站总额度用完：抛 GlobalQuotaExceeded。
 
-        为什么个人额度和全站额度要在**同一个事务**里占：
+        扣费顺序：先每日额度，再额外额度。每日额度每天刷新，
+        额外额度是买来的存量；先用会过期的，再用不会过期的。
+
+        为什么个人额度、额外额度和全站额度要在**同一个事务**里占：
         如果先占个人、再占全站，全站满了以后个人计数已经 +1，
         还得写补偿逻辑；中途进程崩溃就会漏掉。放在一个事务里，
-        要么两个都成功，要么两个都回滚。
+        要么都成功，要么都回滚。全站额度放在**最后**占，也是这个道理：
+        它失败了，前面扣的每日额度和额外额度会被同一个 rollback 撤销。
 
         参数 day 只用于测试（模拟“第二天”），正常调用不传。
         """
@@ -236,9 +262,12 @@ class QuotaStore:
                 counted=False,
                 limit=limit,
                 remaining=None,
+                source="admin",
             )
 
-        # limit <= 0 表示禁止普通用户聊天。
+        # limit <= 0 表示禁止普通用户聊天（DAILY_QUOTA=0）。
+        # 这种情况额外额度也不放行：额度设成 0 通常是“这条通道关掉”，
+        # 而不是“你还没买额度”，拿余额绕过会违背管理员的意图。
         if limit <= 0:
             return None
 
@@ -261,9 +290,42 @@ class QuotaStore:
                     (user_id, current_day, limit),
                 ).fetchone()
 
-                if row is None:
+                source = "daily"
+                used: int | None = None
+                credit_balance: int | None = None
+
+                if row is not None:
+                    used = int(row[0])
+                elif not allow_credits:
                     conn.rollback()
                     return None
+                else:
+                    # 每日额度用完了，试着扣一份额外额度。
+                    # `balance > 0` 写在 WHERE 里，和上面的每日额度一样，
+                    # 判断和扣减是同一条原子语句。
+                    credit_row = conn.execute(
+                        """
+                        UPDATE credit_balance
+                           SET balance = balance - 1, updated_at = ?
+                         WHERE user_id = ? AND balance > 0
+                        RETURNING balance
+                        """,
+                        (self._now_iso(), user_id),
+                    ).fetchone()
+                    if credit_row is None:
+                        conn.rollback()
+                        return None
+                    source = "credit"
+                    credit_balance = int(credit_row[0])
+                    # 流水和余额在同一个事务里写：余额变了流水没写，
+                    # 或者反过来，对账时都对不上。
+                    conn.execute(
+                        """
+                        INSERT INTO credit_ledger (user_id, delta, reason, created_at)
+                        VALUES (?, -1, 'chat', ?)
+                        """,
+                        (user_id, self._now_iso()),
+                    )
 
                 global_used: int | None = None
                 if global_limit > 0:
@@ -290,13 +352,15 @@ class QuotaStore:
                 conn.rollback()
                 raise
 
-        used = int(row[0])
         return QuotaReservation(
             user_id=user_id,
             day=current_day,
             counted=True,
             limit=limit,
-            remaining=max(limit - used, 0),
+            # remaining 只表示“每日额度还剩多少”。花的是额外额度时，
+            # 每日额度必然是 0，所以这里给 0——前端要用 credit_balance
+            # 那一栏告诉用户还剩多少存量。
+            remaining=max(limit - used, 0) if used is not None else 0,
             global_limit=global_limit,
             global_counted=global_limit > 0,
             global_remaining=(
@@ -304,6 +368,8 @@ class QuotaStore:
                 if global_used is not None
                 else None
             ),
+            source=source,
+            credit_balance=credit_balance,
         )
 
     def refund(self, reservation: QuotaReservation | None) -> None:
@@ -317,15 +383,34 @@ class QuotaStore:
             return
 
         with self._connection() as conn:
-            # 加 used > 0 的判断，避免极端情况下把计数减成负数。
-            conn.execute(
-                """
-                UPDATE daily_usage
-                   SET used = CASE WHEN used > 0 THEN used - 1 ELSE 0 END
-                 WHERE user_id = ? AND day = ?
-                """,
-                (reservation.user_id, reservation.day),
-            )
+            if reservation.source == "credit":
+                # 退回到额外额度余额，而不是每日额度：这次花的是存量，
+                # 退给每日额度等于凭空多送一次。
+                conn.execute(
+                    """
+                    UPDATE credit_balance
+                       SET balance = balance + 1, updated_at = ?
+                     WHERE user_id = ?
+                    """,
+                    (self._now_iso(), reservation.user_id),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO credit_ledger (user_id, delta, reason, created_at)
+                    VALUES (?, 1, 'chat_refund', ?)
+                    """,
+                    (reservation.user_id, self._now_iso()),
+                )
+            else:
+                # 加 used > 0 的判断，避免极端情况下把计数减成负数。
+                conn.execute(
+                    """
+                    UPDATE daily_usage
+                       SET used = CASE WHEN used > 0 THEN used - 1 ELSE 0 END
+                     WHERE user_id = ? AND day = ?
+                    """,
+                    (reservation.user_id, reservation.day),
+                )
             # 只有本次确实占过全站额度时才退，管理员不能退。
             if reservation.global_counted:
                 conn.execute(
@@ -371,6 +456,7 @@ class QuotaStore:
                 global_limit=global_limit,
                 global_used=None,
                 global_remaining=None,
+                credit_balance=0,
             )
 
         with self._connection() as conn:
@@ -379,6 +465,14 @@ class QuotaStore:
                 (user_id, current_day),
             ).fetchone()
             used = int(row[0]) if row else 0
+
+            # 额外额度一起查：前端额度条要同时显示“今天还剩几次”
+            # 和“存量还有几次”，否则用户不知道额度用完后还能不能聊。
+            brow = conn.execute(
+                "SELECT balance FROM credit_balance WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            credit_balance = int(brow[0]) if brow else 0
 
             global_used: int | None = None
             if global_limit > 0:
@@ -402,6 +496,7 @@ class QuotaStore:
                 if global_used is not None
                 else None
             ),
+            credit_balance=credit_balance,
         )
 
 
