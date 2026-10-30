@@ -42,6 +42,7 @@ from sse_starlette.sse import EventSourceResponse
 from app.agent.core import stream_reply
 from app.api.deps import require_user
 from app.auth import AuthUser
+from app.credits import get_credit_store
 from app.quota import GlobalQuotaExceeded, get_quota_store
 from app.runtime_settings import get_runtime_store
 from app.schemas import ChatRequest
@@ -89,10 +90,19 @@ async def chat(
     # ------------------------------------------------------------------
     try:
         store = get_quota_store()
+        # 会员和普通用户用不同的每日上限。等级存在后端库里，不在 JWT 里：
+        # token 有 15 分钟有效期，管理员刚把某人升成会员，旧 token 还会
+        # 带着旧的等级，按 token 判断会慢半拍。
+        tier, _expires_at = await asyncio.to_thread(
+            get_credit_store().tier_of, user.id
+        )
+        limit = (
+            runtime.member_daily_quota if tier == "member" else runtime.daily_quota
+        )
         reservation = await asyncio.to_thread(
             store.reserve,
             user.id,
-            runtime.daily_quota,
+            limit,
             is_admin=user.is_admin,
             global_limit=runtime.global_daily_quota,
         )
@@ -126,11 +136,11 @@ async def chat(
             "额度用尽 user=%s day=%s limit=%s",
             user.id,
             store.today(),
-            runtime.daily_quota,
+            limit,
         )
         raise HTTPException(
             status_code=429,
-            detail=f"今天的聊天额度（{runtime.daily_quota} 条）已经用完啦，明天再来～",
+            detail=f"今天的聊天额度（{limit} 条）已经用完啦，明天再来～",
             headers={"Retry-After": str(retry_after)},
         )
 

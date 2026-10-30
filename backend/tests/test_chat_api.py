@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 
 from app.api import chat as chat_module
 from app.config import get_settings
+from app.credits import get_credit_store
 from app.quota import get_quota_store
 from app.runtime_settings import get_runtime_store
 
@@ -71,6 +72,9 @@ def client(tmp_path, monkeypatch):
     get_settings.cache_clear()
     get_quota_store.cache_clear()
     get_runtime_store.cache_clear()
+    # 等级/存量库和额度库共用同一个 SQLite 文件，缓存必须一起清，
+    # 否则下一个测试会继续用上一个测试的临时目录。
+    get_credit_store.cache_clear()
 
     from app.main import app
 
@@ -80,6 +84,7 @@ def client(tmp_path, monkeypatch):
     get_settings.cache_clear()
     get_quota_store.cache_clear()
     get_runtime_store.cache_clear()
+    get_credit_store.cache_clear()
 
 
 @pytest.fixture(autouse=True)
@@ -204,6 +209,28 @@ def test_quota_endpoint_reports_without_consuming(client: TestClient) -> None:
         headers=headers,
     )
     assert client.get("/api/quota", headers=headers).json()["remaining"] == 1
+
+
+def test_member_uses_member_quota(client: TestClient, monkeypatch) -> None:
+    # 普通用户 1 条、会员 3 条：第 2 条起就能看出用的是哪套额度。
+    monkeypatch.setenv("DAILY_QUOTA", "1")
+    monkeypatch.setenv("MEMBER_DAILY_QUOTA", "3")
+    get_settings.cache_clear()
+    get_runtime_store.cache_clear()
+    get_credit_store.cache_clear()
+
+    # token 的 sub 默认是 "42"
+    get_credit_store().set_tier(42, "member", days=7)
+
+    payload = {"messages": [{"role": "user", "content": "hi"}]}
+    responses = [
+        client.post("/api/chat", json=payload, headers=auth_header())
+        for _ in range(4)
+    ]
+
+    assert [r.status_code for r in responses] == [200, 200, 200, 429]
+    # 429 的提示要说会员的实际上限，否则用户看到“1 条”会以为额度算错了
+    assert "3" in responses[-1].json()["detail"]
 
 
 def test_quota_endpoint_admin_is_unlimited(client: TestClient) -> None:
