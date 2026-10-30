@@ -154,3 +154,87 @@ def test_profile_snapshot_handles_unknown_and_empty(tmp_path) -> None:
     assert snapshot[99].credit == 0
     # 空输入不发 SQL
     assert store.profile_snapshot([]) == {}
+
+
+# ---------------------------------------------------------------------------
+# 兑换码
+# ---------------------------------------------------------------------------
+
+
+def test_create_and_redeem_credit_code(tmp_path) -> None:
+    store = make_store(tmp_path)
+    codes = store.create_codes(kind="credit", value=5)
+
+    assert len(codes) == 1
+    assert len(codes[0]) == 19 and codes[0].count("-") == 3
+
+    result = store.redeem(7, codes[0])
+
+    assert result.kind == "credit"
+    assert result.credit_added == 5
+    assert result.balance == 5
+    assert store.balance_of(7) == 5
+
+
+def test_redeem_is_tolerant_of_input_format(tmp_path) -> None:
+    store = make_store(tmp_path)
+    # max_uses=2：这里考的是输入格式，不是次数，别让第二个断言撞上限
+    code = store.create_codes(kind="credit", value=1, max_uses=2)[0]
+
+    assert store.redeem(7, code.lower()).balance == 1
+    # 用户从聊天框粘贴时常常丢连字符、带上空格
+    assert store.redeem(8, f"  {code.replace('-', '')}  ").balance == 1
+
+
+def test_code_is_single_use_per_user_but_shareable(tmp_path) -> None:
+    store = make_store(tmp_path)
+    code = store.create_codes(kind="credit", value=1, max_uses=2)[0]
+
+    store.redeem(7, code)
+    with pytest.raises(RedeemError):
+        store.redeem(7, code)
+    # 另一个用户还能用
+    assert store.redeem(8, code).balance == 1
+
+
+def test_exhausted_code_rejected(tmp_path) -> None:
+    store = make_store(tmp_path)
+    code = store.create_codes(kind="credit", value=1, max_uses=1)[0]
+    store.redeem(7, code)
+
+    with pytest.raises(RedeemError):
+        store.redeem(8, code)
+
+
+def test_expired_code_rejected(tmp_path) -> None:
+    clock = Clock(datetime(2026, 10, 30, 12, 0, tzinfo=TZ))
+    store = make_store(tmp_path, clock)
+    code = store.create_codes(
+        kind="credit", value=1, expires_at="2026-10-31T00:00:00+08:00"
+    )[0]
+
+    clock.current = datetime(2026, 11, 1, 0, 0, tzinfo=TZ)
+
+    with pytest.raises(RedeemError):
+        store.redeem(7, code)
+    assert store.balance_of(7) == 0
+
+
+def test_member_code_grants_days(tmp_path) -> None:
+    clock = Clock(datetime(2026, 10, 30, 12, 0, tzinfo=TZ))
+    store = make_store(tmp_path, clock)
+    code = store.create_codes(kind="member", value=30)[0]
+
+    result = store.redeem(7, code)
+
+    assert result.kind == "member"
+    assert result.tier == "member"
+    assert result.tier_expires_at == "2026-11-29T12:00:00+08:00"
+    assert store.tier_of(7)[0] == "member"
+
+
+def test_unknown_code_rejected(tmp_path) -> None:
+    store = make_store(tmp_path)
+
+    with pytest.raises(RedeemError):
+        store.redeem(7, "AAAA-BBBB-CCCC-DDDD")

@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import logging
+import secrets
 import sqlite3
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
@@ -45,6 +46,11 @@ logger = logging.getLogger(__name__)
 
 # 只有两档“普通用户”等级；管理员由 JWT 的 admin 字段决定，不进这张表。
 TIERS: tuple[str, ...] = ("user", "member")
+
+# Crockford Base32：去掉了 I、L、O、U，避免和 1、0、V 混淆。
+# 16 位约 79 bit，靠猜是猜不出来的。
+CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+CODE_LENGTH = 16
 
 # 这些表都由这里定义，`QuotaStore` 在启动时执行同一份 SQL。
 # 之所以只保留一份定义：额度扣减发生在 quota.py 的事务里，
@@ -119,6 +125,35 @@ class Profile:
     qq_uin: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class RedeemResult:
+    """一次成功兑换的结果，接口层直接拿去拼响应。"""
+
+    kind: str
+    credit_added: int
+    balance: int
+    tier: str
+    tier_expires_at: str | None
+    message: str
+
+
+def _random_code() -> str:
+    raw = "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LENGTH))
+    return "-".join(raw[index : index + 4] for index in range(0, CODE_LENGTH, 4))
+
+
+def _normalize_code(raw: str) -> str:
+    """把用户输入的码变成数据库里的标准形式。
+
+    用户经常从聊天框粘贴，带空格、全小写、或者连字符被吞掉。
+    三种情况都当成同一个码处理，不要因为格式差异让人白跑一趟。
+    """
+    text = "".join(str(raw or "").split()).upper()
+    if "-" not in text and len(text) == CODE_LENGTH:
+        text = "-".join(text[index : index + 4] for index in range(0, CODE_LENGTH, 4))
+    return text
+
+
 class CreditStore:
     """等级、存量额度与兑换码的 SQLite 存储。
 
@@ -191,34 +226,40 @@ class CreditStore:
     # ------------------------------------------------------------------
     # 等级
     # ------------------------------------------------------------------
+    def _tier_locked(
+        self, conn: sqlite3.Connection, user_id: int
+    ) -> tuple[str, str | None]:
+        """在调用方的事务里读等级并做惰性降级。"""
+        row = conn.execute(
+            "SELECT tier, tier_expires_at FROM user_profile WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+
+        if row is None:
+            return ("user", None)
+
+        tier = str(row["tier"])
+        expires = row["tier_expires_at"]
+        if tier == "member" and expires and self._expired(str(expires)):
+            conn.execute(
+                """
+                UPDATE user_profile
+                   SET tier = 'user', tier_expires_at = NULL, updated_at = ?
+                 WHERE user_id = ?
+                """,
+                (self._now_iso(), user_id),
+            )
+            return ("user", None)
+
+        return (tier, str(expires) if expires else None)
+
     def tier_of(self, user_id: int) -> tuple[str, str | None]:
         """返回当前有效的 (等级, 到期时间)。
 
         读到已过期的会员时顺手改回普通用户（惰性降级），见模块开头的说明。
         """
         with self._connection() as conn:
-            row = conn.execute(
-                "SELECT tier, tier_expires_at FROM user_profile WHERE user_id = ?",
-                (user_id,),
-            ).fetchone()
-
-            if row is None:
-                return ("user", None)
-
-            tier = str(row["tier"])
-            expires = row["tier_expires_at"]
-            if tier == "member" and expires and self._expired(str(expires)):
-                conn.execute(
-                    """
-                    UPDATE user_profile
-                       SET tier = 'user', tier_expires_at = NULL, updated_at = ?
-                     WHERE user_id = ?
-                    """,
-                    (self._now_iso(), user_id),
-                )
-                return ("user", None)
-
-            return (tier, str(expires) if expires else None)
+            return self._tier_locked(conn, user_id)
 
     def _set_tier_locked(
         self,
@@ -430,6 +471,160 @@ class CreditStore:
                 ),
             )
         return profiles
+
+    # ------------------------------------------------------------------
+    # 兑换码
+    # ------------------------------------------------------------------
+    def create_codes(
+        self,
+        *,
+        kind: str,
+        value: int,
+        count: int = 1,
+        max_uses: int = 1,
+        expires_at: str | None = None,
+        note: str | None = None,
+    ) -> list[str]:
+        """批量生成兑换码，返回明文列表（只在这里生成，之后一直存明文）。"""
+        if kind not in {"credit", "member"}:
+            raise ValueError("兑换码类型只能是 credit 或 member")
+        if value < 1:
+            raise ValueError("面值至少为 1")
+        if not 1 <= count <= 50:
+            raise ValueError("一次最多生成 50 个兑换码")
+        if not 1 <= max_uses <= 1000:
+            raise ValueError("单个兑换码的使用次数必须在 1~1000 之间")
+        if expires_at is not None:
+            try:
+                datetime.fromisoformat(expires_at)
+            except ValueError:
+                raise ValueError("到期时间格式不对，应类似 2026-11-30T00:00:00") from None
+
+        created = self._now_iso()
+        codes: list[str] = []
+        with self._connection() as conn:
+            for _ in range(count):
+                # 撞码的概率极低，但主键冲突时会抛 IntegrityError，
+                # 与其相信概率，不如重试几次。
+                for attempt in range(5):
+                    code = _random_code()
+                    try:
+                        conn.execute(
+                            """
+                            INSERT INTO redeem_code
+                                (code, kind, value, max_uses, used_count,
+                                 expires_at, note, created_at)
+                            VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+                            """,
+                            (code, kind, value, max_uses, expires_at, note, created),
+                        )
+                    except sqlite3.IntegrityError:
+                        if attempt == 4:
+                            raise
+                        continue
+                    codes.append(code)
+                    break
+        return codes
+
+    def redeem(self, user_id: int, code: str) -> RedeemResult:
+        """兑换一个码。失败抛 `RedeemError`，消息可以直接给用户看。"""
+        normalized = _normalize_code(code)
+
+        with self._connection() as conn:
+            try:
+                # 整个流程一个事务：校验次数、写兑换记录、发额度必须同时成功，
+                # 否则会出现“次数用掉了但额度没到账”。
+                conn.execute("BEGIN IMMEDIATE")
+
+                row = conn.execute(
+                    "SELECT kind, value, max_uses, used_count, expires_at "
+                    "FROM redeem_code WHERE code = ?",
+                    (normalized,),
+                ).fetchone()
+                if row is None:
+                    raise RedeemError("兑换码不存在")
+
+                expires_at = row["expires_at"]
+                if expires_at and self._expired(str(expires_at)):
+                    raise RedeemError("这个兑换码已经过期了")
+                if int(row["used_count"]) >= int(row["max_uses"]):
+                    raise RedeemError("这个兑换码已经被用完了")
+
+                already = conn.execute(
+                    "SELECT 1 FROM redeem_log WHERE code = ? AND user_id = ?",
+                    (normalized, user_id),
+                ).fetchone()
+                if already is not None:
+                    raise RedeemError("你已经兑换过这个码了")
+
+                updated = conn.execute(
+                    """
+                    UPDATE redeem_code
+                       SET used_count = used_count + 1
+                     WHERE code = ? AND used_count < max_uses
+                    """,
+                    (normalized,),
+                )
+                if updated.rowcount == 0:
+                    # 并发下另一个请求刚把这个码的最后一次用掉。
+                    raise RedeemError("这个兑换码已经被用完了")
+
+                conn.execute(
+                    "INSERT INTO redeem_log (code, user_id, used_at) VALUES (?, ?, ?)",
+                    (normalized, user_id, self._now_iso()),
+                )
+
+                kind = str(row["kind"])
+                value = int(row["value"])
+                if kind == "credit":
+                    credit_added = self._grant_locked(
+                        conn, user_id, value, "redeem", normalized
+                    )
+                else:
+                    self._set_tier_locked(conn, user_id, "member", value)
+                    credit_added = 0
+
+                tier, tier_expires_at = self._tier_locked(conn, user_id)
+                balance_row = conn.execute(
+                    "SELECT balance FROM credit_balance WHERE user_id = ?",
+                    (user_id,),
+                ).fetchone()
+                balance = int(balance_row["balance"]) if balance_row else 0
+
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+        if kind == "credit":
+            message = f"兑换成功，当前共有 {balance} 条额外额度"
+        else:
+            message = f"会员已延长到 {tier_expires_at}"
+
+        return RedeemResult(
+            kind=kind,
+            credit_added=credit_added,
+            balance=balance,
+            tier=tier,
+            tier_expires_at=tier_expires_at,
+            message=message,
+        )
+
+    def recent_codes(self, limit: int = 50) -> list[dict[str, object]]:
+        """后台列表用：最近的兑换码和使用情况。"""
+        bounded = max(1, min(limit, 200))
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT code, kind, value, max_uses, used_count,
+                       expires_at, note, created_at
+                  FROM redeem_code
+                 ORDER BY created_at DESC, rowid DESC
+                 LIMIT ?
+                """,
+                (bounded,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
 
 @lru_cache(maxsize=1)
