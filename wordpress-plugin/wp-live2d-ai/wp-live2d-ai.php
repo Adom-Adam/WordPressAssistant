@@ -12,6 +12,11 @@
 
 defined( 'ABSPATH' ) || exit;
 
+// 注册防护单独成文件：它和前端展示、聊天 token 完全无关，
+// 只有“有人注册”这一条链路会走到，放在主文件里会让主文件更难读。
+require_once __DIR__ . '/includes/class-l2d-ai-guard.php';
+require_once __DIR__ . '/includes/class-l2d-ai-users.php';
+
 final class L2D_AI_Plugin {
 
 	const VERSION          = '0.3.4';
@@ -52,6 +57,11 @@ final class L2D_AI_Plugin {
 		// 主题可能在登录后默认把人送进后台个人资料页；这里用较高优先级覆盖。
 		add_filter( 'login_redirect', array( __CLASS__, 'login_redirect_to_home' ), 999, 3 );
 		add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), array( __CLASS__, 'action_links' ) );
+
+		// 注册防护：邮箱域名黑名单 + 同一 IP 的频率限制。
+		L2D_AI_Guard::init();
+		// 用户与额度：后台查看用户、调整等级、发额度、生成兑换码。
+		L2D_AI_Users::init();
 	}
 
 	/**
@@ -819,7 +829,7 @@ final class L2D_AI_Plugin {
 	 * 调用后端接口。成功返回数组，失败返回 WP_Error。
 	 * 错误信息会带上 HTTP 状态码和后端的 detail，方便在设置页直接看到原因。
 	 */
-	private static function request_backend( $method, $path, $body = null ) {
+	public static function request_backend( $method, $path, $body = null ) {
 		$token = self::admin_token();
 		if ( is_wp_error( $token ) ) {
 			return $token;
@@ -929,7 +939,9 @@ final class L2D_AI_Plugin {
 		// 第一层校验：在 WordPress 这边就给出清楚的中文错误，避免把明显不合法的值送出去。
 		$rules = array(
 			'daily_quota'           => array( 0, 1000 ),
+			'member_daily_quota'    => array( 0, 1000 ),
 			'global_daily_quota'    => array( 0, 1000000 ),
+			'credit_max_per_user'   => array( 0, 1000000 ),
 			'agent_max_model_calls' => array( 1, 20 ),
 			'agent_max_tool_calls'  => array( 1, 20 ),
 			'agent_max_seconds'     => array( 5, 300 ),
@@ -1321,6 +1333,50 @@ final class L2D_AI_Plugin {
 								<p class="description">
 									每位普通用户每天最多发起多少次聊天；管理员不受限制。
 									设为 <code>0</code> 表示所有人（含普通用户）都不能聊天。当前默认：<?php echo esc_html( $get( $defaults, 'daily_quota', '—' ) ); ?>。
+								</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-member-quota">会员每日额度</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-member-quota"
+									name="member_daily_quota"
+									value="<?php echo esc_attr( $get( $settings, 'member_daily_quota', 0 ) ); ?>"
+									min="0"
+									max="1000"
+									step="1"
+									class="small-text"
+								/>
+								条 / 天
+								<p class="description">
+									会员等级的用户每天最多发起多少次聊天；用完每日额度后才会动额外额度。
+									会员身份到期后自动回到普通用户额度。当前默认：<?php echo esc_html( $get( $defaults, 'member_daily_quota', '—' ) ); ?>。
+								</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-credit-max">单用户额外额度上限</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-credit-max"
+									name="credit_max_per_user"
+									value="<?php echo esc_attr( $get( $settings, 'credit_max_per_user', 0 ) ); ?>"
+									min="0"
+									max="1000000"
+									step="1"
+									class="small-text"
+								/>
+								条
+								<p class="description">
+									单个用户的额外额度余额最多存多少，防止发放时多打一个零。
+									超过这个数的发放会被拒绝。当前默认：<?php echo esc_html( $get( $defaults, 'credit_max_per_user', '—' ) ); ?>。
 								</p>
 							</td>
 						</tr>

@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import get_settings
+from app.credits import get_credit_store
 from app.quota import get_quota_store
 from app.runtime_settings import get_runtime_store
 
@@ -54,6 +55,7 @@ def client(tmp_path, monkeypatch):
     get_settings.cache_clear()
     get_quota_store.cache_clear()
     get_runtime_store.cache_clear()
+    get_credit_store.cache_clear()
 
     from app.main import app
 
@@ -63,6 +65,7 @@ def client(tmp_path, monkeypatch):
     get_settings.cache_clear()
     get_quota_store.cache_clear()
     get_runtime_store.cache_clear()
+    get_credit_store.cache_clear()
 
 
 def test_guest_cannot_read_settings(client: TestClient) -> None:
@@ -142,3 +145,95 @@ def test_empty_update_is_rejected(client: TestClient) -> None:
     response = client.put("/api/admin/settings", json={}, headers=auth_header())
 
     assert response.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# 用户档案 / 等级 / 额外额度 / 兑换码
+# ---------------------------------------------------------------------------
+
+
+def test_admin_users_snapshot_has_no_email(client: TestClient) -> None:
+    client.post(
+        "/api/admin/users/1/credits",
+        json={"delta": 2, "reason": "测试"},
+        headers=auth_header(),
+    )
+
+    response = client.get("/api/admin/users", headers=auth_header())
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["users"][0]["user_id"] == 1
+    assert body["users"][0]["credit"] == 2
+    assert body["users"][0]["tier"] == "user"
+    assert body["users"][0]["daily_used"] == 0
+    assert "member" in body["limits"]
+    # 邮箱只存在于 WordPress，后端接口不能把它带出来
+    assert "email" not in response.text
+
+
+def test_admin_row_is_listed_like_any_user(client: TestClient) -> None:
+    # 管理员也会出现在档案里，不应因此报错或改变不限量语义
+    client.post(
+        "/api/admin/users/1/credits",
+        json={"delta": 1, "reason": "测试"},
+        headers=auth_header(),
+    )
+    response = client.patch(
+        "/api/admin/users/1", json={"note": "站长本人"}, headers=auth_header()
+    )
+
+    assert response.status_code == 200
+    assert response.json()["tier"] == "user"
+    assert response.json()["note"] == "站长本人"
+
+
+def test_patch_member_requires_duration(client: TestClient) -> None:
+    assert (
+        client.patch(
+            "/api/admin/users/1", json={"tier": "member"}, headers=auth_header()
+        ).status_code
+        == 422
+    )
+
+
+def test_patch_member_then_snapshot(client: TestClient) -> None:
+    response = client.patch(
+        "/api/admin/users/1",
+        json={"tier": "member", "duration_days": 7},
+        headers=auth_header(),
+    )
+    assert response.status_code == 200
+    assert response.json()["tier"] == "member"
+    assert response.json()["tier_expires_at"] is not None
+
+    listed = client.get("/api/admin/users", headers=auth_header()).json()["users"]
+    assert listed[0]["tier"] == "member"
+
+
+def test_grant_credits_and_read_back(client: TestClient) -> None:
+    response = client.post(
+        "/api/admin/users/1/credits",
+        json={"delta": 5, "reason": "手动发放"},
+        headers=auth_header(),
+    )
+    assert response.json()["credit"] == 5
+
+
+def test_code_creation_and_listing(client: TestClient) -> None:
+    created = client.post(
+        "/api/admin/codes",
+        json={"kind": "credit", "value": 3, "count": 2},
+        headers=auth_header(),
+    )
+    assert len(created.json()["codes"]) == 2
+
+    listed = client.get("/api/admin/codes", headers=auth_header()).json()["codes"]
+    assert len(listed) == 2
+
+
+def test_normal_user_cannot_touch_admin_users(client: TestClient) -> None:
+    assert (
+        client.get("/api/admin/users", headers=auth_header(admin=False)).status_code
+        == 403
+    )

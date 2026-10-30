@@ -187,3 +187,115 @@ def test_admin_status_is_unlimited(tmp_path) -> None:
     assert status.unlimited is True
     assert status.remaining is None
     assert status.used is None
+
+
+# ---------------------------------------------------------------------------
+# 额外额度与全站硬上限
+# ---------------------------------------------------------------------------
+
+
+def credit_store(tmp_path):
+    """和 QuotaStore 共用同一个 SQLite 文件，模拟真实部署。"""
+    from app.credits import CreditStore
+
+    return CreditStore(str(tmp_path / "quota.sqlite3"), "Asia/Shanghai", max_credits=1000)
+
+
+def test_credit_used_after_daily_exhausted(tmp_path) -> None:
+    store = make_store(tmp_path)
+    credit_store(tmp_path).grant_credits(7, 2, "admin_grant")
+
+    first = store.reserve(7, limit=1)
+    second = store.reserve(7, limit=1)
+    third = store.reserve(7, limit=1)
+    fourth = store.reserve(7, limit=1)
+
+    assert first is not None and first.source == "daily"
+    assert second is not None and second.source == "credit" and second.credit_balance == 1
+    assert third is not None and third.source == "credit" and third.credit_balance == 0
+    assert fourth is None
+
+
+def test_usage_snapshot_counts_only_requested_users(tmp_path) -> None:
+    store = make_store(tmp_path)
+    store.reserve(1, limit=5)
+    store.reserve(1, limit=5)
+    store.reserve(2, limit=5)
+
+    snapshot = store.usage_snapshot([1, 2, 3])
+
+    # 后台页一次要展示一批用户，单独查三次就是 N+1
+    assert snapshot == {1: 2, 2: 1, 3: 0}
+
+
+def test_daily_reservation_still_reports_credit_balance(tmp_path) -> None:
+    store = make_store(tmp_path)
+    credit_store(tmp_path).grant_credits(7, 5, "admin_grant")
+
+    reservation = store.reserve(7, limit=2)
+
+    # 花的是每日额度，但这一栏表示“这个人当前还有多少存量”，
+    # 前端额度条要同时显示两行，不能因为这次没花存量就显示 0。
+    assert reservation is not None and reservation.source == "daily"
+    assert reservation.credit_balance == 5
+
+
+def test_credit_survives_new_day(tmp_path) -> None:
+    store = make_store(tmp_path)
+    credit_store(tmp_path).grant_credits(7, 1, "admin_grant")
+
+    assert store.reserve(7, limit=1, day="2026-10-30") is not None
+    assert store.reserve(7, limit=1, day="2026-10-30") is not None
+    # 第二天每日额度刷新，但昨天已经花掉的存量不会回来
+    assert store.reserve(7, limit=1, day="2026-10-31") is not None
+    assert store.reserve(7, limit=1, day="2026-10-31") is None
+
+
+def test_global_breaker_blocks_credit_holders_and_rolls_back(tmp_path) -> None:
+    store = make_store(tmp_path)
+    credits = credit_store(tmp_path)
+    credits.grant_credits(7, 5, "admin_grant")
+
+    assert store.reserve(7, limit=10, global_limit=1) is not None
+
+    with pytest.raises(GlobalQuotaExceeded):
+        store.reserve(7, limit=10, global_limit=1)
+
+    # 被拒的那次不能偷偷扣掉每日额度，也不能动存量
+    assert store.status(7, limit=10).used == 1
+    assert credits.balance_of(7) == 5
+
+
+def test_zero_global_limit_means_unlimited(tmp_path) -> None:
+    store = make_store(tmp_path)
+    for _ in range(5):
+        assert store.reserve(7, limit=10, global_limit=0) is not None
+
+
+def test_refund_returns_credit_and_global(tmp_path) -> None:
+    store = make_store(tmp_path)
+    credits = credit_store(tmp_path)
+    credits.grant_credits(7, 1, "admin_grant")
+
+    # 每日额度为 0 时，存量也不能绕过（DAILY_QUOTA=0 表示不允许聊天）
+    assert store.reserve(7, limit=0, global_limit=10, allow_credits=False) is None
+
+    store.reserve(7, limit=1, global_limit=10)
+    reservation = store.reserve(7, limit=1, global_limit=10)
+    assert reservation is not None and reservation.source == "credit"
+
+    store.refund(reservation)
+
+    assert credits.balance_of(7) == 1
+    assert store.status(7, limit=1, global_limit=10).global_used == 1
+
+
+def test_concurrent_reserve_never_overspends_credits(tmp_path) -> None:
+    store = make_store(tmp_path)
+    credit_store(tmp_path).grant_credits(7, 10, "admin_grant")
+
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        results = list(pool.map(lambda _: store.reserve(7, limit=5), range(40)))
+
+    assert sum(1 for item in results if item is not None) == 15
+    assert credit_store(tmp_path).balance_of(7) == 0

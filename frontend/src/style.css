@@ -780,3 +780,20 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+/* 额度条里的兑换按钮：跟随额度条的小字，做成“文字链接”样式，
+   不和主按钮抢注意力。 */
+.l2d-chat__redeem {
+  margin-left: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.l2d-chat__redeem:hover {
+  color: var(--l2d-sky-600);
+}

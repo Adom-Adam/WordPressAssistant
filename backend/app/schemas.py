@@ -48,7 +48,9 @@ class RuntimeSettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     daily_quota: int | None = Field(default=None, ge=0, le=1000)
+    member_daily_quota: int | None = Field(default=None, ge=0, le=1000)
     global_daily_quota: int | None = Field(default=None, ge=0, le=1_000_000)
+    credit_max_per_user: int | None = Field(default=None, ge=0, le=1_000_000)
     agent_max_model_calls: int | None = Field(default=None, ge=1, le=20)
     agent_max_tool_calls: int | None = Field(default=None, ge=1, le=20)
     agent_max_seconds: float | None = Field(default=None, ge=5, le=300)
@@ -58,6 +60,59 @@ class RuntimeSettingsUpdate(BaseModel):
         max_length=100,
         pattern=r"^[A-Za-z0-9._:-]+$",
     )
+
+
+class UserPatch(BaseModel):
+    """管理员调整单个用户：等级、会员天数、备注。
+
+    三个字段都可选（PATCH 语义）：只提交要改的那一项。
+    会员必须带天数——等级是“有期限的”，不给期限就没法自动降级。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tier: Literal["user", "member"] | None = None
+    duration_days: int | None = Field(default=None, ge=1, le=3650)
+    note: str | None = Field(default=None, max_length=200)
+
+
+class CreditGrant(BaseModel):
+    """管理员手动增减额外额度。delta 为负表示扣减。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    delta: int = Field(ge=-1_000_000, le=1_000_000)
+    reason: str = Field(min_length=1, max_length=100)
+
+
+class CodeCreate(BaseModel):
+    """批量生成兑换码。
+
+    `value` 的含义随 `kind` 变化：credit 是“条数”，member 是“天数”。
+    这是设计上刻意保留的一个小不对称——用户在兑换页只需要看到一个数字。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["credit", "member"]
+    value: int = Field(ge=1, le=100_000)
+    # 上限和 CreditStore.create_codes 的校验保持一致：接口层先拒绝，
+    # 用户看到的是 422 而不是“生成了 0 个码”这种半成功。
+    count: int = Field(default=1, ge=1, le=50)
+    max_uses: int = Field(default=1, ge=1, le=1000)
+    expires_at: str | None = Field(default=None, max_length=40)
+    note: str | None = Field(default=None, max_length=200)
+
+
+class RedeemRequest(BaseModel):
+    """兑换码请求体。
+
+    长度取宽一点（4~64）：用户可能带空格、小写、漏掉连字符，
+    格式的真正判定交给 `CreditStore.redeem` 里的 `_normalize_code`，
+    这里只拦明显不是兑换码的输入（空串、超长垃圾）。
+    """
+
+    code: str = Field(min_length=4, max_length=64)
 
 
 class Citation(BaseModel):

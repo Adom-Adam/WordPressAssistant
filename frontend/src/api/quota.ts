@@ -15,6 +15,10 @@ export interface QuotaInfo {
   remaining: number | null;
   globalLimit: number;
   globalRemaining: number | null;
+  /** 额外额度余额：不随每天刷新，用完之后才动它。 */
+  credit: number;
+  /** 后端判定的身份；管理员单独一档，方便 UI 决定要不要显示兑换入口。 */
+  tier: 'user' | 'member' | 'admin';
 }
 
 interface QuotaResponse {
@@ -24,6 +28,12 @@ interface QuotaResponse {
   remaining?: number | null;
   global_limit?: number;
   global_remaining?: number | null;
+  credit_balance?: number;
+  tier?: string;
+}
+
+function normalizeTier(value: string | null | undefined): QuotaInfo['tier'] {
+  return value === 'member' || value === 'admin' ? value : 'user';
 }
 
 /** 从聊天响应的 HTTP 头里读额度。没有额度头时返回 null。 */
@@ -36,6 +46,8 @@ export function quotaFromHeaders(headers: Headers): QuotaInfo | null {
       remaining: null,
       globalLimit: Number(headers.get('x-global-quota-limit') ?? 0),
       globalRemaining: numberOrNull(headers.get('x-global-quota-remaining')),
+      credit: numberOrNull(headers.get('x-quota-credit')) ?? 0,
+      tier: 'admin',
     };
   }
 
@@ -49,6 +61,8 @@ export function quotaFromHeaders(headers: Headers): QuotaInfo | null {
     remaining,
     globalLimit: Number(headers.get('x-global-quota-limit') ?? 0),
     globalRemaining: numberOrNull(headers.get('x-global-quota-remaining')),
+    credit: numberOrNull(headers.get('x-quota-credit')) ?? 0,
+    tier: normalizeTier(headers.get('x-quota-tier')),
   };
 }
 
@@ -90,6 +104,8 @@ export async function fetchQuota(
       globalLimit: Number(data.global_limit ?? 0),
       globalRemaining:
         typeof data.global_remaining === 'number' ? data.global_remaining : null,
+      credit: typeof data.credit_balance === 'number' ? data.credit_balance : 0,
+      tier: normalizeTier(data.tier),
     };
   } catch {
     return null;
@@ -100,4 +116,51 @@ function numberOrNull(value: string | null): number | null {
   if (value === null || value === '') return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+/**
+ * 兑换一个码。
+ *
+ * 失败也返回 200 语义的布尔值而不是抛异常：兑换是用户主动触发的
+ * 一次性动作，调用方只需要拿到一句能直接展示的话。
+ */
+export async function redeemCode(
+  apiBase: string,
+  auth: AssistantAuthConfig,
+  code: string,
+): Promise<{ ok: boolean; message: string }> {
+  let token: string | null = null;
+  try {
+    token = await getAuthToken(auth);
+  } catch {
+    return { ok: false, message: '登录状态已过期，请刷新页面后再试' };
+  }
+  if (!token) return { ok: false, message: '请先登录后再兑换' };
+
+  try {
+    const response = await fetch(`${apiBase}/redeem`, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ code }),
+      credentials: 'same-origin',
+    });
+
+    let data: { message?: string; detail?: string } = {};
+    try {
+      data = (await response.json()) as { message?: string; detail?: string };
+    } catch {
+      // 非 JSON 响应（网关错误页等）走下面的通用文案
+    }
+
+    if (!response.ok) {
+      return { ok: false, message: data.detail || '兑换失败，请稍后再试' };
+    }
+    return { ok: true, message: data.message || '兑换成功' };
+  } catch {
+    return { ok: false, message: '兑换失败，请稍后再试' };
+  }
 }

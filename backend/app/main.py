@@ -19,9 +19,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.admin import router as admin_router
+from app.api.admin_users import router as admin_users_router
 from app.api.chat import router as chat_router
 from app.api.qq import router as qq_router
 from app.api.quota import router as quota_router
+from app.api.redeem import router as redeem_router
 from app.config import get_settings
 from app.runtime_settings import get_runtime_store
 
@@ -68,6 +70,8 @@ app.add_middleware(
         "X-Quota-Unlimited",
         "X-Global-Quota-Limit",
         "X-Global-Quota-Remaining",
+        "X-Quota-Credit",
+        "X-Quota-Tier",
         "Retry-After",
     ],
 )
@@ -77,8 +81,12 @@ app.add_middleware(
 #   最终地址就是 POST /api/chat
 app.include_router(chat_router, prefix="/api")
 app.include_router(quota_router, prefix="/api")
+# 兑换码：登录用户可用，兑换额外额度或会员天数。
+app.include_router(redeem_router, prefix="/api")
 # 管理接口需要 JWT 里的 admin=true，普通用户访问会得到 403。
 app.include_router(admin_router, prefix="/api")
+# 用户档案、等级调整、额度发放、兑换码管理（同样要求 admin=true）。
+app.include_router(admin_users_router, prefix="/api")
 # NapCat 的 OneBot 事件回调。默认关闭，关闭时路由返回 404。
 app.include_router(qq_router, prefix="/api")
 

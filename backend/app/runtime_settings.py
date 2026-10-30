@@ -54,18 +54,22 @@ class RuntimeSettings:
     """一次请求实际生效的运营参数。"""
 
     daily_quota: int
+    member_daily_quota: int
     global_daily_quota: int
     agent_max_model_calls: int
     agent_max_tool_calls: int
     agent_max_seconds: float
     model: str
+    credit_max_per_user: int
 
 
 # 每个字段的合法范围。管理员接口和读取文件时都会用同一套规则，
 # 避免“接口校验了、手工改文件却没校验”的漏洞。
 _INT_RANGES: dict[str, tuple[int, int]] = {
     "daily_quota": (0, 1000),
+    "member_daily_quota": (0, 1000),
     "global_daily_quota": (0, 1_000_000),
+    "credit_max_per_user": (0, 1_000_000),
     "agent_max_model_calls": (1, 20),
     "agent_max_tool_calls": (1, 20),
 }
@@ -77,11 +81,13 @@ _MODEL_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,100}$")
 def _defaults_from_settings(settings: Settings) -> RuntimeSettings:
     return RuntimeSettings(
         daily_quota=settings.daily_quota,
+        member_daily_quota=settings.member_daily_quota,
         global_daily_quota=settings.global_daily_quota,
         agent_max_model_calls=settings.agent_max_model_calls,
         agent_max_tool_calls=settings.agent_max_tool_calls,
         agent_max_seconds=settings.agent_max_seconds,
         model=settings.deepseek_model,
+        credit_max_per_user=settings.credit_max_per_user,
     )
 
 
