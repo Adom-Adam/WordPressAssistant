@@ -216,6 +216,18 @@ def test_credit_used_after_daily_exhausted(tmp_path) -> None:
     assert fourth is None
 
 
+def test_daily_reservation_still_reports_credit_balance(tmp_path) -> None:
+    store = make_store(tmp_path)
+    credit_store(tmp_path).grant_credits(7, 5, "admin_grant")
+
+    reservation = store.reserve(7, limit=2)
+
+    # 花的是每日额度，但这一栏表示“这个人当前还有多少存量”，
+    # 前端额度条要同时显示两行，不能因为这次没花存量就显示 0。
+    assert reservation is not None and reservation.source == "daily"
+    assert reservation.credit_balance == 5
+
+
 def test_credit_survives_new_day(tmp_path) -> None:
     store = make_store(tmp_path)
     credit_store(tmp_path).grant_credits(7, 1, "admin_grant")

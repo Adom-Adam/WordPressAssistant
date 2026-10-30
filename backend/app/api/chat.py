@@ -93,9 +93,12 @@ async def chat(
         # 会员和普通用户用不同的每日上限。等级存在后端库里，不在 JWT 里：
         # token 有 15 分钟有效期，管理员刚把某人升成会员，旧 token 还会
         # 带着旧的等级，按 token 判断会慢半拍。
-        tier, _expires_at = await asyncio.to_thread(
-            get_credit_store().tier_of, user.id
-        )
+        if user.is_admin:
+            tier = "admin"
+        else:
+            tier, _expires_at = await asyncio.to_thread(
+                get_credit_store().tier_of, user.id
+            )
         limit = (
             runtime.member_daily_quota if tier == "member" else runtime.daily_quota
         )
@@ -261,5 +264,10 @@ async def chat(
     if reservation.global_remaining is not None:
         headers["X-Global-Quota-Remaining"] = str(reservation.global_remaining)
         headers["X-Global-Quota-Limit"] = str(reservation.global_limit)
+
+    # 额外额度余额和身份：前端额度条要显示“今日 3/20 ・ 存量 5”，
+    # 兑换码入口也要根据身份决定写什么文案。
+    headers["X-Quota-Credit"] = str(reservation.credit_balance or 0)
+    headers["X-Quota-Tier"] = tier
 
     return EventSourceResponse(event_stream(), ping=15, headers=headers)

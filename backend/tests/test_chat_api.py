@@ -233,6 +233,36 @@ def test_member_uses_member_quota(client: TestClient, monkeypatch) -> None:
     assert "3" in responses[-1].json()["detail"]
 
 
+def test_quota_endpoint_reports_tier_and_credit(client: TestClient) -> None:
+    store = get_credit_store()
+    store.set_tier(42, "member", days=7)
+    store.grant_credits(42, 4, "admin_grant")
+
+    data = client.get("/api/quota", headers=auth_header()).json()
+
+    assert data["tier"] == "member"
+    assert data["credit_balance"] == 4
+    assert data["tier_expires_at"] is not None
+    # 会员的 limit 要是会员额度，不是普通用户额度
+    assert data["limit"] == 60
+
+
+def test_chat_headers_report_tier_and_credit(client: TestClient) -> None:
+    store = get_credit_store()
+    store.set_tier(42, "member", days=7)
+    store.grant_credits(42, 4, "admin_grant")
+
+    response = client.post(
+        "/api/chat",
+        json={"messages": [{"role": "user", "content": "hi"}]},
+        headers=auth_header(),
+    )
+
+    assert response.status_code == 200
+    assert response.headers["x-quota-tier"] == "member"
+    assert response.headers["x-quota-credit"] == "4"
+
+
 def test_quota_endpoint_admin_is_unlimited(client: TestClient) -> None:
     response = client.get("/api/quota", headers=auth_header(make_token(admin=True)))
 

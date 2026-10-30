@@ -296,6 +296,13 @@ class QuotaStore:
 
                 if row is not None:
                     used = int(row[0])
+                    # 花每日额度时也顺手读一次余额：响应头要告诉前端
+                    # “这个人还有多少存量”，而不是只在花存量时才给。
+                    brow = conn.execute(
+                        "SELECT balance FROM credit_balance WHERE user_id = ?",
+                        (user_id,),
+                    ).fetchone()
+                    credit_balance = int(brow[0]) if brow else 0
                 elif not allow_credits:
                     conn.rollback()
                     return None

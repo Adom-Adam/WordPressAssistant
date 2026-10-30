@@ -68,6 +68,8 @@ app.add_middleware(
         "X-Quota-Unlimited",
         "X-Global-Quota-Limit",
         "X-Global-Quota-Remaining",
+        "X-Quota-Credit",
+        "X-Quota-Tier",
         "Retry-After",
     ],
 )

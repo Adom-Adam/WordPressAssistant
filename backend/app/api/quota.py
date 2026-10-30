@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.deps import require_user
 from app.auth import AuthUser
+from app.credits import get_credit_store
 from app.quota import get_quota_store
 from app.runtime_settings import get_runtime_store
 
@@ -34,10 +35,25 @@ async def read_quota(user: AuthUser = Depends(require_user)) -> dict[str, object
     runtime = get_runtime_store().load()
 
     try:
+        # 管理员单独显示为 "admin"，前端据此隐藏“今日剩余”那一条，
+        # 而不是把 unlimited 和 tier 两处判断混在一起。
+        if user.is_admin:
+            tier, tier_expires_at = "admin", None
+            limit = runtime.daily_quota
+        else:
+            tier, tier_expires_at = await asyncio.to_thread(
+                get_credit_store().tier_of, user.id
+            )
+            limit = (
+                runtime.member_daily_quota
+                if tier == "member"
+                else runtime.daily_quota
+            )
+
         status = await asyncio.to_thread(
             get_quota_store().status,
             user.id,
-            runtime.daily_quota,
+            limit,
             is_admin=user.is_admin,
             global_limit=runtime.global_daily_quota,
         )
@@ -55,4 +71,7 @@ async def read_quota(user: AuthUser = Depends(require_user)) -> dict[str, object
         "global_limit": status.global_limit,
         "global_used": status.global_used,
         "global_remaining": status.global_remaining,
+        "tier": tier,
+        "tier_expires_at": tier_expires_at,
+        "credit_balance": status.credit_balance,
     }
