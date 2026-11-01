@@ -44,6 +44,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from app.config import get_settings
+from app.quota import QuotaReservation, QuotaStore
+from app.runtime_settings import RuntimeSettings
 
 logger = logging.getLogger(__name__)
 
@@ -223,3 +225,106 @@ def get_qq_quota_store() -> QQQuotaStore:
     """全局唯一的 QQ 额度存储。测试改了环境变量后要 cache_clear。"""
     settings = get_settings()
     return QQQuotaStore(settings.quota_db_path, settings.quota_timezone)
+
+
+# ----------------------------------------------------------------------
+# 共享 / 独立两种模式的门面
+# ----------------------------------------------------------------------
+@dataclass(frozen=True, slots=True)
+class QQUsage:
+    """一次 QQ 消息占用的额度，退款时按 kind 原路退回。"""
+
+    kind: str  # "admin" | "shared" | "independent"
+    web: QuotaReservation | None
+    qq: QQReservation | None
+
+
+class QQQuotaGate:
+    """把"网页额度"和"QQ 额度"组合成一条判断。
+
+    为什么需要这一层而不是在适配器里写 if：
+    - 共享模式要先占网页额度、再占 QQ 全站闸门，任一步失败都要回滚；
+    - 独立模式要判断会员档、不限量开关；
+    - 退款时两种模式的桶不一样。
+    这些规则集中在一处，适配器只负责"根据 status 选一句梅林的话"。
+    """
+
+    def __init__(
+        self,
+        quota: QuotaStore,
+        qq: QQQuotaStore,
+        runtime: Callable[[], RuntimeSettings],
+    ) -> None:
+        self.quota = quota
+        self.qq = qq
+        self._runtime = runtime
+
+    def reserve(
+        self,
+        *,
+        qq_uin: str,
+        user_id: int,
+        tier: str,
+        is_admin: bool,
+    ) -> tuple[str, QQUsage]:
+        if is_admin:
+            # 和网页一致：管理员既不按人计，也不占全站闸门。
+            return "ok", QQUsage("admin", None, None)
+
+        runtime = self._runtime()
+
+        if runtime.qq_quota_shared:
+            limit = (
+                runtime.member_daily_quota if tier == "member" else runtime.daily_quota
+            )
+            web = self.quota.reserve(
+                user_id,
+                limit,
+                is_admin=False,
+                global_limit=runtime.global_daily_quota,
+            )
+            if web is None:
+                return "user_exhausted", QQUsage("shared", None, None)
+
+            # 共享模式下仍然单独占一个 QQ 全站闸门：站长可以在网页额度还
+            # 宽裕时单独卡住 QQ。失败则把网页那一次一起退掉。
+            result = self.qq.reserve(
+                qq_uin, None, global_limit=runtime.qq_global_daily_quota
+            )
+            if result.status != "ok":
+                self.quota.refund(web)
+                return result.status, QQUsage("shared", None, None)
+            return "ok", QQUsage("shared", web, result.free)
+
+        # 独立模式：qq_unlimited 只跳过"按人/按会员"，全站闸门照常。
+        if runtime.qq_unlimited:
+            limit: int | None = None
+        elif tier == "member":
+            limit = runtime.qq_member_daily_quota
+        else:
+            limit = runtime.qq_daily_quota
+
+        result = self.qq.reserve(
+            qq_uin, limit, global_limit=runtime.qq_global_daily_quota
+        )
+        return result.status, QQUsage("independent", None, result.free)
+
+    def refund(self, usage: QQUsage) -> None:
+        """只退当初真的占过的桶。管理员那份什么都不用做。"""
+        if usage.web is not None:
+            self.quota.refund(usage.web)
+        if usage.qq is not None:
+            self.qq.refund(usage.qq)
+
+
+@lru_cache(maxsize=1)
+def get_qq_quota_gate() -> QQQuotaGate:
+    """生产用的门面：复用两个全局存储与运行时设置。"""
+    from app.quota import get_quota_store
+    from app.runtime_settings import get_runtime_store
+
+    return QQQuotaGate(
+        get_quota_store(),
+        get_qq_quota_store(),
+        lambda: get_runtime_store().load(),
+    )
