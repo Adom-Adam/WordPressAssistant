@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from app.api.deps import require_admin
 from app.auth import AuthUser
@@ -119,6 +119,26 @@ async def patch_user(
         "credit": current.credit,
         "note": current.note,
     }
+
+
+@router.delete("/admin/users/{user_id}/bind", status_code=204)
+async def force_unbind(
+    user_id: int,
+    _admin: AuthUser = Depends(require_admin),
+) -> Response:
+    """管理员强制解绑。用户换号、QQ 被盗、账号合并时用。
+
+    无论此人有没有绑过都返回 204：调用方的意图是“确保不再绑定”，
+    重复点击不该报错。解绑只清绑定，不动等级和额度。
+    """
+    try:
+        await asyncio.to_thread(get_credit_store().unbind_user, user_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("管理员解绑 QQ 失败 user=%s", user_id)
+        raise HTTPException(status_code=503, detail="绑定服务暂时不可用") from None
+
+    logger.info("管理员解绑 QQ user=%s", user_id)
+    return Response(status_code=204)
 
 
 @router.post("/admin/users/{user_id}/credits")

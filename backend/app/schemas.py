@@ -81,6 +81,18 @@ class UserPatch(BaseModel):
     note: str | None = Field(default=None, max_length=200)
 
 
+class BindCodeUpdate(BaseModel):
+    """WordPress 把用户看到的绑定码同步过来。
+
+    这里只校验长度；具体格式（8 位数字、允许 - 或空格分隔）由
+    `is_valid_bind_code` 统一归一化后判断，避免两处规则漂移。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(min_length=1, max_length=64)
+
+
 class CreditGrant(BaseModel):
     """管理员手动增减额外额度。delta 为负表示扣减。"""
 
