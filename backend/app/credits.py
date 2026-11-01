@@ -29,9 +29,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import secrets
 import sqlite3
+import unicodedata
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -61,6 +63,8 @@ CREATE TABLE IF NOT EXISTS user_profile (
     tier            TEXT    NOT NULL DEFAULT 'user',
     tier_expires_at TEXT,
     qq_uin          TEXT,
+    bind_code_hash  TEXT,
+    is_admin        INTEGER NOT NULL DEFAULT 0,
     note            TEXT,
     created_at      TEXT    NOT NULL,
     updated_at      TEXT    NOT NULL
@@ -137,6 +141,46 @@ class RedeemResult:
     message: str
 
 
+@dataclass(frozen=True, slots=True)
+class BindResult:
+    """一次绑定尝试的结果。
+
+    status 而不是布尔值：四种失败原因要给用户四句不同的话，
+    接口层和 QQ 命令层都直接按 status 选文案。
+    """
+
+    status: str  # "ok" | "invalid_code" | "qq_taken" | "account_taken"
+    user_id: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class QQBinding:
+    """QQ 号对应的博客账号身份，够额度判定用。"""
+
+    user_id: int
+    tier: str
+    is_admin: bool
+
+
+def _normalize_bind_code(raw: str) -> str:
+    """把绑定码归一成 8 位数字。
+
+    QQ 里手打很容易带全角数字、空格、连字符，统一用 NFKC 转半角再去掉
+    非数字字符；长度不对由 `is_valid_bind_code` 判断。
+    """
+    text = unicodedata.normalize("NFKC", str(raw or ""))
+    return "".join(ch for ch in text if ch.isdigit())
+
+
+def is_valid_bind_code(raw: str) -> bool:
+    return len(_normalize_bind_code(raw)) == 8
+
+
+def hash_bind_code(code: str) -> str:
+    """后端只保存哈希：库里泄露也拿不到能用的绑定码。"""
+    return hashlib.sha256(_normalize_bind_code(code).encode("ascii")).hexdigest()
+
+
 def _random_code() -> str:
     raw = "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LENGTH))
     return "-".join(raw[index : index + 4] for index in range(0, CODE_LENGTH, 4))
@@ -195,6 +239,35 @@ class CreditStore:
     def _init_schema(self) -> None:
         with self._connection() as conn:
             conn.executescript(CREDIT_SCHEMA_SQL)
+            self._migrate_profile_columns(conn)
+
+    @staticmethod
+    def _migrate_profile_columns(conn: sqlite3.Connection) -> None:
+        """给旧库补列。
+
+        `CREATE TABLE IF NOT EXISTS` 不会修改已存在的表，所以升级要靠显式
+        ALTER。先读 PRAGMA 再决定加什么，重复启动也不会报错。
+        """
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(user_profile)")}
+        if "bind_code_hash" not in columns:
+            conn.execute("ALTER TABLE user_profile ADD COLUMN bind_code_hash TEXT")
+        if "is_admin" not in columns:
+            conn.execute(
+                "ALTER TABLE user_profile ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"
+            )
+        try:
+            # 部分索引：允许多行 qq_uin 为 NULL，但同一个 QQ 只能绑一次。
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_user_profile_qq_uin
+                    ON user_profile(qq_uin)
+                 WHERE qq_uin IS NOT NULL
+                """
+            )
+        except sqlite3.OperationalError as exc:
+            # 历史库里如果已经有重复绑定，建索引会失败；此时不阻断启动，
+            # 由 bind_qq 的事务内检查继续保证唯一性。
+            logger.warning("QQ 唯一索引创建失败（已有重复数据？）：%s", exc)
 
     def _now_iso(self) -> str:
         """带时区偏移的 ISO 时间，例如 2026-11-06T12:00:00+08:00。
@@ -488,6 +561,112 @@ class CreditStore:
                 ),
             )
         return profiles
+
+    # ------------------------------------------------------------------
+    # QQ 绑定
+    # ------------------------------------------------------------------
+    def set_bind_code(self, user_id: int, code_hash: str, is_admin: bool) -> None:
+        """记录最新绑定码的哈希与账号的管理员身份。
+
+        每次打开个人资料页都会重推一次：角色变了（升/降管理员）最迟在
+        用户下次打开资料页时生效——QQ 侧没有管理入口，滞后不构成越权。
+        """
+        with self._connection() as conn:
+            self._ensure_profile_row(conn, user_id)
+            conn.execute(
+                """
+                UPDATE user_profile
+                   SET bind_code_hash = ?, is_admin = ?, updated_at = ?
+                 WHERE user_id = ?
+                """,
+                (code_hash, 1 if is_admin else 0, self._now_iso(), user_id),
+            )
+
+    def bind_qq(self, qq_uin: str, code_hash: str) -> BindResult:
+        """用绑定码把一个 QQ 号挂到对应账号上。
+
+        判定顺序与提示文案一一对应，而且整个判断在同一个事务里，
+        避免两个人同时提交时互相覆盖。
+        """
+        qq_uin = str(qq_uin or "").strip()
+        if not qq_uin:
+            return BindResult("invalid_code", None)
+
+        with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            target = conn.execute(
+                "SELECT user_id, qq_uin FROM user_profile WHERE bind_code_hash = ?",
+                (code_hash,),
+            ).fetchone()
+            if target is None:
+                return BindResult("invalid_code", None)
+
+            owner = conn.execute(
+                "SELECT user_id FROM user_profile WHERE qq_uin = ?",
+                (qq_uin,),
+            ).fetchone()
+            if owner is not None:
+                # 同一个账号重复提交也走这里：用户看到的是“我早就记住你啦”。
+                return BindResult("qq_taken", None)
+
+            target_user_id = int(target["user_id"])
+            existing = target["qq_uin"]
+            if existing is not None:
+                return BindResult("account_taken", None)
+
+            conn.execute(
+                "UPDATE user_profile SET qq_uin = ?, updated_at = ? WHERE user_id = ?",
+                (qq_uin, self._now_iso(), target_user_id),
+            )
+            return BindResult("ok", target_user_id)
+
+    def unbind_user(self, user_id: int) -> bool:
+        """清空 QQ 绑定并让当前绑定码失效。返回此前是否真的绑过。"""
+        with self._connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE user_profile
+                   SET qq_uin = NULL, bind_code_hash = NULL, updated_at = ?
+                 WHERE user_id = ?
+                   AND (qq_uin IS NOT NULL OR bind_code_hash IS NOT NULL)
+                """,
+                (self._now_iso(), user_id),
+            )
+            return cursor.rowcount > 0
+
+    def binding_of_qq(self, qq_uin: str) -> QQBinding | None:
+        """QQ 号 → 账号身份；会员到期按惰性降级处理。"""
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT user_id, tier, tier_expires_at, is_admin
+                  FROM user_profile
+                 WHERE qq_uin = ?
+                """,
+                (str(qq_uin or "").strip(),),
+            ).fetchone()
+        if row is None:
+            return None
+
+        tier = str(row["tier"])
+        expires = row["tier_expires_at"]
+        if tier == "member" and expires and self._expired(str(expires)):
+            tier = "user"
+        return QQBinding(
+            user_id=int(row["user_id"]),
+            tier=tier,
+            is_admin=bool(row["is_admin"]),
+        )
+
+    def qq_uin_of(self, user_id: int) -> str | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT qq_uin FROM user_profile WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        if row is None or row["qq_uin"] is None:
+            return None
+        return str(row["qq_uin"])
 
     # ------------------------------------------------------------------
     # 兑换码
