@@ -211,6 +211,22 @@ def test_shared_mode_qq_global_failure_refunds_web(tmp_path) -> None:
     assert quota.usage_snapshot([7])[7] == 1
 
 
+def test_shared_mode_web_global_quota_exhausted(tmp_path) -> None:
+    """共享模式下网页全站额度用完，也要报 global_exhausted，而不是放行。"""
+    gate, quota, _ = make_gate(
+        tmp_path,
+        make_runtime(qq_quota_shared=True, global_daily_quota=1, qq_global_daily_quota=0),
+    )
+
+    assert gate.reserve(qq_uin="10001", user_id=7, tier="user", is_admin=False)[0] == "ok"
+    status, usage = gate.reserve(qq_uin="10001", user_id=7, tier="user", is_admin=False)
+
+    assert status == "global_exhausted"
+    assert usage.kind == "shared" and usage.web is None
+    # 失败那次没有占网页计数
+    assert quota.usage_snapshot([7])[7] == 1
+
+
 def test_refund_restores_both_modes(tmp_path) -> None:
     gate, _, _ = make_gate(tmp_path, make_runtime(qq_daily_quota=1))
 

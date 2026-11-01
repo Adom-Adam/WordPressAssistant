@@ -167,9 +167,13 @@ def _normalize_bind_code(raw: str) -> str:
 
     QQ 里手打很容易带全角数字、空格、连字符，统一用 NFKC 转半角再去掉
     非数字字符；长度不对由 `is_valid_bind_code` 判断。
+
+    只认 ASCII 的 0-9：`str.isdigit()` 还会放过阿拉伯-印度数字（١٢٣٤…），
+    它们在 NFKC 下不会折成 ASCII，后面 `.encode("ascii")` 会直接抛异常。
+    绑定码本来也只在 WordPress 侧用 0-9 生成。
     """
     text = unicodedata.normalize("NFKC", str(raw or ""))
-    return "".join(ch for ch in text if ch.isdigit())
+    return "".join(ch for ch in text if "0" <= ch <= "9")
 
 
 def is_valid_bind_code(raw: str) -> bool:

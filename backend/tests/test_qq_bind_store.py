@@ -27,6 +27,8 @@ def test_is_valid_bind_code() -> None:
     assert not is_valid_bind_code("1234-567")
     assert not is_valid_bind_code("123456789")
     assert not is_valid_bind_code("abcd-efgh")
+    # NFKC 不会把阿拉伯-印度数字折成 ASCII；只认 0-9，否则 hash 时编码会炸。
+    assert not is_valid_bind_code("١٢٣٤٥٦٧٨")
 
 
 def test_bind_code_hash_roundtrip(tmp_path) -> None:

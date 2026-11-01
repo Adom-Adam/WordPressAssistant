@@ -185,6 +185,42 @@ async def test_admin_binding_is_not_counted(tmp_path: Any) -> None:
 
 
 @async_test
+async def test_shared_mode_web_global_exhausted_message(tmp_path: Any) -> None:
+    async def stream(messages: Any, **kwargs: Any) -> Any:
+        yield {"type": "delta", "content": "我在"}
+
+    adapter, sender, _ = make(
+        tmp_path,
+        stream=stream,
+        runtime_values=runtime(
+            qq_quota_shared=True, daily_quota=10, global_daily_quota=1
+        ),
+    )
+
+    await adapter.handle_event(private_event(10001, "第一句", 1))
+    result = await adapter.handle_event(private_event(10001, "第二句", 2))
+
+    assert result["reason"] == "quota_exhausted"
+    assert sender.private[-1] == (10001, commands.QUOTA_GLOBAL)
+
+
+@async_test
+async def test_empty_delta_counts_as_no_reply(tmp_path: Any) -> None:
+    """只有空 delta 也算没产出：不能占额度、不能写历史。"""
+
+    async def stream(messages: Any, **kwargs: Any) -> Any:
+        yield {"type": "delta", "content": ""}
+        yield {"type": "done"}
+
+    adapter, sender, _ = make(tmp_path, stream=stream)
+
+    result = await adapter.handle_event(private_event(10001, "第一句", 1))
+
+    assert result["reply"] == commands.AGENT_ERROR
+    assert qq_used(tmp_path) == 0
+
+
+@async_test
 async def test_shared_mode_uses_web_quota(tmp_path: Any) -> None:
     async def stream(messages: Any, **kwargs: Any) -> Any:
         yield {"type": "delta", "content": "我在"}

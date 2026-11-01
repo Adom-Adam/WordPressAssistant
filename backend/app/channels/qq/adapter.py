@@ -391,7 +391,9 @@ class QQAdapter:
         if not reply:
             reply = error_message or "我在，但这次没想好怎么回。"
 
-        produced = bool(parts)
+        # 与网页 chat.py 保持一致：只有真正产出非空正文才算“答上了”。
+        # 空 delta 也算没交付，额度要退、历史不能写。
+        produced = any(part.strip() for part in parts)
 
         # agent 出错时不把错误写进历史，避免下一轮模型把报错当成事实。
         if error_message and not produced:

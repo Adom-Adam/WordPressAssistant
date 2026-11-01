@@ -44,7 +44,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from app.config import get_settings
-from app.quota import QuotaReservation, QuotaStore
+from app.quota import GlobalQuotaExceeded, QuotaReservation, QuotaStore
 from app.runtime_settings import RuntimeSettings
 
 logger = logging.getLogger(__name__)
@@ -277,12 +277,17 @@ class QQQuotaGate:
             limit = (
                 runtime.member_daily_quota if tier == "member" else runtime.daily_quota
             )
-            web = self.quota.reserve(
-                user_id,
-                limit,
-                is_admin=False,
-                global_limit=runtime.global_daily_quota,
-            )
+            try:
+                web = self.quota.reserve(
+                    user_id,
+                    limit,
+                    is_admin=False,
+                    global_limit=runtime.global_daily_quota,
+                )
+            except GlobalQuotaExceeded:
+                # 网页全站额度用完：共享模式下 QQ 也一起停，给“全站”文案。
+                # QuotaStore 已经把自己那次按人计数回滚了，这里不用再退。
+                return "global_exhausted", QQUsage("shared", None, None)
             if web is None:
                 return "user_exhausted", QQUsage("shared", None, None)
 
