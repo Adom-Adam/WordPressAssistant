@@ -188,6 +188,33 @@ curl -s https://你的域名/ai-api/health
 > 阿里云 ECS 默认限制出站 25 端口，SMTP 请优先用 `465`（SSL）或 `587`（TLS）。
 > 注册/登录的详细教学见 [tutorial.md](tutorial.md) 第 10 节。
 
+### 4.2 QQ 通道与绑定（可选）
+
+QQ 通道默认关闭。开启前先在后端 `.env` 里配好 `QQ_ENABLED=true`、
+`QQ_ONEBOT_BASE_URL`、`QQ_EVENT_TOKEN`、`QQ_ALLOWED_GROUPS`，并在 NapCat 里把
+事件回调指到 `https://<域名>/ai-api/channels/qq/events`（带同上的 token）。
+
+**关于额度参数：**
+
+- `.env` 里的 `QQ_DAILY_QUOTA`、`QQ_MEMBER_DAILY_QUOTA`、`QQ_GLOBAL_DAILY_QUOTA`、
+  `QQ_QUOTA_SHARED`、`QQ_UNLIMITED` **只是初始默认值**；
+- 正式运营请在 **设置 → Live2D 小助手 → 聊天额度与运行参数 → QQ 通道** 里改，
+  保存即生效，不需要改 `.env`，也不需要重启服务；
+- “与网页共用每日额度”勾选后，QQ 走网页那套（普通/会员每日额度 + 全站总额度）；
+  不勾选则用 QQ 独立的每人/会员额度；两种模式下 **QQ 全站每日总额度都生效**；
+- 管理员（WordPress 角色 `administrator`，或 `QQ_ADMIN_USERS` 里的人）不计额度。
+
+**用户怎么绑定：**
+
+1. 用户在 **用户 → 个人资料**（`/wp-admin/profile.php`）的“QQ 绑定”卡片里看到绑定码；
+2. 在 QQ 里 **私聊** 梅林，发送 `/绑定 1234-5678`（全角 `／`、`＼` 也认）；
+3. 绑定后可以在白名单群里 @梅林，也可以继续私聊；
+4. 换绑必须先在个人资料页解绑，再刷新绑定码——QQ 那头没有可靠的身份证明，
+   所以解绑只开放给网页端。
+
+> 后端的 `/api/channels/qq/events` 只接受带 token 或 `X-Signature` 的请求；
+> NapCat 登录、二维码、回调地址都涉及真实账号，改之前请先确认。
+
 ## 5. 更新流程
 
 ```bash
