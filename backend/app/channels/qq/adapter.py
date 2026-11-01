@@ -3,14 +3,20 @@
 设计原则
 --------
 1. **默认拒绝**：`QQ_ALLOWED_GROUPS` 为空时，任何群消息都不处理。
-2. **只处理群聊文本**：私聊、频道、图片、表情都先忽略；等身份绑定做好后再扩展。
+2. **只处理文本**：群聊与私聊都支持；频道、图片、表情先忽略。
 3. **用户内容只是数据**：群消息会作为 `ChatMessage(role="user")` 进入模型，
    永远不会拼进 system prompt，也不会改变管理员身份。
 4. **幂等**：NapCat 在网络抖动时可能重发同一个 `message_id`，必须去重。
 5. **失败可观察**：发送失败只记日志，不让后台任务崩掉整个进程。
 
-这一层刻意保持“薄”：没有数据库、没有长期记忆、没有主动消息。
-它先解决“QQ 消息能进来、回复能出去”，身份绑定和持久记忆是后续步骤。
+这一层刻意保持“薄”：只读绑定关系，不写长期记忆，也从不主动发消息。
+
+消息处理顺序（顺序本身就是规则）：
+
+    去重 → 触发判断 → 斜杠命令 → 绑定判定 → 额度 → agent
+
+命令在绑定判定之前：命令自己对自己的权限负责（比如 /绑定 只在私聊执行），
+也不消耗额度；未绑定的人在命令里拿到的是引导，而不是 AI 回答。
 """
 
 from __future__ import annotations
@@ -20,11 +26,15 @@ import logging
 import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from app.agent.core import stream_reply
+from app.channels.qq import commands
 from app.channels.qq.client import OneBotError, OneBotTransport
+from app.channels.qq.commands import CommandContext, dispatch, parse_command
 from app.config import Settings
+from app.credits import CreditStore, get_credit_store
 from app.schemas import ChatMessage
 
 logger = logging.getLogger(__name__)
@@ -37,6 +47,19 @@ MAX_MESSAGE_CHARS = 1_200
 MAX_SEEN_MESSAGES = 500
 
 
+@dataclass(frozen=True, slots=True)
+class Incoming:
+    """解析后的入站消息。私聊的 group_id 固定为 0。"""
+
+    message_type: str  # "group" | "private"
+    group_id: int
+    user_id: int
+    self_id: int
+    text: str
+    at_self: bool
+    message_id: int | None
+
+
 class QQAdapter:
     """处理 NapCat 推送的 OneBot 事件。"""
 
@@ -46,10 +69,14 @@ class QQAdapter:
         sender: OneBotTransport,
         *,
         stream: Callable[..., AsyncIterator[dict[str, Any]]] = stream_reply,
+        credits: CreditStore | None = None,
     ) -> None:
         self.settings = settings
         self.sender = sender
         self._stream = stream
+        # 绑定关系存在额度库里。可注入是为了测试用一个临时数据库，
+        # 生产不传时惰性取全局实例（导入时就建库会让 --help 之类也写文件）。
+        self.credits = credits
 
         # (群号, QQ 号) -> 最近几轮消息。只在内存里，进程重启就清空。
         # 这是有意的：在账号绑定/关系记忆做好之前，不假装自己有长期记忆。
@@ -78,52 +105,101 @@ class QQAdapter:
         真正的 HTTP 路由会把它放进后台任务，先快速返回 204，
         因为 NapCat 不关心我们的回复内容，只关心有没有及时收到响应。
         """
-        parsed = self._parse_group_message(payload)
-        if parsed is None:
-            return {"handled": False, "reason": "not_a_group_text_message"}
-
-        group_id, user_id, self_id, text, at_self, message_id = parsed
+        incoming = self._parse_message(payload)
+        if incoming is None:
+            return {"handled": False, "reason": "not_a_text_message"}
 
         # 机器人自己发的消息（包括 NapCat 回显）不处理，否则会自己和自己聊天。
-        if self_id and user_id == self_id:
+        if incoming.self_id and incoming.user_id == incoming.self_id:
             return {"handled": False, "reason": "self_message"}
 
-        if group_id not in self.settings.qq_allowed_group_ids:
-            return {"handled": False, "reason": "group_not_allowed"}
+        if incoming.message_type == "group":
+            if incoming.group_id not in self.settings.qq_allowed_group_ids:
+                return {"handled": False, "reason": "group_not_allowed"}
+            content = self._extract_trigger_text(incoming.text, incoming.at_self)
+        else:
+            # 私聊没有 @ 的概念，整条文本就是正文。
+            content = incoming.text.strip()
 
-        if self._is_duplicate(group_id, message_id):
+        if self._is_duplicate(incoming.group_id, incoming.message_id):
             return {"handled": False, "reason": "duplicate_message"}
 
-        content = self._extract_trigger_text(text, at_self)
         if not content:
             return {"handled": False, "reason": "not_triggered_or_empty"}
 
-        key = (group_id, user_id)
+        is_private = incoming.message_type == "private"
+        key = (incoming.group_id, incoming.user_id)
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
-            reply, messages_for_history = await self._reply(key, content, user_id)
+            store = self.credits or get_credit_store()
+            admin_whitelisted = incoming.user_id in self.settings.qq_admin_user_ids
+            binding = store.binding_of_qq(str(incoming.user_id))
+            is_admin = admin_whitelisted or (binding.is_admin if binding else False)
+
+            # 1. 斜杠命令：先于绑定判定，永不进 agent、不进历史。
+            parsed = parse_command(content)
+            if parsed is not None:
+                reply = dispatch(
+                    parsed,
+                    CommandContext(
+                        qq_uin=incoming.user_id,
+                        is_private=is_private,
+                        group_id=None if is_private else incoming.group_id,
+                        args="",
+                        bound_user_id=binding.user_id if binding else None,
+                        is_admin=is_admin,
+                        store=store,
+                    ),
+                )
+                return await self._send(incoming, reply, reason="command")
+
+            # 2. 未绑定：只回引导。管理员白名单是自救通道，不受绑定限制。
+            if binding is None and not admin_whitelisted:
+                guide = commands.PRIVATE_GUIDE if is_private else commands.GROUP_GUIDE
+                return await self._send(incoming, guide, reason="guide_unbound")
+
+            # 3. 已绑定（或在白名单里）：正常聊天。
+            reply, messages_for_history, _ = await self._reply(
+                key, content, is_admin=is_admin
+            )
             if messages_for_history:
                 self._history[key] = messages_for_history
 
-            try:
-                for chunk in self._split_text(reply):
-                    await self.sender.send_group_message(group_id, chunk)
-            except OneBotError as exc:
-                logger.warning("QQ 回复发送失败（群 %s）：%s", group_id, exc)
-                return {"handled": True, "reply": reply, "send_error": str(exc)}
-            except Exception:  # noqa: BLE001 - 后台任务不能把异常抛给进程
-                logger.exception("QQ 回复发送时出现未预期错误（群 %s）", group_id)
-                return {"handled": True, "reply": reply, "send_error": "unexpected_error"}
+            return await self._send(incoming, reply)
 
-        return {"handled": True, "reply": reply}
+    async def _send(
+        self, incoming: Incoming, reply: str, *, reason: str | None = None
+    ) -> dict[str, Any]:
+        """按来源把回复发回群/私聊；发送失败只记日志。"""
+        result: dict[str, Any] = {"handled": True, "reply": reply}
+        if reason:
+            result["reason"] = reason
+
+        try:
+            for chunk in self._split_text(reply):
+                if incoming.message_type == "private":
+                    await self.sender.send_private_message(incoming.user_id, chunk)
+                else:
+                    await self.sender.send_group_message(incoming.group_id, chunk)
+        except OneBotError as exc:
+            logger.warning(
+                "QQ 回复发送失败（%s %s）：%s",
+                incoming.message_type,
+                incoming.group_id or incoming.user_id,
+                exc,
+            )
+            result["send_error"] = str(exc)
+        except Exception:  # noqa: BLE001 - 后台任务不能把异常抛给进程
+            logger.exception("QQ 回复发送时出现未预期错误")
+            result["send_error"] = "unexpected_error"
+
+        return result
 
     # ------------------------------------------------------------------
     # 解析
     # ------------------------------------------------------------------
-    def _parse_group_message(
-        self, payload: dict[str, Any]
-    ) -> tuple[int, int, int, str, bool, int | None] | None:
-        """从 OneBot 事件里取出群聊文本；不是群文本消息就返回 None。
+    def _parse_message(self, payload: dict[str, Any]) -> Incoming | None:
+        """从 OneBot 事件里取出群聊/私聊文本；其他事件返回 None。
 
         OneBot 11 的群消息大致长这样：
         ```json
@@ -140,21 +216,23 @@ class QQAdapter:
           ]
         }
         ```
+        私聊把 message_type 换成 "private"，没有 group_id。
         不同实现的 `message` 可能是字符串（CQ 码），这里只处理数组形式；
         字符串形式先忽略，避免在没有验证过的格式上做错误解析。
         """
         if payload.get("post_type") != "message":
             return None
-        if payload.get("message_type") != "group":
+        message_type = payload.get("message_type")
+        if message_type not in {"group", "private"}:
             return None
 
         try:
-            group_id = int(payload.get("group_id") or 0)
             user_id = int(payload.get("user_id") or 0)
             self_id = int(payload.get("self_id") or 0)
+            group_id = int(payload.get("group_id") or 0) if message_type == "group" else 0
         except (TypeError, ValueError):
             return None
-        if not group_id or not user_id:
+        if not user_id or (message_type == "group" and not group_id):
             return None
 
         message = payload.get("message")
@@ -176,14 +254,21 @@ class QQAdapter:
                 if str(data.get("qq") or "") == str(self_id):
                     at_self = True
 
-        text = "".join(parts).strip()
         message_id_raw = payload.get("message_id")
         try:
             message_id = int(message_id_raw) if message_id_raw is not None else None
         except (TypeError, ValueError):
             message_id = None
 
-        return group_id, user_id, self_id, text, at_self, message_id
+        return Incoming(
+            message_type=message_type,
+            group_id=group_id,
+            user_id=user_id,
+            self_id=self_id,
+            text="".join(parts).strip(),
+            at_self=at_self,
+            message_id=message_id,
+        )
 
     def _extract_trigger_text(self, text: str, at_self: bool) -> str:
         """判断是否触发，并去掉触发前缀。"""
@@ -216,12 +301,15 @@ class QQAdapter:
         self,
         key: tuple[int, int],
         content: str,
-        user_id: int,
-    ) -> tuple[str, list[ChatMessage]]:
-        """调用 agent，返回 (要发送的文本, 更新后的历史)。"""
+        *,
+        is_admin: bool,
+    ) -> tuple[str, list[ChatMessage], bool]:
+        """调用 agent，返回 (要发送的文本, 更新后的历史, 是否产出过正文)。
+
+        第三个返回值给额度层用：没产出正文的失败要退款。
+        """
         history = self._history.get(key, [])
         messages = [*history, ChatMessage(role="user", content=content[:8000])]
-        is_admin = user_id in self.settings.qq_admin_user_ids
 
         parts: list[str] = []
         error_message = ""
@@ -245,9 +333,11 @@ class QQAdapter:
         if not reply:
             reply = error_message or "我在，但这次没想好怎么回。"
 
+        produced = bool(parts)
+
         # agent 出错时不把错误写进历史，避免下一轮模型把报错当成事实。
-        if error_message and not parts:
-            return reply, history
+        if error_message and not produced:
+            return reply, history, produced
 
         # 只保留最近 N 轮。1 轮 = 用户一条 + 助手一条。
         new_history = [
@@ -259,7 +349,7 @@ class QQAdapter:
             new_history = new_history[-max_messages:]
         else:
             new_history = []
-        return reply, new_history
+        return reply, new_history, produced
 
     # ------------------------------------------------------------------
     # 输出格式

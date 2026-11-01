@@ -41,6 +41,9 @@ class OneBotTransport(Protocol):
     async def send_group_message(self, group_id: int, message: str) -> Any:
         """向群里发一条文本消息，返回 OneBot 的 data 字段。"""
 
+    async def send_private_message(self, user_id: int, message: str) -> Any:
+        """向某个人发私聊文本，返回 OneBot 的 data 字段。"""
+
 
 @dataclass(frozen=True, slots=True)
 class OneBotClient:
@@ -98,6 +101,13 @@ class OneBotClient:
             {"group_id": group_id, "message": message},
         )
 
+    async def send_private_message(self, user_id: int, message: str) -> Any:
+        """发送私聊文本消息。"""
+        return await self.call(
+            "send_private_msg",
+            {"user_id": user_id, "message": message},
+        )
+
     async def get_status(self) -> Any:
         """查询 NapCat 在线状态，用于连通性探测。"""
         return await self.call("get_status", {})
@@ -139,7 +149,7 @@ class MockOneBotClient:
             return {"user_id": 0, "nickname": "本地 Mock 梅林"}
         if action == "get_status":
             return {"online": True, "good": True}
-        if action == "send_group_msg":
+        if action in {"send_group_msg", "send_private_msg"}:
             return {"message_id": int(time.time() * 1000)}
         return {}
 
@@ -147,6 +157,12 @@ class MockOneBotClient:
         return await self.call(
             "send_group_msg",
             {"group_id": group_id, "message": message},
+        )
+
+    async def send_private_message(self, user_id: int, message: str) -> Any:
+        return await self.call(
+            "send_private_msg",
+            {"user_id": user_id, "message": message},
         )
 
     async def get_status(self) -> Any:

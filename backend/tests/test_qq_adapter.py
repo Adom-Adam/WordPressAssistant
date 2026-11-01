@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 from app.api.qq import get_qq_adapter
 from app.channels.qq.adapter import QQAdapter
 from app.config import Settings, get_settings
+from app.credits import QQBinding, get_credit_store
 from app.schemas import ChatMessage
 
 
@@ -37,6 +38,16 @@ def async_test(fn: Any) -> Any:
         return asyncio.run(fn(*args, **kwargs))
 
     return wrapper
+
+
+class AlwaysBound:
+    """这些用例只关心"回什么"，所以统一假设发消息的 QQ 已经绑定。
+
+    只实现适配器用到的读接口，不碰任何真实数据库。
+    """
+
+    def binding_of_qq(self, qq_uin: str) -> QQBinding:
+        return QQBinding(user_id=1, tier="user", is_admin=False)
 
 
 class FakeSender:
@@ -116,7 +127,9 @@ def make_settings(**overrides: Any) -> Settings:
 async def test_at_trigger_replies_in_allowed_group() -> None:
     sender = FakeSender()
     calls: list[dict[str, Any]] = []
-    adapter = QQAdapter(make_settings(), sender, stream=make_stream(calls, "你好呀"))
+    adapter = QQAdapter(
+        make_settings(), sender, stream=make_stream(calls, "你好呀"), credits=AlwaysBound()
+    )
 
     result = await adapter.handle_event(make_event("在吗"))
 
@@ -130,7 +143,9 @@ async def test_at_trigger_replies_in_allowed_group() -> None:
 async def test_group_not_in_allowlist_is_ignored() -> None:
     sender = FakeSender()
     calls: list[dict[str, Any]] = []
-    adapter = QQAdapter(make_settings(), sender, stream=make_stream(calls))
+    adapter = QQAdapter(
+        make_settings(), sender, stream=make_stream(calls), credits=AlwaysBound()
+    )
 
     result = await adapter.handle_event(make_event(group_id=999))
 
@@ -143,7 +158,9 @@ async def test_group_not_in_allowlist_is_ignored() -> None:
 async def test_message_without_at_is_ignored_in_at_mode() -> None:
     sender = FakeSender()
     calls: list[dict[str, Any]] = []
-    adapter = QQAdapter(make_settings(), sender, stream=make_stream(calls))
+    adapter = QQAdapter(
+        make_settings(), sender, stream=make_stream(calls), credits=AlwaysBound()
+    )
 
     result = await adapter.handle_event(make_event("在吗", at_bot=False))
 
@@ -155,7 +172,9 @@ async def test_message_without_at_is_ignored_in_at_mode() -> None:
 async def test_duplicate_message_id_is_ignored() -> None:
     sender = FakeSender()
     calls: list[dict[str, Any]] = []
-    adapter = QQAdapter(make_settings(), sender, stream=make_stream(calls))
+    adapter = QQAdapter(
+        make_settings(), sender, stream=make_stream(calls), credits=AlwaysBound()
+    )
     event = make_event("在吗")
 
     first = await adapter.handle_event(event)
@@ -174,6 +193,7 @@ async def test_prefix_trigger_strips_prefix() -> None:
         make_settings(qq_trigger="prefix", qq_prefix="梅林"),
         sender,
         stream=make_stream(calls),
+        credits=AlwaysBound(),
     )
 
     result = await adapter.handle_event(make_event("梅林 在吗", at_bot=False))
@@ -186,7 +206,9 @@ async def test_prefix_trigger_strips_prefix() -> None:
 async def test_history_is_kept_per_group_and_user() -> None:
     sender = FakeSender()
     calls: list[dict[str, Any]] = []
-    adapter = QQAdapter(make_settings(qq_history_turns=2), sender, stream=make_stream(calls))
+    adapter = QQAdapter(
+        make_settings(qq_history_turns=2), sender, stream=make_stream(calls), credits=AlwaysBound()
+    )
 
     await adapter.handle_event(make_event("第一句", message_id=1))
     await adapter.handle_event(make_event("第二句", message_id=2))
@@ -205,6 +227,7 @@ async def test_admin_user_is_marked_for_prompt() -> None:
         make_settings(qq_admin_users="456"),
         sender,
         stream=make_stream(calls),
+        credits=AlwaysBound(),
     )
 
     await adapter.handle_event(make_event(user_id=456))
@@ -225,7 +248,7 @@ async def test_empty_reply_uses_fallback() -> None:
     ) -> AsyncIterator[dict[str, Any]]:
         yield {"type": "done"}
 
-    adapter = QQAdapter(make_settings(), sender, stream=empty_stream)
+    adapter = QQAdapter(make_settings(), sender, stream=empty_stream, credits=AlwaysBound())
     result = await adapter.handle_event(make_event())
 
     assert result["handled"] is True
@@ -245,12 +268,14 @@ def test_long_reply_is_split_into_multiple_messages() -> None:
 # ----------------------------------------------------------------------
 @pytest.fixture(autouse=True)
 def clear_config_caches() -> None:
-    """每个测试前后清掉 Settings/适配器缓存，避免环境变量串味。"""
+    """每个测试前后清掉 Settings/适配器/额度库缓存，避免环境变量串味。"""
     get_settings.cache_clear()
     get_qq_adapter.cache_clear()
+    get_credit_store.cache_clear()
     yield
     get_settings.cache_clear()
     get_qq_adapter.cache_clear()
+    get_credit_store.cache_clear()
 
 
 def test_event_endpoint_rejects_wrong_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -286,6 +311,8 @@ def test_event_endpoint_accepts_napcat_signature(
     monkeypatch.setenv("QQ_ALLOWED_GROUPS", "123")
     monkeypatch.setenv("QQ_TRIGGER", "at")
     monkeypatch.setenv("QQ_MOCK_MODE", "true")
+    monkeypatch.setenv("QQ_ADMIN_USERS", "456")
+    monkeypatch.setenv("QUOTA_DB_PATH", str(tmp_path / "quota.sqlite3"))
     monkeypatch.setenv("QQ_MOCK_OUTBOX", str(outbox))
     monkeypatch.setenv("MOCK_MODE", "true")
     get_settings.cache_clear()
@@ -355,6 +382,8 @@ def test_event_endpoint_runs_mock_reply(
     monkeypatch.setenv("QQ_ALLOWED_GROUPS", "123")
     monkeypatch.setenv("QQ_TRIGGER", "at")
     monkeypatch.setenv("QQ_MOCK_MODE", "true")
+    monkeypatch.setenv("QQ_ADMIN_USERS", "456")
+    monkeypatch.setenv("QUOTA_DB_PATH", str(tmp_path / "quota.sqlite3"))
     monkeypatch.setenv("QQ_MOCK_OUTBOX", str(outbox))
     monkeypatch.setenv("MOCK_MODE", "true")
     get_settings.cache_clear()
