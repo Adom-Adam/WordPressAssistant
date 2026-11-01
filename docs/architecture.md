@@ -81,6 +81,8 @@
   - 系统提示词不再写死在代码里，而是从 `data/personas/<id>/<version>.json`
     加载（该目录被 `.gitignore` 忽略）。`app/persona/composer.py` 按
     “核心人设 → 背景 → 规则 → 频道覆盖 → 访客身份 → 页面上下文”组装；
+    频道由调用方传入：网页 `web`、QQ 私聊 `qq_private`、QQ 群 `qq_group`，
+    没有对应覆盖层的频道只是少一段，不会报错；
   - `create_agent(model, tools, system_prompt)` 把「模型 → 工具 → 模型」的循环
     编成 LangGraph 状态图；
   - `agent.astream(..., stream_mode=["messages", "updates"])`：
@@ -308,6 +310,9 @@ NapCat ──事件──▶ POST /api/channels/qq/events ──▶ QQAdapter �
 
 - 适配器只做事件解析、白名单、触发方式、去重、短期历史、命令分发和消息拆条；
 - 人设、知识库、工具完全复用网页链路，不复制一套提示词；
+- 调用 agent 时带 `channel="qq_private"` 或 `"qq_group"`，页面上下文一律为空。
+  人设里对应的覆盖层负责把场景从“图书馆”换成“通讯法阵”——否则梅林会把
+  网页那套背景（书架、访客、翻书）原样搬到 QQ 里；
 - 默认关闭，`QQ_ALLOWED_GROUPS` 为空时不回复任何群；私聊不受群白名单限制；
 - 本地没有 NapCat 时用 `QQ_MOCK_MODE=true` 或 `scripts/mock_onebot.py` 降级联调。
 

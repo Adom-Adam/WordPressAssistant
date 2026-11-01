@@ -104,6 +104,7 @@ def _build_agent(
     page_title: str | None,
     *,
     is_admin: bool = False,
+    channel: str = "web",
 ) -> Any:
     """创建一个带工具和页面上下文的 agent。
 
@@ -119,6 +120,9 @@ def _build_agent(
       放在每次模型调用的最前面。
     - `is_admin`：当前访客是否为管理员。只影响提示词里的称呼，
       不改变工具权限——管理员也不能越权访问站外内容。
+    - `channel`：这次对话发生在哪个频道（`web` / `qq_private` / `qq_group`）。
+      只用来选人设覆盖层：QQ 那边是通过“通讯法阵”说话，不该把
+      图书馆的书架当成眼下的场景。
 
     为什么每次请求都新建 agent：
     页面标题/地址是动态的，而 system_prompt 在建图时就固定了。
@@ -164,7 +168,12 @@ def _build_agent(
     return create_agent(
         model=build_chat_model(runtime.model),
         tools=TOOLS,
-        system_prompt=build_system_prompt(page_url, page_title, is_admin=is_admin),
+        system_prompt=build_system_prompt(
+            page_url,
+            page_title,
+            is_admin=is_admin,
+            channel=channel,
+        ),
         middleware=safeguards,
     )
 
@@ -244,6 +253,7 @@ async def stream_reply(
     page_title: str | None = None,
     *,
     is_admin: bool = False,
+    channel: str = "web",
 ) -> AsyncIterator[dict[str, Any]]:
     """核心入口：产出一系列前端可直接消费的事件字典。
 
@@ -256,6 +266,9 @@ async def stream_reply(
 
     FastAPI 的 SSE 路由（app/api/chat.py）只负责把这些字典序列化成
     `data: {...}`，不掺和任何 AI 逻辑。
+
+    `channel` 决定用哪一份人设覆盖层：网页是 `web`，QQ 私聊/群聊分别是
+    `qq_private` / `qq_group`。未知频道不会报错，只是没有覆盖层。
     """
     settings = get_settings()
 
@@ -276,6 +289,7 @@ async def stream_reply(
         page_url=page_url,
         page_title=page_title,
         is_admin=is_admin,
+        channel=channel,
     )
 
     # 用字典按 URL 去重：agent 可能连续检索多次，

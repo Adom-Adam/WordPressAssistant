@@ -82,6 +82,7 @@ def make_stream(calls: list[dict[str, Any]], reply: str = "你好呀"):
         page_title: str | None = None,
         *,
         is_admin: bool = False,
+        channel: str = "web",
     ) -> AsyncIterator[dict[str, Any]]:
         calls.append(
             {
@@ -89,6 +90,7 @@ def make_stream(calls: list[dict[str, Any]], reply: str = "你好呀"):
                 "page_url": page_url,
                 "page_title": page_title,
                 "is_admin": is_admin,
+                "channel": channel,
             }
         )
         yield {"type": "delta", "content": reply}

@@ -46,7 +46,7 @@ data/personas/
 | `core` | 她是谁、怎么说话。最稳定、最靠前的一段 |
 | `background` | 她为什么在这里（差事/背景），不要盖过 `core` |
 | `rules` | 检索、跳转、安全边界 |
-| `channels` | 频道覆盖层，例如 `web`、`qq_group`；P1 只用到 `web` |
+| `channels` | 频道覆盖层：`web`、`qq_private`、`qq_group`；只有对应频道才会追加 |
 | `metadata` | 来源、导入时间等说明，不参与提示词组装 |
 
 ## 注意

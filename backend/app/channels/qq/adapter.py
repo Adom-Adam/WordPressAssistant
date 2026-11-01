@@ -159,7 +159,11 @@ class QQAdapter:
 
             # 2. 未绑定：只回引导。管理员白名单是自救通道，不受绑定限制。
             if binding is None and not admin_whitelisted:
-                guide = commands.PRIVATE_GUIDE if is_private else commands.GROUP_GUIDE
+                guide = (
+                    commands.private_guide(self.settings.wp_site_url)
+                    if is_private
+                    else commands.GROUP_GUIDE
+                )
                 return await self._send(incoming, guide, reason="guide_unbound")
 
             # 3. 额度：管理员不计数；用尽时回固定文案，不调模型。
@@ -180,7 +184,10 @@ class QQAdapter:
 
             # 4. 正常聊天。
             reply, messages_for_history, produced = await self._reply(
-                key, content, is_admin=is_admin
+                key,
+                content,
+                is_admin=is_admin,
+                channel="qq_private" if is_private else "qq_group",
             )
             if produced:
                 if messages_for_history:
@@ -361,10 +368,14 @@ class QQAdapter:
         content: str,
         *,
         is_admin: bool,
+        channel: str,
     ) -> tuple[str, list[ChatMessage], bool]:
         """调用 agent，返回 (要发送的文本, 更新后的历史, 是否产出过正文)。
 
         第三个返回值给额度层用：没产出正文的失败要退款。
+
+        `channel` 只影响人设覆盖层。QQ 里她是在用通讯法阵和人说话，
+        眼前没有书架、没有页面，所以 page_url/page_title 一律传 None。
         """
         history = self._history.get(key, [])
         messages = [*history, ChatMessage(role="user", content=content[:8000])]
@@ -377,6 +388,7 @@ class QQAdapter:
                 page_url=None,
                 page_title=None,
                 is_admin=is_admin,
+                channel=channel,
             ):
                 event_type = event.get("type")
                 if event_type == "delta":

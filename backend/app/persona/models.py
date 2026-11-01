@@ -16,6 +16,7 @@
       "rules": "……检索、跳转和安全边界……",
       "channels": {
         "web": {"overlay": ""},
+        "qq_private": {"overlay": "……私聊额外注意事项……"},
         "qq_group": {"overlay": "……群聊额外注意事项……"}
       },
       "metadata": {"source": "current-web-prompt"}
@@ -26,8 +27,10 @@
 - 图书馆身份放在 core 之后，写成“差事/背景”，避免盖过梅林本人；
 - 规则只负责事实准确和权限，不参与塑造性格。
 
-`channels` 是频道覆盖层。同一份核心人设，网页和 QQ 群可以用不同的
-篇幅、格式和礼仪要求；P1 只用到 `web`，后续接 QQ 时再加 `qq_group`。
+`channels` 是频道覆盖层。同一份核心人设，网页、QQ 私聊、QQ 群可以用不同的
+篇幅、格式和礼仪要求。频道名由调用方传进 `build_system_prompt`：
+网页是 `web`，QQ 私聊是 `qq_private`，QQ 群是 `qq_group`；没有覆盖层的
+频道只是不加这一段，不会报错。
 """
 
 from __future__ import annotations

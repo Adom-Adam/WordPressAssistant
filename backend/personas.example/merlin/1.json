@@ -10,8 +10,11 @@
     "web": {
       "overlay": ""
     },
+    "qq_private": {
+      "overlay": "【QQ 私聊】这里不是图书馆，而是一座通讯法阵：只传声音，看不见对方。不要提图书馆、书架、翻书；一条消息说一件事，两三句就够，不用 Markdown。"
+    },
     "qq_group": {
-      "overlay": "【QQ 群聊】回复要更短，通常不超过两句话；不要使用 Markdown、表格或代码围栏。",
+      "overlay": "【QQ 群聊】同样是一座通讯法阵，一群人共用。回复要更短，通常不超过两句话；不要使用 Markdown、表格或代码围栏。",
       "max_sentences": 2,
       "allow_actions": false
     }

@@ -16,6 +16,7 @@ from app.channels.qq import commands
 from app.channels.qq.adapter import QQAdapter
 from app.config import Settings
 from app.credits import CreditStore, hash_bind_code
+from app.qq_quota import QQUsage
 
 
 def async_test(fn: Any) -> Any:
@@ -71,17 +72,38 @@ def group_event(qq_uin: int, text: str, message_id: int = 1) -> dict[str, Any]:
     }
 
 
-def make_adapter(tmp_path: Any, *, stream: Any = None) -> tuple[QQAdapter, FakeSender, CreditStore]:
+class AllowAllGate:
+    """额度永不拦人，也不计数。
+
+    不注入的话适配器会去创建全局额度门面，读写 `backend/data/quota.sqlite3`
+    这个真实文件；测试跑几轮就会把每人每日额度耗光，然后莫名其妙红掉。
+    """
+
+    def reserve(self, **kwargs: Any) -> tuple[str, Any]:
+        return "ok", QQUsage("admin", None, None)
+
+    def refund(self, usage: Any) -> None:
+        return None
+
+
+def make_adapter(
+    tmp_path: Any, *, stream: Any = None, wp_site_url: str = ""
+) -> tuple[QQAdapter, FakeSender, CreditStore]:
     settings = Settings(
         qq_enabled=True,
         qq_allowed_groups="888",
         qq_admin_users="",
         qq_mock_mode=True,
+        wp_site_url=wp_site_url,
     )
     store = CreditStore(str(tmp_path / "quota.sqlite3"))
     sender = FakeSender()
     adapter = QQAdapter(
-        settings, sender, stream=stream or stream_ok(), credits=store
+        settings,
+        sender,
+        stream=stream or stream_ok(),
+        credits=store,
+        gate=AllowAllGate(),
     )
     return adapter, sender, store
 
@@ -104,6 +126,35 @@ async def test_unbound_private_gets_guide_every_message(tmp_path: Any) -> None:
         commands.PRIVATE_GUIDE,
         commands.PRIVATE_GUIDE,
     ]
+
+
+@async_test
+async def test_private_guide_links_to_configured_site(tmp_path: Any) -> None:
+    """站点地址来自配置，不写死在仓库里。
+
+    仓库按公开处理，真实域名属于部署信息；后端 `.env` 的 WP_SITE_URL
+    本来就要填（知识库同步、站内跳转都用它），引导文案直接复用它。
+    """
+    adapter, sender, _ = make_adapter(tmp_path, wp_site_url="https://example.com/")
+
+    await adapter.handle_event(private_event(10001, "在吗"))
+
+    text = sender.private[0][1]
+    assert "https://example.com/" in text
+    assert ".xyz" not in text
+
+
+@async_test
+async def test_private_guide_without_site_still_makes_sense(tmp_path: Any) -> None:
+    adapter, sender, _ = make_adapter(tmp_path)
+
+    await adapter.handle_event(private_event(10001, "在吗"))
+
+    text = sender.private[0][1]
+    # 没配站点时退化成不带链接的说法，流程本身仍然说得清。
+    assert "「个人资料」" in text
+    assert "/绑定 1234-5678" in text
+    assert "http" not in text
 
 
 @async_test
@@ -137,6 +188,45 @@ async def test_bound_group_reaches_agent(tmp_path: Any) -> None:
 
     assert result["handled"] is True
     assert sender.group == [(888, "我在")]
+
+
+def recording_stream(seen: dict[str, Any], text: str = "我在") -> Any:
+    """记录调用参数的一次流式回答。
+
+    频道名决定了用哪一份人设覆盖层：私聊和群里说话的分寸不一样，
+    所以适配器必须把“在哪说话”告诉 agent，而不是让它一律当成网页。
+    """
+
+    async def _stream(messages: Any, **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        yield {"type": "delta", "content": text}
+
+    return _stream
+
+
+@async_test
+async def test_bound_private_tells_agent_it_is_private(tmp_path: Any) -> None:
+    seen: dict[str, Any] = {}
+    adapter, _, store = make_adapter(tmp_path, stream=recording_stream(seen))
+    bind(store)
+
+    await adapter.handle_event(private_event(10001, "讲个故事"))
+
+    assert seen["channel"] == "qq_private"
+    # QQ 里没有网页可看，页面上下文必须是空的。
+    assert seen["page_url"] is None
+    assert seen["page_title"] is None
+
+
+@async_test
+async def test_bound_group_tells_agent_it_is_group(tmp_path: Any) -> None:
+    seen: dict[str, Any] = {}
+    adapter, _, store = make_adapter(tmp_path, stream=recording_stream(seen))
+    bind(store)
+
+    await adapter.handle_event(group_event(10001, "讲个故事"))
+
+    assert seen["channel"] == "qq_group"
 
 
 @async_test
