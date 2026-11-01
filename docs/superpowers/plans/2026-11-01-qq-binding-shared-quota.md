@@ -603,10 +603,9 @@ def test_bind_wrong_code(store):
     assert dispatch(parse_command("/绑定 8765-4321"), make_ctx(store)) == commands.BIND_INVALID
 
 def test_bind_account_taken(store):
-    store.set_bind_code(7, hash_bind_code("1111-1111"), is_admin=False)
     store.set_bind_code(7, hash_bind_code("3333-3333"), is_admin=False)
-    store.bind_qq("10001", hash_bind_code("1111-1111"))
-    assert dispatch(parse_command("/绑定 3333-3333"), make_ctx(store)) == commands.BIND_ACCOUNT_TAKEN
+    store.bind_qq("10001", hash_bind_code("3333-3333"))
+    assert dispatch(parse_command("/绑定 3333-3333"), make_ctx(store, qq_uin=20002)) == commands.BIND_ACCOUNT_TAKEN
 
 def test_already_bound(store):
     reply = dispatch(parse_command("/绑定 1234-5678"), make_ctx(store, bound_user_id=7))
