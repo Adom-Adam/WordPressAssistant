@@ -109,3 +109,39 @@ def test_member_quota_out_of_range_falls_back(tmp_path) -> None:
     store.path.write_text('{"member_daily_quota": -1}', encoding="utf-8")
 
     assert store.load().member_daily_quota == store.defaults.member_daily_quota
+
+
+def test_qq_defaults(tmp_path) -> None:
+    store = make_store(tmp_path)
+
+    values = store.load()
+
+    assert values.qq_daily_quota == 10
+    assert values.qq_member_daily_quota == 30
+    assert values.qq_global_daily_quota == 0
+    assert values.qq_quota_shared is False
+    assert values.qq_unlimited is False
+
+
+def test_qq_bool_fields_accept_bool_only(tmp_path) -> None:
+    store = make_store(tmp_path)
+
+    updated = store.update({"qq_quota_shared": True, "qq_unlimited": True})
+
+    assert updated.qq_quota_shared is True
+    assert updated.qq_unlimited is True
+    with pytest.raises(ValueError, match="qq_quota_shared"):
+        store.update({"qq_quota_shared": 1})
+
+
+def test_qq_int_ranges(tmp_path) -> None:
+    store = make_store(tmp_path)
+
+    updated = store.update(
+        {"qq_daily_quota": 5, "qq_member_daily_quota": 15, "qq_global_daily_quota": 200}
+    )
+
+    assert (updated.qq_daily_quota, updated.qq_member_daily_quota) == (5, 15)
+    assert updated.qq_global_daily_quota == 200
+    with pytest.raises(ValueError, match="qq_daily_quota"):
+        store.update({"qq_daily_quota": 1001})

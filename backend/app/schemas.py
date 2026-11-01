@@ -51,6 +51,11 @@ class RuntimeSettingsUpdate(BaseModel):
     member_daily_quota: int | None = Field(default=None, ge=0, le=1000)
     global_daily_quota: int | None = Field(default=None, ge=0, le=1_000_000)
     credit_max_per_user: int | None = Field(default=None, ge=0, le=1_000_000)
+    qq_daily_quota: int | None = Field(default=None, ge=0, le=1000)
+    qq_member_daily_quota: int | None = Field(default=None, ge=0, le=1000)
+    qq_global_daily_quota: int | None = Field(default=None, ge=0, le=1_000_000)
+    qq_quota_shared: bool | None = None
+    qq_unlimited: bool | None = None
     agent_max_model_calls: int | None = Field(default=None, ge=1, le=20)
     agent_max_tool_calls: int | None = Field(default=None, ge=1, le=20)
     agent_max_seconds: float | None = Field(default=None, ge=5, le=300)

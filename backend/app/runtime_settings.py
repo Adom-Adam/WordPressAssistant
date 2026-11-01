@@ -61,6 +61,11 @@ class RuntimeSettings:
     agent_max_seconds: float
     model: str
     credit_max_per_user: int
+    qq_daily_quota: int
+    qq_member_daily_quota: int
+    qq_global_daily_quota: int
+    qq_quota_shared: bool
+    qq_unlimited: bool
 
 
 # 每个字段的合法范围。管理员接口和读取文件时都会用同一套规则，
@@ -70,9 +75,14 @@ _INT_RANGES: dict[str, tuple[int, int]] = {
     "member_daily_quota": (0, 1000),
     "global_daily_quota": (0, 1_000_000),
     "credit_max_per_user": (0, 1_000_000),
+    "qq_daily_quota": (0, 1000),
+    "qq_member_daily_quota": (0, 1000),
+    "qq_global_daily_quota": (0, 1_000_000),
     "agent_max_model_calls": (1, 20),
     "agent_max_tool_calls": (1, 20),
 }
+# 布尔字段单独一套规则：bool 是 int 的子类，混进 _INT_RANGES 会被当成整数。
+_BOOL_FIELDS = {"qq_quota_shared", "qq_unlimited"}
 _SECONDS_RANGE = (5.0, 300.0)
 # 模型名只允许常见字符，避免把换行/控制字符带进 HTTP 请求或日志。
 _MODEL_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,100}$")
@@ -88,6 +98,11 @@ def _defaults_from_settings(settings: Settings) -> RuntimeSettings:
         agent_max_seconds=settings.agent_max_seconds,
         model=settings.deepseek_model,
         credit_max_per_user=settings.credit_max_per_user,
+        qq_daily_quota=settings.qq_daily_quota,
+        qq_member_daily_quota=settings.qq_member_daily_quota,
+        qq_global_daily_quota=settings.qq_global_daily_quota,
+        qq_quota_shared=settings.qq_quota_shared,
+        qq_unlimited=settings.qq_unlimited,
     )
 
 
@@ -96,6 +111,11 @@ def _validate(field: str, value: Any) -> Any:
 
     这些错误会出现在管理员接口的 422 响应里，所以提示要能直接看懂。
     """
+    if field in _BOOL_FIELDS:
+        if not isinstance(value, bool):
+            raise ValueError(f"{field} 必须是布尔值")
+        return value
+
     if field in _INT_RANGES:
         if isinstance(value, bool):  # bool 是 int 的子类，要单独拒绝
             raise ValueError(f"{field} 必须是整数")

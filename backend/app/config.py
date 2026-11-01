@@ -122,6 +122,19 @@ class Settings(BaseSettings):
     runtime_settings_path: str = "data/runtime_settings.json"
 
     # ------------------------------------------------------------------
+    # QQ 通道额度
+    # ------------------------------------------------------------------
+    # 下面五项只是“初始默认值”。正式运营请在 WordPress 后台修改，
+    # 值写进 runtime_settings.json 后立即生效，不需要改 .env、不需要重启。
+    qq_daily_quota: int = 10
+    qq_member_daily_quota: int = 30
+    qq_global_daily_quota: int = 0
+    # 开启后 QQ 与网页共用同一份额度；关闭则使用上面这套 QQ 独立额度。
+    qq_quota_shared: bool = False
+    # 只在独立模式生效：打开后按人/按会员额度都不生效，QQ 全站额度仍然生效。
+    qq_unlimited: bool = False
+
+    # ------------------------------------------------------------------
     # 人设文件
     # ------------------------------------------------------------------
     # 人设正文属于“私密内容”，放在 data/ 下（整个 data/ 已被 .gitignore 忽略），
