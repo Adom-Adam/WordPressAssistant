@@ -408,7 +408,12 @@ final class L2D_AI_Users {
 						?>
 					</td>
 					<td><?php echo $backend_ok ? esc_html( (string) $credit ) : '—'; ?></td>
-					<td>—</td>
+					<td>
+						<?php
+						$qq_uin = isset( $profile['qq_uin'] ) ? (string) $profile['qq_uin'] : '';
+						echo '' !== $qq_uin ? esc_html( $qq_uin ) : '—';
+						?>
+					</td>
 					<td>
 						<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="margin-bottom: 8px;">
 							<input type="hidden" name="action" value="l2d_ai_set_tier" />

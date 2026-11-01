@@ -30,6 +30,8 @@ final class L2D_AI_Bind {
 		add_action( 'show_user_profile', array( __CLASS__, 'render_card' ) );
 		add_action( 'admin_post_l2d_ai_bind_refresh', array( __CLASS__, 'handle_refresh' ) );
 		add_action( 'admin_post_l2d_ai_bind_unbind', array( __CLASS__, 'handle_unbind' ) );
+		// 有人被删号时顺手解绑，免得那个 QQ 永远占着“已绑定”。
+		add_action( 'deleted_user', array( __CLASS__, 'handle_deleted_user' ) );
 	}
 
 	// ------------------------------------------------------------------
@@ -213,6 +215,28 @@ final class L2D_AI_Bind {
 		delete_user_meta( $user_id, self::CODE_META );
 		delete_user_meta( $user_id, self::SYNC_META );
 		self::redirect( 'unbound', $user_id );
+	}
+
+	/**
+	 * WordPress 删除用户后，把后端的绑定一并清掉。
+	 *
+	 * 删除动作本身不能被解绑失败阻断（用户已经删了），所以这里只记日志。
+	 * WP-CLI 或非管理员触发的删除不强求同步：后端在下次绑定时会
+	 * 用 qq_taken / account_taken 挡住重复绑定，不会出现两个账号共用一个 QQ。
+	 */
+	public static function handle_deleted_user( $user_id ) {
+		$user_id = (int) $user_id;
+		if ( $user_id <= 0 || ! is_user_logged_in() || ! current_user_can( 'manage_options' ) ) {
+			return;
+		}
+
+		$result = L2D_AI_Plugin::request_backend(
+			'DELETE',
+			'/admin/users/' . $user_id . '/bind'
+		);
+		if ( is_wp_error( $result ) ) {
+			error_log( 'L2D AI 删除用户后解绑 QQ 失败: ' . $result->get_error_message() );
+		}
 	}
 
 	/**
