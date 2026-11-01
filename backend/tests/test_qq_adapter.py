@@ -20,9 +20,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.qq import get_qq_adapter
+from app.channels.qq import commands
 from app.channels.qq.adapter import QQAdapter
 from app.config import Settings, get_settings
 from app.credits import QQBinding, get_credit_store
+from app.qq_quota import QQUsage
 from app.schemas import ChatMessage
 
 
@@ -48,6 +50,16 @@ class AlwaysBound:
 
     def binding_of_qq(self, qq_uin: str) -> QQBinding:
         return QQBinding(user_id=1, tier="user", is_admin=False)
+
+
+class AllowAllGate:
+    """额度永不拦人，也不计数；避免落到真实的额度库。"""
+
+    def reserve(self, **kwargs: Any) -> tuple[str, Any]:
+        return "ok", QQUsage("admin", None, None)
+
+    def refund(self, usage: Any) -> None:
+        return None
 
 
 class FakeSender:
@@ -128,7 +140,8 @@ async def test_at_trigger_replies_in_allowed_group() -> None:
     sender = FakeSender()
     calls: list[dict[str, Any]] = []
     adapter = QQAdapter(
-        make_settings(), sender, stream=make_stream(calls, "你好呀"), credits=AlwaysBound()
+        make_settings(), sender, stream=make_stream(calls, "你好呀"), credits=AlwaysBound(),
+        gate=AllowAllGate(),
     )
 
     result = await adapter.handle_event(make_event("在吗"))
@@ -144,7 +157,8 @@ async def test_group_not_in_allowlist_is_ignored() -> None:
     sender = FakeSender()
     calls: list[dict[str, Any]] = []
     adapter = QQAdapter(
-        make_settings(), sender, stream=make_stream(calls), credits=AlwaysBound()
+        make_settings(), sender, stream=make_stream(calls), credits=AlwaysBound(),
+        gate=AllowAllGate(),
     )
 
     result = await adapter.handle_event(make_event(group_id=999))
@@ -159,7 +173,8 @@ async def test_message_without_at_is_ignored_in_at_mode() -> None:
     sender = FakeSender()
     calls: list[dict[str, Any]] = []
     adapter = QQAdapter(
-        make_settings(), sender, stream=make_stream(calls), credits=AlwaysBound()
+        make_settings(), sender, stream=make_stream(calls), credits=AlwaysBound(),
+        gate=AllowAllGate(),
     )
 
     result = await adapter.handle_event(make_event("在吗", at_bot=False))
@@ -173,7 +188,8 @@ async def test_duplicate_message_id_is_ignored() -> None:
     sender = FakeSender()
     calls: list[dict[str, Any]] = []
     adapter = QQAdapter(
-        make_settings(), sender, stream=make_stream(calls), credits=AlwaysBound()
+        make_settings(), sender, stream=make_stream(calls), credits=AlwaysBound(),
+        gate=AllowAllGate(),
     )
     event = make_event("在吗")
 
@@ -194,6 +210,7 @@ async def test_prefix_trigger_strips_prefix() -> None:
         sender,
         stream=make_stream(calls),
         credits=AlwaysBound(),
+        gate=AllowAllGate(),
     )
 
     result = await adapter.handle_event(make_event("梅林 在吗", at_bot=False))
@@ -207,7 +224,8 @@ async def test_history_is_kept_per_group_and_user() -> None:
     sender = FakeSender()
     calls: list[dict[str, Any]] = []
     adapter = QQAdapter(
-        make_settings(qq_history_turns=2), sender, stream=make_stream(calls), credits=AlwaysBound()
+        make_settings(qq_history_turns=2), sender, stream=make_stream(calls), credits=AlwaysBound(),
+        gate=AllowAllGate(),
     )
 
     await adapter.handle_event(make_event("第一句", message_id=1))
@@ -228,6 +246,7 @@ async def test_admin_user_is_marked_for_prompt() -> None:
         sender,
         stream=make_stream(calls),
         credits=AlwaysBound(),
+        gate=AllowAllGate(),
     )
 
     await adapter.handle_event(make_event(user_id=456))
@@ -236,7 +255,7 @@ async def test_admin_user_is_marked_for_prompt() -> None:
 
 
 @async_test
-async def test_empty_reply_uses_fallback() -> None:
+async def test_empty_reply_uses_agent_error_copy() -> None:
     sender = FakeSender()
 
     async def empty_stream(
@@ -248,11 +267,11 @@ async def test_empty_reply_uses_fallback() -> None:
     ) -> AsyncIterator[dict[str, Any]]:
         yield {"type": "done"}
 
-    adapter = QQAdapter(make_settings(), sender, stream=empty_stream, credits=AlwaysBound())
+    adapter = QQAdapter(make_settings(), sender, stream=empty_stream, credits=AlwaysBound(), gate=AllowAllGate())
     result = await adapter.handle_event(make_event())
 
     assert result["handled"] is True
-    assert sender.sent[0][1] == "我在，但这次没想好怎么回。"
+    assert sender.sent[0][1] == commands.AGENT_ERROR
 
 
 def test_long_reply_is_split_into_multiple_messages() -> None:

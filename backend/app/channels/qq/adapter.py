@@ -35,6 +35,7 @@ from app.channels.qq.client import OneBotError, OneBotTransport
 from app.channels.qq.commands import CommandContext, dispatch, parse_command
 from app.config import Settings
 from app.credits import CreditStore, get_credit_store
+from app.qq_quota import QQQuotaGate, QQUsage, get_qq_quota_gate
 from app.schemas import ChatMessage
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,7 @@ class QQAdapter:
         *,
         stream: Callable[..., AsyncIterator[dict[str, Any]]] = stream_reply,
         credits: CreditStore | None = None,
+        gate: QQQuotaGate | None = None,
     ) -> None:
         self.settings = settings
         self.sender = sender
@@ -77,6 +79,8 @@ class QQAdapter:
         # 绑定关系存在额度库里。可注入是为了测试用一个临时数据库，
         # 生产不传时惰性取全局实例（导入时就建库会让 --help 之类也写文件）。
         self.credits = credits
+        # 额度门面同理：测试注入固定参数的门面，生产惰性取全局实例。
+        self.gate = gate
 
         # (群号, QQ 号) -> 最近几轮消息。只在内存里，进程重启就清空。
         # 这是有意的：在账号绑定/关系记忆做好之前，不假装自己有长期记忆。
@@ -158,12 +162,33 @@ class QQAdapter:
                 guide = commands.PRIVATE_GUIDE if is_private else commands.GROUP_GUIDE
                 return await self._send(incoming, guide, reason="guide_unbound")
 
-            # 3. 已绑定（或在白名单里）：正常聊天。
-            reply, messages_for_history, _ = await self._reply(
+            # 3. 额度：管理员不计数；用尽时回固定文案，不调模型。
+            status, usage = self._reserve(
+                qq_uin=str(incoming.user_id),
+                user_id=binding.user_id if binding else None,
+                tier=binding.tier if binding else "user",
+                is_admin=is_admin,
+            )
+            if status == "user_exhausted":
+                return await self._send(
+                    incoming, commands.QUOTA_USER, reason="quota_exhausted"
+                )
+            if status == "global_exhausted":
+                return await self._send(
+                    incoming, commands.QUOTA_GLOBAL, reason="quota_exhausted"
+                )
+
+            # 4. 正常聊天。
+            reply, messages_for_history, produced = await self._reply(
                 key, content, is_admin=is_admin
             )
-            if messages_for_history:
-                self._history[key] = messages_for_history
+            if produced:
+                if messages_for_history:
+                    self._history[key] = messages_for_history
+            else:
+                # 没产出正文（模型报错/断流）：这次不算，退款，也别污染上下文。
+                self._refund(usage)
+                reply = commands.AGENT_ERROR
 
             return await self._send(incoming, reply)
 
@@ -194,6 +219,39 @@ class QQAdapter:
             result["send_error"] = "unexpected_error"
 
         return result
+
+    # ------------------------------------------------------------------
+    # 额度
+    # ------------------------------------------------------------------
+    def _quota_gate(self) -> QQQuotaGate:
+        """惰性取额度门面；导入时就建库会让 --help 之类也写文件。"""
+        if self.gate is None:
+            self.gate = get_qq_quota_gate()
+        return self.gate
+
+    def _reserve(
+        self, *, qq_uin: str, user_id: int | None, tier: str, is_admin: bool
+    ) -> tuple[str, QQUsage | None]:
+        """占一次额度；返回 (状态, 可用于退款的凭据)。
+
+        额度库出错时放行而不是拦人：配额是防滥用，不是可用性的前提。
+        """
+        try:
+            return self._quota_gate().reserve(
+                qq_uin=qq_uin, user_id=user_id, tier=tier, is_admin=is_admin
+            )
+        except Exception:  # noqa: BLE001 - 额度故障不该让聊天整体不可用
+            logger.exception("QQ 额度预占失败，本次放行")
+            return "ok", None
+
+    def _refund(self, usage: QQUsage | None) -> None:
+        """没产出正文就退回这次占用的额度。"""
+        if usage is None:
+            return
+        try:
+            self._quota_gate().refund(usage)
+        except Exception:  # noqa: BLE001 - 退款失败只影响计数，不影响回复
+            logger.exception("QQ 额度退款失败")
 
     # ------------------------------------------------------------------
     # 解析
