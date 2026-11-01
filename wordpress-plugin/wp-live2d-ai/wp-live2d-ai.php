@@ -1006,6 +1006,9 @@ final class L2D_AI_Plugin {
 			'daily_quota'           => array( 0, 1000 ),
 			'member_daily_quota'    => array( 0, 1000 ),
 			'global_daily_quota'    => array( 0, 1000000 ),
+			'qq_daily_quota'        => array( 0, 1000 ),
+			'qq_member_daily_quota' => array( 0, 1000 ),
+			'qq_global_daily_quota' => array( 0, 1000000 ),
 			'credit_max_per_user'   => array( 0, 1000000 ),
 			'agent_max_model_calls' => array( 1, 20 ),
 			'agent_max_tool_calls'  => array( 1, 20 ),
@@ -1026,6 +1029,11 @@ final class L2D_AI_Plugin {
 			}
 			$patch[ $key ] = $value;
 		}
+
+		// 布尔项每次都要显式发送：只提交有值的字段时，取消勾选不会生效。
+		// 未勾选的复选框在 POST 里根本不存在，所以只能按“存在即 true”处理。
+		$patch['qq_quota_shared'] = ! empty( $_POST['qq_quota_shared'] );
+		$patch['qq_unlimited']    = ! empty( $_POST['qq_unlimited'] );
 
 		$model = isset( $_POST['model'] ) ? trim( (string) wp_unslash( $_POST['model'] ) ) : '';
 		if ( ! preg_match( '/^[A-Za-z0-9._:-]{1,100}$/', $model ) ) {
@@ -1465,6 +1473,112 @@ final class L2D_AI_Plugin {
 									所有普通用户合计的每日上限，用来防止额度被刷爆；管理员聊天不计入。
 									<strong>设为 <code>0</code> 表示不限制。</strong>
 									当前默认：<?php echo esc_html( $get( $defaults, 'global_daily_quota', '—' ) ); ?>。
+								</p>
+							</td>
+						</tr>
+						<tr>
+							<th colspan="2">
+								<h2 style="margin:16px 0 4px;">QQ 通道</h2>
+								<p class="description" style="margin:0;">
+									这一组只影响 QQ 里和梅林聊天。网页端的额度在上面。
+								</p>
+							</th>
+						</tr>
+						<tr>
+							<th scope="row">额度计法</th>
+							<td>
+								<label>
+									<input
+										type="checkbox"
+										name="qq_quota_shared"
+										value="1"
+										<?php checked( '1', (string) $get( $settings, 'qq_quota_shared', false ) ); ?>
+									/>
+									与网页共用每日额度
+								</label>
+								<p class="description">
+									勾选后 QQ 用网页那套额度（普通用户 / 会员每日额度，外加全站总额度）；<strong>不勾选</strong>则使用下面这组 QQ 独立额度。
+								</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-qq-quota">QQ 每人每日额度</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-qq-quota"
+									name="qq_daily_quota"
+									value="<?php echo esc_attr( $get( $settings, 'qq_daily_quota', 10 ) ); ?>"
+									min="0"
+									max="1000"
+									step="1"
+									class="small-text"
+								/>
+								条 / 天
+								<p class="description">
+									每个 QQ 每天最多聊几次；<code>0</code> 表示普通绑定用户当天不能聊。共享模式下此项不生效。
+								</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-qq-member-quota">QQ 会员每日额度</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-qq-member-quota"
+									name="qq_member_daily_quota"
+									value="<?php echo esc_attr( $get( $settings, 'qq_member_daily_quota', 30 ) ); ?>"
+									min="0"
+									max="1000"
+									step="1"
+									class="small-text"
+								/>
+								条 / 天
+								<p class="description">
+									绑定账号是会员时用这一档。共享模式下此项不生效。
+								</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-qq-global-quota">QQ 全站每日总额度</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-qq-global-quota"
+									name="qq_global_daily_quota"
+									value="<?php echo esc_attr( $get( $settings, 'qq_global_daily_quota', 0 ) ); ?>"
+									min="0"
+									max="1000000"
+									step="1"
+									class="small-text"
+								/>
+								条 / 天
+								<p class="description">
+									所有 QQ 合计的每日上限，<strong>两种模式下都生效</strong>，防止有人拿一堆号刷。
+									<code>0</code> 表示不限。管理员不计入。
+								</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">QQ 不限量</th>
+							<td>
+								<label>
+									<input
+										type="checkbox"
+										name="qq_unlimited"
+										value="1"
+										<?php checked( '1', (string) $get( $settings, 'qq_unlimited', false ) ); ?>
+									/>
+									忽略按人 / 按会员额度
+								</label>
+								<p class="description">
+									勾选后每个 QQ 都能一直聊，但“QQ 全站每日总额度”仍然生效——留一个总闸，避免完全失控。共享模式下此项不生效。
 								</p>
 							</td>
 						</tr>
