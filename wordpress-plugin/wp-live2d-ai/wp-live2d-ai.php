@@ -16,6 +16,8 @@ defined( 'ABSPATH' ) || exit;
 // 只有“有人注册”这一条链路会走到，放在主文件里会让主文件更难读。
 require_once __DIR__ . '/includes/class-l2d-ai-guard.php';
 require_once __DIR__ . '/includes/class-l2d-ai-users.php';
+// QQ 绑定：个人资料页的绑定卡片（绑定码、刷新、解绑）。
+require_once __DIR__ . '/includes/class-l2d-ai-bind.php';
 
 final class L2D_AI_Plugin {
 
@@ -62,6 +64,8 @@ final class L2D_AI_Plugin {
 		L2D_AI_Guard::init();
 		// 用户与额度：后台查看用户、调整等级、发额度、生成兑换码。
 		L2D_AI_Users::init();
+		// QQ 绑定：个人资料页的绑定卡片。
+		L2D_AI_Bind::init();
 	}
 
 	/**
@@ -835,6 +839,61 @@ final class L2D_AI_Plugin {
 			return $token;
 		}
 
+		return self::backend_request_with_token( $token, $method, $path, $body );
+	}
+
+	/**
+	 * 以“某个普通用户”的身份调用后端接口（目前只有 QQ 绑定用到）。
+	 *
+	 * 为什么要单独签一个 token：绑定码属于用户自己的数据，不能借用
+	 * 管理员 token——后端会把 admin 写进档案，等于给所有绑定用户开无限额度。
+	 */
+	public static function user_backend_request( $user_id, $method, $path, $body = null ) {
+		$token = self::user_token( (int) $user_id );
+		if ( is_wp_error( $token ) ) {
+			return $token;
+		}
+
+		return self::backend_request_with_token( $token, $method, $path, $body );
+	}
+
+	/**
+	 * 给指定用户签一个短时 JWT，与 issue_token() 同构，但用户可以不是当前用户。
+	 * `admin` 取自该用户的真实角色，后端据此决定是否计额度。
+	 */
+	private static function user_token( $user_id ) {
+		$secret = self::jwt_secret();
+		if ( is_wp_error( $secret ) ) {
+			return $secret;
+		}
+
+		$user = get_userdata( $user_id );
+		if ( ! $user instanceof WP_User ) {
+			return new WP_Error( 'l2d_ai_no_user', '找不到该用户', array( 'status' => 404 ) );
+		}
+
+		$now = time();
+
+		return self::encode_jwt(
+			array(
+				'iss'   => self::JWT_ISSUER,
+				'aud'   => self::JWT_AUDIENCE,
+				'sub'   => (string) $user->ID,
+				'name'  => (string) $user->display_name,
+				'admin' => user_can( $user->ID, 'manage_options' ),
+				'iat'   => $now,
+				'exp'   => $now + self::JWT_TTL,
+				'jti'   => wp_generate_uuid4(),
+			),
+			$secret
+		);
+	}
+
+	/**
+	 * 带着已签好的 token 调后端。成功返回数组，失败返回 WP_Error。
+	 * 错误信息会带上 HTTP 状态码和后端的 detail，方便在设置页直接看到原因。
+	 */
+	private static function backend_request_with_token( $token, $method, $path, $body = null ) {
 		$args = array(
 			'method'  => $method,
 			'timeout' => 8,
@@ -881,6 +940,12 @@ final class L2D_AI_Plugin {
 				sprintf( 'AI 服务返回 %d%s', $code, '' !== $detail ? '：' . $detail : '' ),
 				array( 'status' => $code )
 			);
+		}
+
+		// 204 只有状态码没有响应体（绑定、解绑都是这样）。空体即成功，
+		// 不能因为 json_decode('') 得到 null 就判成失败。
+		if ( '' === trim( $raw ) ) {
+			return array();
 		}
 
 		if ( ! is_array( $data ) ) {
