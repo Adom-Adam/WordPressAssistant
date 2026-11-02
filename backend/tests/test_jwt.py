@@ -44,6 +44,7 @@ def make_token(
     exp_delta: int = 900,
     include_exp: bool = True,
     algorithm: str = "HS256",
+    transfer_from: object = None,
 ) -> str:
     """签一个测试 token。
 
@@ -61,6 +62,8 @@ def make_token(
     }
     if include_exp:
         payload["exp"] = now + exp_delta
+    if transfer_from is not None:
+        payload["transfer_from"] = transfer_from
 
     key: str | None = secret if algorithm != "none" else None
     return jwt.encode(payload, key, algorithm=algorithm)
@@ -79,6 +82,20 @@ def test_admin_claim_is_boolean_only() -> None:
 
     # 字符串 "true" 不能被当成管理员，否则只要改一个类型就能提权。
     assert verify_token(make_token(admin="true"), make_settings()).is_admin is False
+
+
+def test_transfer_from_is_normalized() -> None:
+    user = verify_token(
+        make_token(transfer_from=[11, "12", 11, 0, -1, True, 42]),
+        make_settings(),
+    )
+
+    # 去重、排除非法值和当前用户自己。
+    assert user.transfer_from == (11, 12)
+
+
+def test_transfer_from_absent_is_empty() -> None:
+    assert verify_token(make_token(), make_settings()).transfer_from == ()
 
 
 def test_expired_token_is_rejected() -> None:

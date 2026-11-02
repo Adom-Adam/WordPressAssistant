@@ -3,7 +3,7 @@
 运行方式（在 backend/ 目录下）：
 
     uv run python -m app.kb.sync
-    uv run python -m app.kb.sync --site https://374969782.xyz
+    uv run python -m app.kb.sync --site https://example.com
     uv run python -m app.kb.sync --no-vision   # 不调用视觉模型，只索引现有文字/alt
 
 同步流程：
@@ -53,7 +53,7 @@ def _candidate_endpoints(site_url: str) -> list[tuple[str, dict[str, str]]]:
     2. /index.php/wp-json/wp/v2/posts      —— 没开 rewrite 但 index.php 可用；
     3. /?rest_route=/wp/v2/posts           —— 完全依赖 query 参数。
 
-    本项目实际测试的站点 374969782.xyz 属于第 2/3 种：
+    本项目实际测试的站点属于第 2/3 种：
     直接访问 /wp-json/ 会被 Nginx 返回 404，但另外两种正常。
     """
 

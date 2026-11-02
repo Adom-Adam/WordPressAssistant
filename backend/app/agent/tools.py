@@ -126,7 +126,7 @@ def navigate_to_article(url: str, label: str = "") -> tuple[str, dict | None]:
     只允许本站地址；外部链接会被拒绝。
 
     Args:
-        url: 文章完整地址，例如 https://374969782.xyz/archives/152/，
+        url: 文章完整地址，例如 https://example.com/archives/152/，
              也可以传站内路径 /archives/152/。
         label: 按钮文字，例如“打开 DDS 那篇”。不传就用默认文字。
     """

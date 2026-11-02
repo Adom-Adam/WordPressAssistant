@@ -190,9 +190,14 @@ curl -s https://你的域名/ai-api/health
 
 ### 4.2 QQ 通道与绑定（可选）
 
+> 完整流程（NapCat 登录、OneBot 一进一出配置、绑定与额度、通讯法阵人设）见
+> [tutorial.md](tutorial.md) 第 11 节，这里只列部署要点。
+
 QQ 通道默认关闭。开启前先在后端 `.env` 里配好 `QQ_ENABLED=true`、
-`QQ_ONEBOT_BASE_URL`、`QQ_EVENT_TOKEN`、`QQ_ALLOWED_GROUPS`，并在 NapCat 里把
-事件回调指到 `https://<域名>/ai-api/channels/qq/events`（带同上的 token）。
+`QQ_ONEBOT_BASE_URL`、`QQ_ONEBOT_TOKEN`、`QQ_EVENT_TOKEN`、`QQ_ALLOWED_GROUPS`，
+并在 NapCat 里把事件回调指到 `http://127.0.0.1:18080/api/channels/qq/events`。
+注意两个 token 不是同一个：`QQ_ONEBOT_TOKEN` 是后端调 NapCat 用，
+`QQ_EVENT_TOKEN` 是 NapCat 推事件用；两个地址都只走本机，不要开公网端口。
 
 **关于额度参数：**
 

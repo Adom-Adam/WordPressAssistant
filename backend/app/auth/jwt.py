@@ -96,6 +96,9 @@ class AuthUser:
     id: int
     name: str
     is_admin: bool
+    # 注销后重新注册时，WordPress 会签一个专用短时 token，把旧账号 ID
+    # 放在这个 claim 里。普通聊天 token 永远为空；后端只信签名，不信请求体。
+    transfer_from: tuple[int, ...] = ()
 
 
 def verify_token(token: str, settings: Settings | None = None) -> AuthUser:
@@ -174,4 +177,34 @@ def verify_token(token: str, settings: Settings | None = None) -> AuthUser:
     raw_name = payload.get("name")
     name = str(raw_name).strip()[:100] if raw_name else ""
 
-    return AuthUser(id=user_id, name=name, is_admin=is_admin)
+    # 7. transfer_from 只接受“旧用户 ID”列表，最多 20 个。
+    #    它是登录凭证的一部分，已经过签名校验；请求参数里的旧 ID 一律不信。
+    transfer_from = _parse_transfer_from(payload.get("transfer_from"), user_id)
+
+    return AuthUser(
+        id=user_id,
+        name=name,
+        is_admin=is_admin,
+        transfer_from=transfer_from,
+    )
+
+
+def _parse_transfer_from(raw: object, current_user_id: int) -> tuple[int, ...]:
+    """把 token 里的 transfer_from 归一成去重后的正整数元组。"""
+    if raw is None:
+        return ()
+    items = raw if isinstance(raw, list) else [raw]
+
+    result: list[int] = []
+    for item in items[:20]:
+        # bool 是 int 的子类，True 不能被当成用户 1。
+        if isinstance(item, bool):
+            continue
+        try:
+            user_id = int(item)
+        except (TypeError, ValueError):
+            continue
+        if user_id <= 0 or user_id == current_user_id or user_id in result:
+            continue
+        result.append(user_id)
+    return tuple(result)

@@ -917,7 +917,7 @@ WordPress 侧按宝塔的数据库 + 站点备份策略走。
 4. 旧 token 立即失效，用户刷新页面即可换新；
 5. 如果只改了其中一处，所有聊天请求都会返回 401。
 
-### 12.5 QQ / NapCat 接入（实验性，默认关闭）
+### 12.5 QQ / NapCat 接入（默认关闭）
 
 这一节是**实测走通之后**整理的，包含了踩过的坑。QQ 通道默认关闭，
 不配置它，网页聊天完全不受影响。
@@ -1040,8 +1040,9 @@ QQ_TRIGGER=at
 
 用 `openssl rand -hex 32` 各自生成一个。`.env` 改成 `600`，属主 `l2dai`。
 
-**最容易踩的坑**：NapCat 的反向 HTTP 客户端**不发送 `Authorization: Bearer`**，
-它对请求体做 HMAC-SHA1 后放在 `X-Signature: sha1=<hex>` 头里：
+**容易踩的坑**：不同版本/配置下，NapCat 反向 HTTP 客户端的鉴权方式不完全一样。
+当前 4.18.41 的打包代码会把 token 放进 `Authorization: Bearer <token>`，
+同时也支持对请求体做 HMAC-SHA1 后放在 `X-Signature: sha1=<hex>` 头里：
 
 ```js
 createHmac("sha1", token).update(body).digest("hex")
@@ -1049,10 +1050,12 @@ createHmac("sha1", token).update(body).digest("hex")
 
 所以：
 
-- 后端必须支持签名校验（`app/api/qq.py` 已经支持），并且要用**原始请求体**验证——
-  先 `request.json()` 再序列化，空格和键序会变，签名必然对不上；
-- 排查时**不要用 `curl -H "Authorization: Bearer <token>"` 来判断链路是否通**。
-  它返回 204 只能证明后端认得你手写的 header，证明不了 NapCat 发的东西能过。
+- 后端两种都接受（`app/api/qq.py`），不必为了迁就某一端改鉴权方案；
+- 如果走签名，必须用**原始请求体**验证——先 `request.json()` 再序列化，
+  空格和键序会变，签名必然对不上；
+- 排查时 `curl -H "Authorization: Bearer <token>"` 返回 204
+  只能证明后端认得你手写的 header，证明不了 NapCat 发的东西能过。
+  真正的验收是 12.5.8 的日志加群里的实际回复。
 
 #### 12.5.8 验收：看状态码，别猜
 
@@ -1078,10 +1081,14 @@ journalctl -u l2d-ai-backend --since "-5min" --no-pager | grep -E "channels/qq|s
 
 #### 12.5.9 已知边界
 
-- **只处理群聊文本**：私聊、图片、表情、CQ 码字符串都忽略；
-- 不经过网页的每日额度，也**没有内容审核**，所以不能直接接到生产群；
-- 没有账号绑定和长期记忆，短期历史只在内存里，重启即清空；
-- 人设的频道覆盖层（`channels.qq_group`）还没接到适配器，QQ 和网页现在共用一份提示词。
+- **只处理文本消息**：图片、表情、CQ 码字符串忽略；私聊和群聊都接；
+- 私聊要先绑定（`/绑定 1234-5678`），群聊只回白名单群，且按 `QQ_TRIGGER` 判断触发；
+- 额度有两种模式（与网页共享 / QQ 独立），在 WordPress 后台切换，**全站每日总额度始终生效**；
+- 仍然**没有内容审核**，开生产群前建议先补；
+- 短期历史只在内存里，进程重启即清空；
+- 人设已按频道区分（`channels.qq_private` / `channels.qq_group`，`8e54cd4` 起），
+  但服务器上的人设目录不在 Git 里，升级时要把新的版本文件单独传上去
+  （写法见 [tutorial.md](tutorial.md) 11.9 节）。
 
 > 启动 NapCat、修改它的配置、把它指向后端，都属于服务器运行状态变更，
 > 需要先征得同意再动。
@@ -1112,6 +1119,7 @@ journalctl -u l2d-ai-backend --since "-5min" --no-pager | grep -E "channels/qq|s
 | 16 | 时区 | `timedatectl` | 建议 `Asia/Shanghai` |
 | 17 | 备份 | 宝塔 + `/opt/l2d-ai` | 升级前先备份 `.env` 和 `data/` |
 | 18 | 后台运营参数 | 设置 → Live2D 小助手 | 首次保存后自动生成 `data/runtime_settings.json`，不要手改 |
+| 19 | SMTP 与验证邮件 | WP Mail SMTP / FluentSMTP | 465/SSL，Send Test Email 成功后再开放注册；否则验证邮件和找回密码都发不出 |
 
 ---
 
@@ -1129,6 +1137,8 @@ journalctl -u l2d-ai-backend --since "-5min" --no-pager | grep -E "channels/qq|s
 | 插件能读不能更新 | 插件目录/`assets` 属主是 root | `chown -R www:www` 插件目录 |
 | 登录后仍是登录门 | 页面缓存把访客 HTML 发给了登录用户 | 缓存插件按登录 Cookie 排除 |
 | 登录后聊天 401 | 两处 JWT 密钥不一致、token 过期、服务器时间偏差 | 对比密钥长度/内容；`timedatectl` 校时；刷新页面换 token |
+| 打开小助手提示“请先验证邮箱” | 账号邮箱未验证 | 到个人资料页点「重新发送验证邮件」；SMTP 不通时管理员可手动标记已验证 |
+| 注册后收不到验证邮件 | SMTP 没配、被拒或进了垃圾箱 | 在邮件插件点 Send Test Email；查垃圾箱；后台出现发送失败提示时检查 SMTP 账号/授权码/端口 |
 | 聊天 503 | 后端 `.env` 没有 `L2D_AI_JWT_SECRET` 或短于 32 字符 | 补齐后重启；看 `/api/health` 的 `auth_configured` |
 | 聊天 429（个人） | 当天个人额度用完 | 正常行为；等零点重置，或后台调高“普通用户每日额度” |
 | 聊天 429（全站） | 当天全站总额度用完 | 正常行为；等零点重置，或后台调高/清零“全站每日总额度” |

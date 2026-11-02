@@ -4,12 +4,15 @@
 **前端只负责展示与交互，AI 逻辑全部在后端**，通过一个轻量 WordPress 插件接入，不改主题、不动 WordPress 核心。
 
 ```
-浏览器
-  ├─ Live2D 形象 + 对话/语音/换模型 UI      ← frontend（Vite + TypeScript + PixiJS）
-  └─ fetch /ai-api/chat （SSE 流式）
-        └─ Python AI 服务                  ← backend（FastAPI + LangChain + DeepSeek）
-              ├─ 站内知识库（SQLite FTS5，含图片描述）
-              └─ 检索 / 来源卡片 / 跳转工具
+浏览器                                   QQ（可选）
+  │ Live2D 形象 + 对话/语音              │ OneBot 11（NapCat 负责 QQ 在线）
+  │ fetch /ai-api/chat（SSE 流式）       │
+  └────────────┬────────────────────────┘
+               ▼
+        Python AI 服务（FastAPI + LangChain + DeepSeek）
+               ├─ 站内知识库（SQLite FTS5，含图片描述）
+               ├─ 检索 / 来源卡片 / 跳转工具
+               └─ QQ 通道适配器（收事件 / 调 NapCat 发消息）
 ```
 
 ## 目录
@@ -21,7 +24,7 @@
 | [wordpress-plugin/wp-live2d-ai/](wordpress-plugin/wp-live2d-ai/) | WordPress 插件：加载构建产物、注入配置、设置页 |
 | [docs/architecture.md](docs/architecture.md) | 技术架构与知识库/工具设计 |
 | [docs/knowledge-base.md](docs/knowledge-base.md) | 知识库原理：FTS5、中文分词、图片理解、检索与引用 |
-| [docs/tutorial.md](docs/tutorial.md) | 教学教程：全部命令、搭建顺序、注册/登录/SMTP 与踩坑记录 |
+| [docs/tutorial.md](docs/tutorial.md) | 教学教程：全部命令、搭建顺序、注册/登录/SMTP、QQ 通道与踩坑记录 |
 | [docs/deploy.md](docs/deploy.md) | 部署概览（简版：宝塔 + Nginx + systemd） |
 | [docs/deployment-walkthrough.md](docs/deployment-walkthrough.md) | **从零部署实操**：服务器手动设置清单、JWT 密钥对齐、systemd/Nginx、插件上传与验证、排查 |
 
@@ -129,6 +132,10 @@ uv run pytest -q               # 认证、额度、防循环测试（不调用�
 不会上传到 GitHub。格式和版本切换见
 [backend/personas.example/README.md](backend/personas.example/README.md)。
 
+同一份人设可以按频道加覆盖层：`web`、`qq_private`、`qq_group` 各写一段，
+用 `channel` 参数选中——所以网页里是图书馆管理员，QQ 里是隔着通讯法阵说话的人。
+原因和写法见 [docs/tutorial.md](docs/tutorial.md) 的 11.9 节。
+
 QQ 通道默认关闭。本地没有 NapCat 时，用 `backend/scripts/mock_onebot.py`
 和 `backend/scripts/qq_simulate.py` 降级联调，步骤见
 [backend/README.md](backend/README.md) 的“QQ 通道”一节。
@@ -195,11 +202,19 @@ pnpm build
 - [x] 全站每日额度改为硬上限：每日与额外额度都计入，满了谁都停
 - [x] WordPress 后台「用户与额度」页：用户档案、改等级、发额度、生成兑换码
 - [x] 注册防护：邮箱域名黑名单 + 同一 IP 频率限制 + 拦截记录
+- [x] 注册用户名支持汉字（官方过滤器放行，不改 WordPress 核心）
+- [x] 账号自助：用户改用户名、注销账号；同邮箱重新注册时继承额度（每日已用/额外额度/会员）
+- [x] 注册邮箱验证：未验证不能用小助手、生成 QQ 绑定码或继承额度；老用户升级时自动放行
 - [x] 聊天面板额度条显示额外额度，并带兑换入口
 - [x] 代码块按纯文本渲染（不引入 Markdown 解析器，避免 XSS）
-- [x] QQ OneBot 薄适配器 + 本地 mock（实验性，默认关闭）
-- [x] 服务器 NapCat 连通性验证（2026-10-30：实测群内 @ 可正常回复）
-- [ ] QQ 通道生产接入（独立额度、内容审核、账号绑定，缺一不可）
+- [x] QQ OneBot 11 适配器 + 本地 mock（默认关闭，`.env` 里 `QQ_ENABLED=true` 才启用）
+- [x] NapCat 生产接入：私聊/群聊收发、@ 触发、去重、短期对话历史
+- [x] QQ 斜杠命令系统（`/绑定`、`/帮助`，注册表可扩展，命令永不进模型）
+- [x] QQ ↔ WordPress 账号绑定（个人资料页绑定码、手动刷新、网页端解绑）
+- [x] QQ 未绑定引导（群里只提示去私聊，私聊每条消息回一次，从不主动打扰）
+- [x] QQ 额度两种模式：与网页共享 / QQ 独立（每人、会员、全站），后台开关即时生效
+- [x] QQ 频道人设覆盖层：网页里是图书馆，QQ 里是「通讯法阵」
+- [ ] QQ 内容审核（敏感词、图片），开群前建议补上
 - [ ] 上传图片找相似图（CLIP / 向量检索）
 - [ ] AI 语音播报（TTS）
 - [ ] 语音打断（连续收音 + 停止播报 + 取消请求）
@@ -231,15 +246,14 @@ pnpm build
 只增加平台适配层。需要先解决身份映射、独立额度、群聊礼仪和内容审核，
 详见后续设计讨论。
 
-### QQ 账号绑定与主动消息（设想）
+### QQ 主动消息（设想）
 
-- **账号绑定**：WordPress 用户 ID 是现成的唯一标识，但对外使用单独的随机“馆内编号”，
-  避免暴露连续的用户 ID。已登录用户在博客里生成一次性绑定码，再在 QQ 私聊里发给梅林；
-  未绑定的 QQ 不进入对话，只收到绑定提示。绑定后网页与 QQ 共用同一份关系状态和记忆，
-  梅林才能认出“这是同一个人”。
-- **主动消息**：技术上可以通过 OneBot 主动发送私聊/群消息，但必须先有绑定关系、
-  明确的接收意愿、频率上限、静默时段和退订方式；群聊还需要群主同意。
-  该能力风险较高，等绑定和记忆稳定后再单独设计，不随 QQ 通道一起上线。
+账号绑定已经上线：用户在个人资料页拿绑定码，QQ 私聊 `/绑定 1234-5678` 即可，
+换绑必须先回网页端解绑（详见 [docs/tutorial.md](docs/tutorial.md) 第 11 节）。
+
+剩下的只有**主动消息**：技术上可以用 OneBot 主动发私聊/群消息，但必须先有绑定关系、
+明确的接收意愿、频率上限、静默时段和退订方式；群聊还需要群主同意。
+风险较高，等绑定稳定运行一段时间后再单独设计。
 
 ## 说明
 

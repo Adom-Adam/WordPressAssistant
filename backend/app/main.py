@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.admin import router as admin_router
 from app.api.admin_users import router as admin_users_router
 from app.api.chat import router as chat_router
+from app.api.me_account import router as me_account_router
 from app.api.me_bind import router as me_bind_router
 from app.api.qq import router as qq_router
 from app.api.quota import router as quota_router
@@ -84,6 +85,8 @@ app.include_router(chat_router, prefix="/api")
 app.include_router(quota_router, prefix="/api")
 # 用户自己的 QQ 绑定：同步绑定码、查询、解绑。
 app.include_router(me_bind_router, prefix="/api")
+# 注销后重新注册：把旧账号的额度并到当前账号。
+app.include_router(me_account_router, prefix="/api")
 # 兑换码：登录用户可用，兑换额外额度或会员天数。
 app.include_router(redeem_router, prefix="/api")
 # 管理接口需要 JWT 里的 admin=true，普通用户访问会得到 403。

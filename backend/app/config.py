@@ -187,7 +187,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # 站内知识库
     # ------------------------------------------------------------------
-    # WordPress 站点地址，例如 https://374969782.xyz。
+    # WordPress 站点地址，例如 https://example.com。
     # 同步脚本会依次尝试 /wp-json/、/index.php/wp-json/ 和 ?rest_route= 三种入口，
     # 兼容没有配置伪静态的站点。
     wp_site_url: str = ""

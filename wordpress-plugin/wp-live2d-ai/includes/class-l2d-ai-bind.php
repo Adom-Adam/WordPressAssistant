@@ -52,6 +52,21 @@ final class L2D_AI_Bind {
 
 		$state = L2D_AI_Plugin::user_backend_request( $user_id, 'GET', '/me/bind' );
 		$qq    = self::bound_qq( $state );
+
+		// 未验证邮箱不生成新绑定码；已经绑过的仍然显示，允许用户解绑。
+		$verified = ! class_exists( 'L2D_AI_Email_Verification' )
+			|| L2D_AI_Email_Verification::is_verified( $user_id );
+		if ( ! $verified && '' === $qq ) {
+			?>
+			<h2>QQ 绑定</h2>
+			<div class="l2d-ai-bind-card" style="max-width:640px;padding:16px 20px;border:1px solid #dcdcde;border-radius:8px;background:#fff;">
+				<p style="margin:0;color:#b32d2e;">
+					<?php echo esc_html( '请先在「邮箱验证」里完成验证，再生成绑定码。' ); ?>
+				</p>
+			</div>
+			<?php
+			return;
+		}
 		?>
 		<h2>QQ 绑定</h2>
 		<div class="l2d-ai-bind-card" style="max-width:640px;padding:16px 20px;border:1px solid #dcdcde;border-radius:8px;background:#fff;">
@@ -85,6 +100,9 @@ final class L2D_AI_Bind {
 			$text = '已解绑。这个 QQ 现在和账号没有关系了。';
 		} elseif ( 'error' === $status ) {
 			$text  = '操作没有完成，请稍后再试一次。';
+			$color = '#b32d2e';
+		} elseif ( 'unverified' === $status ) {
+			$text  = '请先完成邮箱验证，再生成绑定码。';
 			$color = '#b32d2e';
 		}
 		if ( '' === $text ) {
@@ -184,6 +202,13 @@ final class L2D_AI_Bind {
 
 	public static function handle_refresh() {
 		$user_id = self::authorize_request();
+
+		if (
+			class_exists( 'L2D_AI_Email_Verification' )
+			&& ! L2D_AI_Email_Verification::is_verified( $user_id )
+		) {
+			self::redirect( 'unverified', $user_id );
+		}
 
 		$code = self::generate_code();
 		update_user_meta( $user_id, self::CODE_META, $code );

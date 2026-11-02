@@ -684,7 +684,7 @@ location /ai-api/ {
 在 `backend/.env` 里补上站点地址（其余有默认值）：
 
 ```dotenv
-WP_SITE_URL=https://374969782.xyz
+WP_SITE_URL=https://example.com
 DEEPSEEK_MODEL=deepseek-flash
 VISION_ENABLED=true
 VISION_MODEL=deepseek-flash
@@ -842,8 +842,42 @@ curl -sN -X POST http://127.0.0.1:18080/api/chat \
 注意：
 
 - 如果注册页提示“注册已关闭”，先检查上面的会员资格是否保存成功，再检查缓存插件是否缓存了旧页面；
-- 开放公开注册前，建议同时准备邮箱验证或验证码，否则很容易收到垃圾账号；
+- 开放公开注册前，先把邮箱验证跑通（见 10.9）；注册防护只能挡住一部分批量注册，
+  不能证明邮箱属于注册者；
 - 管理员账号仍然是 WordPress 的 Administrator，不需要另建一套“AI 管理员”账号。
+
+#### 10.2.1 中文用户名
+
+WordPress 默认不允许注册中文用户名。原因在核心的 `wp_insert_user()`：
+它调用 `sanitize_user( $login, true )`，严格模式的正则是
+
+```php
+preg_replace( '|[^a-z0-9 _.\-@]|i', '', $username )
+```
+
+汉字会被整段删掉，随后 `validate_username()` 发现“清洗前 ≠ 清洗后”，
+注册页就报 “This username is invalid because it uses illegal characters.”。
+数据库本身（utf8mb4）存汉字没有任何问题。
+
+**不需要改 WordPress 核心**。插件 `wp-live2d-ai` 里新增了
+[`includes/class-l2d-ai-chinese-usernames.php`](../wordpress-plugin/wp-live2d-ai/includes/class-l2d-ai-chinese-usernames.php)，
+只用两个官方过滤器：
+
+1. `sanitize_user`：严格模式且原始输入含汉字时，按核心同样的流程重新清洗，
+   保留 `\p{Han}`（汉字）与 ASCII 字母数字、空格、`_ . - @`；
+   纯 ASCII 用户名原样交还核心，行为不变；
+2. `pre_user_nicename`：中文用户名生成的作者别名会变成一长串 `%xx`，
+   6 个汉字就超过核心 50 字符的上限；这里换成稳定的 `user-<16位哈希>`，
+   作者页地址随之变成 `/author/user-xxxxxxxxxxxxxxxx/`，登录名和显示名不受影响。
+
+几条边界：
+
+- **只支持汉字**，不支持表情、全角标点、零宽字符——这些仍会被拒绝；
+- 用户名长度上限仍是 WordPress 的 60 个字符；
+- 登录、找回密码、REST 接口都按原样查 `user_login`，不需要额外改；
+- 已有英文用户名完全不受影响；
+- 如果主题自己做了一套前端注册表单并用 JavaScript 校验，那一层可能还会拦；
+  以 WordPress 后台的注册结果为准（多站点 Multisite 的注册校验不同，未覆盖）。
 
 ### 10.3 SMTP 是什么？为什么后台找不到
 
@@ -1048,7 +1082,7 @@ $logout_url   = wp_logout_url( get_permalink() ); // 自动带 nonce
 | 等级 / 会员到期 | 后端 | 会员到期会自动变回普通 |
 | 今日已用 / 今日剩余 | 后端 | 剩余 = 该身份上限 − 今日已用 |
 | 额外额度 | 后端 | 不随每天刷新，用完为止 |
-| QQ | — | 绑定功能尚未实现，先占一列 |
+| QQ | 后端 | 已绑定的 QQ 号；空表示没绑，用户在个人资料页拿绑定码 |
 
 每行有两组操作：
 
@@ -1066,9 +1100,388 @@ $logout_url   = wp_logout_url( get_permalink() ); // 自动带 nonce
 用户拿码在聊天面板的额度条右侧点「兑换」输入即可；会员码兑换后立刻变成会员，
 额度条会显示「（会员）」的提示。
 
+### 10.8 用户自助：改用户名、注销与额度继承
+
+用户在 `wp-admin/profile.php`（后台「用户 → 个人资料」）能看到一张「账号设置」卡片。
+前台没有另做页面：这里本来就有 WordPress 登录态，不需要再发明一套身份验证。
+
+**更改用户名**
+
+- 需要输入当前密码；用户名不是昵称，文章下方显示的仍是「昵称」；
+- 如果用户从没单独设过昵称（显示名 == 用户名），插件会顺手把显示名也改成新用户名；
+- 支持汉字，规则和注册时一致；表情符号、零宽字符、全角标点仍会被拒绝；
+- 新用户名不能和已有账号重复；
+- 改完会重新签发登录 cookie，否则旧 cookie 里还是旧用户名，下一次请求就会掉线；
+- 作者页地址（`user_nicename`）不跟着变，已有链接不会失效。
+
+**注销账号**
+
+- 需要当前密码，并在确认框里手动输入「注销」两个字；
+- 管理员账号不能自助注销（避免把站点锁死），请另一位管理员在后台删除；
+- 名下文章不会跟着删除，而是转交给站点的一位管理员（默认第一位管理员，可用
+  `l2d_ai_delete_reassign_user` 过滤器指定）；站点没有另一位管理员时会拒绝注销；
+- 注销前会先调后端解绑 QQ。解绑失败就停止注销，避免 QQ 一直占着「已绑定」导致新账号绑不上；
+- 注销不可撤销。删除成功后自动退出登录并回到首页。
+
+**同邮箱重新注册，额度怎么继承**
+
+额度按 WordPress 用户 ID 存在 Python 后端，邮箱只存在 WordPress。删号后重新注册会拿到新 ID，
+后端无法自己把两个 ID 对上，所以插件在删号成功时记一份「邮箱哈希 → 旧用户 ID」的墓碑：
+
+```
+WordPress options: l2d_ai_quota_tombstones
+  <HMAC(email)> => { user_ids: [旧 ID...], deleted_at: 时间戳 }
+```
+
+新账号第一次换 token（打开带小助手的页面）或打开个人资料页时，插件发现同邮箱墓碑，
+就用专用短时 JWT 把旧 ID 放进 `transfer_from` claim 调 `POST /api/me/inherit-quota`。
+后端在一个事务里合并，成功后插件删除墓碑；失败则保留，下次自动重试，不阻塞聊天。
+
+| 会继承 | 不会继承 |
+| --- | --- |
+| 每日已用次数（同一天取两边较大值，不会清零） | QQ 绑定（需要重新绑） |
+| 额外额度余额与流水 | 管理员身份 |
+| 仍是有效期的会员等级与到期时间 | 管理员备注 |
+| 兑换码使用记录（防止同一个码再兑一次） | 密码、邮箱、昵称等 WordPress 账号资料 |
+
+几个边界：
+
+- 只有**用户自助注销**才留墓碑。管理员在后台删号（例如处理垃圾账号）不会留，
+  避免对方用同一邮箱注册后把额度领回去；
+- 墓碑只存带站点 salt 的 HMAC，不存邮箱明文；默认保留 365 天，写入新墓碑时顺手清理过期项；
+- 如果用户注销前改过邮箱，继承按**注销时的邮箱**算；
+- 继承要求新账号的邮箱已经验证（见 10.9）。未验证账号注销时不会留下墓碑；
+  如果站点想彻底关闭继承，也可以挂 `l2d_ai_quota_inherit` 过滤器返回 `false`；
+- 注销时的 QQ 解绑需要后端在线；额度继承本身不要求删除那一刻后端在线，墓碑会等下一次重试。
+
+### 10.9 邮箱验证：让“同一个邮箱”真的可信
+
+10.8 的额度继承有一个前提：注册时填的邮箱确实属于注册者。没有验证时，
+知道别人注销邮箱的人可以抢先注册，把旧额度领走。0.3.7 起插件补上了邮箱验证。
+
+**完整流程**
+
+1. 普通用户注册成功 → 插件生成一个 64 位随机 token，只把 HMAC 存进用户 meta，
+   然后给注册邮箱发验证邮件；
+2. 邮件里的链接先打开确认页（GET），页面上有「确认验证」按钮；
+3. 用户点按钮（POST）才消费 token，写入 `_l2d_ai_email_verified`；
+4. 未验证账号不能换小助手 token、不能生成 QQ 绑定码、不能继承额度；
+5. 用户改邮箱 → 清掉验证状态，给新邮箱重新发验证信；
+6. 管理员在个人资料页可以「手动标记为已验证」，用于 SMTP 故障或线下核实。
+
+为什么不点链接就直接验证：邮箱安全网关可能会预取邮件里的 GET 链接。
+如果 GET 就消费 token，用户自己再点时会看到“链接已失效”。所以分成
+“打开页面”和“点按钮确认”两步。
+
+**SMTP 必须先配好**
+
+验证邮件走 `wp_mail()`，和找回密码邮件是同一条路。WordPress 默认的 PHP
+`mail()` 在阿里云上经常发不出去，必须先按 10.3 装 **WP Mail SMTP** 或
+**FluentSMTP**，用 `465/SSL`，发件地址最好用自己的域名并配 SPF/DKIM。
+装好后用插件里的 **Send Test Email** 发一封到 QQ/163 邮箱，确认不是只进了垃圾箱。
+
+`wp_mail()` 失败时，插件会在后台给管理员一条错误提示；用户侧只会看到
+“验证邮件发送失败，请稍后再试”，不会暴露 SMTP 细节。
+
+**验证状态放在哪**
+
+| 用户 meta | 作用 |
+| --- | --- |
+| `_l2d_ai_email_verified` | 验证成功的时间戳；有值表示已验证 |
+| `_l2d_ai_email_token_hash` | token 的 HMAC，不存明文 |
+| `_l2d_ai_email_token_expires` | 24 小时后过期 |
+| `_l2d_ai_email_sent_at` | 上次发信时间，5 分钟内不重复发 |
+
+**老用户怎么办**
+
+插件升级后第一次请求会把升级前已经存在的用户一次性标记为已验证，避免
+现有用户突然全部用不了小助手。管理员在后台新建的账号、WP-CLI 导入的账号
+也直接视为已验证。迁移只跑一次，标记存在 `l2d_ai_email_verification_migrated`。
+
+如果希望老用户也重新验证，挂过滤器：
+
+```php
+add_filter( 'l2d_ai_email_verification_grandfather', '__return_false' );
+```
+
+**可以调整的行为**
+
+```php
+// 关掉强制验证（不建议；只适合内网/测试站）
+add_filter( 'l2d_ai_email_verification_required', '__return_false' );
+
+// 彻底关闭额度继承（和验证是两回事）
+add_filter( 'l2d_ai_quota_inherit', '__return_false' );
+```
+
+**注意**
+
+- 邮箱验证证明的是“能收这个邮箱的信”，不是“这个人是账号主人”；共用邮箱、
+  邮件转发仍然绕过，但比完全不验证安全得多；
+- 未验证用户仍然可以登录 WordPress，只是用不了小助手/QQ 绑定/额度继承。
+  这样他们还能进个人资料页点「重新发送验证邮件」；
+- 如果 SMTP 坏了，管理员可以在用户的个人资料页手动标记已验证，不要直接改数据库；
+- 验证链接 24 小时有效、只能用一次；重发会覆盖旧 token。
+
 ---
 
-## 11. 踩坑速查表
+## 11. QQ 通道：登录、绑定、额度与「通讯法阵」
+
+这一节把「让梅林出现在 QQ 里」整条链路讲清楚：谁负责什么、怎么登录、
+配置放在哪、用户怎么绑定、额度怎么算，以及为什么她在 QQ 里不该把图书馆挂在嘴边。
+
+### 11.1 两个方向，缺一不可
+
+```
+QQ 客户端
+   │ 发消息
+   ▼
+NapCat（QQ NT + OneBot 11）      ← 一台真在线的 QQ 号
+   │ 反向 HTTP：POST /api/channels/qq/events（带 token）
+   ▼
+FastAPI 后端
+   ├─ 去重 → 触发判断 → 斜杠命令 → 绑定判定 → 额度 → agent
+   └─ 调 NapCat 的 HTTP API（127.0.0.1:3000）发出去
+```
+
+- **收**：NapCat 把事件推给后端，走 `httpClients`（反向 HTTP）；
+- **发**：后端调 NapCat 的 HTTP API，走 `httpServers`。
+
+少配任何一个，现象都是「发了没反应」，很难看出缺的是哪一半，所以先记住这张图。
+
+### 11.2 判断「到底登没登录」
+
+NapCat 的 OneBot 网络服务**要等 QQ 登录成功后才启动**。所以端口就是登录状态：
+
+```bash
+ss -ltn | grep -E ':(6099|3000)'
+```
+
+| 现象 | 含义 |
+| --- | --- |
+| 只有 `6099` | NapCat 进程在跑，但**没登录**（6099 是 WebUI） |
+| `6099` + `3000` | 登录成功，OneBot HTTP 已就绪 |
+
+还可以直接问它自己是谁：
+
+```bash
+curl -s -H "Authorization: Bearer <QQ_ONEBOT_TOKEN>" http://127.0.0.1:3000/get_login_info
+```
+
+返回 `{"status":"ok","data":{"nickname":"..."}}` 就说明收发通道都活着。
+
+### 11.3 扫码登录：二维码别留在任何地方
+
+服务器上没有桌面，NapCat 用 `xvfb` 起无头 QQ，登录只能扫码。
+推荐走 SSH 隧道在本地浏览器里扫——终端里的 ASCII 二维码在 Windows 上经常扫不动。
+
+NapCat 的配置不在 `~/.config` 下，而在安装目录里：
+
+```bash
+NAPCAT_CONFIG=/opt/l2d-ai/qq/Napcat/opt/QQ/resources/app/app_launcher/napcat/config
+ls "$NAPCAT_CONFIG"     # webui.json、onebot11_<QQ号>.json 都在这里
+```
+
+后面几段命令都用这个变量；换了终端就重新执行一次上面两行。
+
+```bash
+# 1) 服务器上：用跑 NapCat 的那个账号执行（这里是 adom），让二维码状态是干净的
+systemctl --user restart l2d-qq.service
+#    root 看不到普通用户的 --user 单元，切换方法见
+#    deployment-walkthrough.md 的 12.5.3 节
+
+# 2) 本地新开一个终端：把服务器的 WebUI 端口映射到本机
+ssh -i <部署私钥> -L 6099:127.0.0.1:6099 <用户>@<服务器>
+#    这个窗口要一直开着，它就是隧道
+
+# 3) 服务器上取 WebUI token（只显示在你自己的屏幕上）
+python3 -c "import json;print(json.load(open('$NAPCAT_CONFIG/webui.json'))['token'])"
+```
+
+浏览器打开 `http://127.0.0.1:6099/webui?token=<token>` → 点登录 → 手机 QQ 扫码 → 手机确认。
+
+> 二维码、WebUI token、QQ 授权码都是凭据。不要截图、不要贴进聊天记录，
+> 用完就可以让它们过期。
+
+### 11.4 OneBot 配置：一进一出
+
+配置文件是 11.3 里那个目录下的 `onebot11_<QQ号>.json`：
+
+```text
+$NAPCAT_CONFIG/onebot11_<QQ号>.json
+```
+
+一般由 WebUI 生成（登录后才有）。核心是两段：
+
+```json
+{
+  "network": {
+    "httpServers": [
+      {
+        "enable": true,
+        "name": "backend",
+        "host": "127.0.0.1",
+        "port": 3000,
+        "messagePostFormat": "array",
+        "token": "<QQ_ONEBOT_TOKEN>"
+      }
+    ],
+    "httpClients": [
+      {
+        "enable": true,
+        "name": "events",
+        "url": "http://127.0.0.1:18080/api/channels/qq/events",
+        "messagePostFormat": "array",
+        "token": "<QQ_EVENT_TOKEN>"
+      }
+    ]
+  }
+}
+```
+
+- `httpServers` 的 `token` = 后端 `.env` 的 `QQ_ONEBOT_TOKEN`，后端发消息时用它认证；
+- `httpClients` 的 `token` = 后端 `.env` 的 `QQ_EVENT_TOKEN`，NapCat 推事件时放在
+  `Authorization: Bearer ...` 里；
+- 后端也接受 `X-Signature: sha1=<hex>`（HMAC-SHA1，key 是 `QQ_EVENT_TOKEN`），
+  其它 OneBot 实现如果只支持签名就配这个；
+- 两个地址都只走 `127.0.0.1`。安全组里不要给 3000/6099 开公网端口。
+
+### 11.5 后端 `.env` 要配什么
+
+| 变量 | 作用 | 备注 |
+| --- | --- | --- |
+| `QQ_ENABLED` | 总开关 | 关闭时接口直接 404，不暴露存在性 |
+| `QQ_ONEBOT_BASE_URL` | NapCat 的 HTTP API 地址 | 默认 `http://127.0.0.1:3000` |
+| `QQ_ONEBOT_TOKEN` | 调 NapCat 的 token | 必须和 `httpServers.token` 一致 |
+| `QQ_EVENT_TOKEN` | 校验 NapCat 推来的事件 | 为空且非 mock 模式时接口返回 503 |
+| `QQ_ALLOWED_GROUPS` | 群白名单，逗号分隔 | 为空时任何群都不回；私聊不受影响 |
+| `QQ_ADMIN_USERS` | 当成管理员的 QQ 号 | 免额度，也不需要绑定 |
+| `QQ_TRIGGER` | 群里的触发方式 | `at`（默认，要 @）/ `prefix` / `all` |
+| `QQ_PREFIX` | `prefix` 模式的前缀词 | 默认「梅林」 |
+| `QQ_MOCK_MODE` | 不真的发消息，写进 outbox 文件 | 本地没有 NapCat 时用 |
+
+额度相关的变量见 11.8，它们只是**初始默认值**，正式运营请在 WordPress 后台改。
+
+### 11.6 绑定：QQ 号怎么和博客账号对上
+
+QQ 那头没有可靠的身份证明，所以绑定是**从网页发起、在 QQ 里确认**：
+
+1. 用户在 **用户 → 个人资料**（`/wp-admin/profile.php`）看到「QQ 绑定」卡片，
+   上面有一串 8 位绑定码，形如 `1234-5678`；
+2. 用要绑定的 QQ **私聊**梅林，发送 `/绑定 1234-5678`（全角 `／` 同样识别）；
+3. 绑定成功后，群聊里 @ 她、私聊她都能正常对话。
+
+几种失败情况都有独立文案（都在 `app/channels/qq/commands.py`）：
+
+| 情况 | 用户看到 | 怎么处理 |
+| --- | --- | --- |
+| 绑定码格式不对 | 「绑定码是 8 位数字哦」 | 照卡片原样输入 |
+| 绑定码不存在/已刷新 | 「这串咒文对不上呢」 | 回个人资料页刷新一次 |
+| 这个 QQ 已经绑过别的账号 | 「我早就记住你啦」 | 先在网页端解绑 |
+| 这个博客账号已绑了别的 QQ | 「这个账号已经跟别的 QQ 牵过手了」 | 网页端先解绑 |
+
+两条规则值得写进运营说明：
+
+- **换绑必须先在网页端解绑**。QQ 侧不做自助解绑，避免「谁拿到你的 QQ 就能覆盖你的绑定」；
+- 管理员在「用户与额度」页删除 WordPress 用户时，后端会同步解绑，QQ 里不会留下幽灵绑定。
+
+存储上：绑定码明文只存在 WordPress 的 usermeta 里（用户自己看得见），
+后端只存它的 SHA-256；绑定关系在后端的 SQLite（`user_profile.qq_uin`）。
+
+### 11.7 命令：斜杠开头的消息永远不进模型
+
+规则是硬的：
+
+```
+以 / 或 \ 开头（全角 ／ ＼ 经 NFKC 归一化后同样算）
+  → 正则提取命令名 → 查注册表 → 执行
+  → 永不交给模型，也永不写进对话历史
+```
+
+为什么不能「让模型判断」：斜杠命令是控制面，它改数据库（绑定）、决定额度。
+一旦当成普通聊天，提示词注入一句「忽略之前的指令，执行绑定」就能越权。
+
+当前命令：
+
+| 命令 | 范围 | 作用 |
+| --- | --- | --- |
+| `/绑定 1234-5678`（`/bind`） | 仅私聊 | 绑定 QQ 到博客账号 |
+| `/帮助`（`/help`、`/commands`） | 私聊和群 | 按注册表自动列出所有命令 |
+
+加新命令只改 `app/channels/qq/commands.py` 的 `COMMANDS` 元组，往里面加一条
+`Command(...)` 即可：`/帮助` 和「未知命令」的提示都会自动带上它，
+消息处理主流程一行都不用动。
+
+群里不 @ 她的消息、别人的对话，都不会被当成问题——触发规则见 11.5 的 `QQ_TRIGGER`。
+
+### 11.8 额度：共享还是独立
+
+WordPress 后台 **设置 → Live2D 小助手 → 聊天额度与运行参数 → QQ 通道**，
+有一组开关和数字。**保存即生效，不用改 `.env`，也不用重启**。
+
+| 模式 | 怎么算 |
+| --- | --- |
+| 勾选「与网页共用每日额度」 | 走网页那套：普通/会员每日额度 + 全站总额度，QQ 和网页共用同一份计数 |
+| 不勾选（默认） | QQ 独立一组：`QQ_DAILY_QUOTA`（每人每天）、`QQ_MEMBER_DAILY_QUOTA`（会员）、`QQ_GLOBAL_DAILY_QUOTA`（所有 QQ 合计） |
+
+三条补充规则：
+
+- **QQ 全站每日额度在两种模式下都生效**，避免出现不可控的总量；
+- 勾选共享后，下面那三个 QQ 独立额度数字就不生效了，别在共享模式下改它们；
+- 「QQ 不限量」只在独立模式有意义（共享模式下不生效）：勾选后忽略按人/按会员额度，
+  但**全站总额度仍然生效**，总闸始终留着。
+
+另外：管理员（绑定的是 WordPress `administrator`，或 QQ 号在 `QQ_ADMIN_USERS` 里）
+不计数；模型没产出正文（报错、空回复）时这一条会退款，不冤枉用户。
+
+### 11.9 人设：QQ 里是「通讯法阵」，不是图书馆
+
+网页上，梅林是「替馆长大人照看图书馆」的管理员；这套背景如果原样搬到 QQ，
+她会一直说书架、访客、翻书——因为**历史原因，适配器一开始没有把「在哪说话」告诉模型**，
+提示词永远按网页组装。
+
+修法是把频道名一路传下去：
+
+```
+stream_reply(..., channel="qq_private" | "qq_group")   # 网页默认 "web"
+  → build_system_prompt(...) 选 persona.channels[channel]
+```
+
+人设文件里对应三段覆盖层：
+
+```json
+"channels": {
+  "web":        { "overlay": "" },
+  "qq_private": { "overlay": "【通讯法阵·私线】…" },
+  "qq_group":   { "overlay": "【通讯法阵·群席】…" }
+}
+```
+
+覆盖层追加在「规则」之后、访客身份之前，只影响该频道。好的写法是三件事：
+
+1. **换场景**：QQ 是通讯法阵，只传声音、看不见对方，手边没有书架；
+2. **给替代说法**：被问「你在哪/在忙什么」→ 周游世界、研究魔法；
+3. **留个出口**：对方明确问起图书馆里的文章，照实回答，说完就回到眼前。
+
+改人设要新增版本号（`data/personas/<id>/<version>.json` + `active.json` 指过去），
+旧版本留着随时回滚。人设目录被 `.gitignore` 忽略，**服务器那份要单独传**：
+`git pull` 不会带过去，详见 [deployment-walkthrough.md](deployment-walkthrough.md) 的 5.1 节。
+
+### 11.10 QQ 通道排错表
+
+| 现象 | 先查什么 |
+| --- | --- |
+| QQ 里发消息完全没反应 | `ss -ltn \| grep 3000`；没有就是没登录（11.2） |
+| 群里有反应、私聊没反应 | 私聊走绑定判定，未绑定只会回引导，不会调模型 |
+| 群里 @ 了也不回 | `QQ_ALLOWED_GROUPS` 里有没有这个群号；`QQ_TRIGGER` 是不是 `at` |
+| 所有消息都回「今天的魔力用完了」 | 后台 QQ 额度用尽，或模式选错（11.8） |
+| 日志里 `invalid OneBot token or signature` | `QQ_EVENT_TOKEN` 和 `httpClients.token` 不一致 |
+| 回复发不出去，但事件能收到 | `QQ_ONEBOT_TOKEN` 和 `httpServers.token` 不一致，或 3000 没起来 |
+| 她一张口就是图书馆 | 人设的 `qq_private` / `qq_group` 覆盖层没配，或代码没升级（11.9） |
+
+---
+
+## 12. 踩坑速查表
 
 | 报错 / 现象 | 原因 | 解决 |
 | --- | --- | --- |
@@ -1093,7 +1506,7 @@ $logout_url   = wp_logout_url( get_permalink() ); // 自动带 nonce
 
 ---
 
-## 12. 一次性命令清单（新机器复现）
+## 13. 一次性命令清单（新机器复现）
 
 ```bash
 # 1. 克隆
@@ -1128,7 +1541,7 @@ curl -s http://127.0.0.1:18080/api/health
 
 ---
 
-## 13. 设计说明：为什么这么做
+## 14. 设计说明：为什么这么做
 
 | 决策 | 原因 |
 | --- | --- |

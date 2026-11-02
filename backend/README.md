@@ -15,7 +15,7 @@
 | [app/auth/jwt.py](app/auth/jwt.py) | JWT 三段结构、HS256 验签、PyJWT 的 `decode` 参数 |
 | [app/api/deps.py](app/api/deps.py) | FastAPI 依赖注入、`HTTPBearer`、401/403/503 的区别 |
 | [app/quota.py](app/quota.py) | SQLite 原子占位、`ON CONFLICT`、每日/额外/全站三层额度与退款 |
-| [app/credits.py](app/credits.py) | 身份等级、会员到期惰性降级、额外额度流水、兑换码 |
+| [app/credits.py](app/credits.py) | 身份等级、会员到期惰性降级、额外额度流水、兑换码、注销账号的额度合并 |
 | [app/runtime_settings.py](app/runtime_settings.py) | 后台可改参数的校验、原子写 JSON、损坏回退 |
 | [app/agent/limits.py](app/agent/limits.py) | LangChain middleware：模型/工具调用次数上限 |
 | [app/api/chat.py](app/api/chat.py) | SSE 协议、`EventSourceResponse`、认证/额度/退款顺序 |
@@ -23,14 +23,15 @@
 | [app/api/admin.py](app/api/admin.py) | `GET/PUT /api/admin/settings`：管理员 JWT + 运行时参数 |
 | [app/api/admin_users.py](app/api/admin_users.py) | 用户档案、等级调整、额度发放、兑换码管理 |
 | [app/api/redeem.py](app/api/redeem.py) | `POST /api/redeem`：用户兑换，含失败限流 |
-| [app/channels/qq/](app/channels/qq/) | OneBot 11/NapCat 薄适配器：事件解析、触发、去重、短期历史 |
-| [app/api/qq.py](app/api/qq.py) | `POST /api/channels/qq/events`：接收 NapCat 回调，token 校验 |
+| [app/api/me_account.py](app/api/me_account.py) | `POST /api/me/inherit-quota`：只认 JWT 里的 `transfer_from`，同邮箱重新注册后合并额度 |
+| [app/channels/qq/](app/channels/qq/) | OneBot 11/NapCat 适配器：解析、触发、去重、短期历史、绑定判定、额度；`commands.py` 是斜杠命令注册表 |
+| [app/api/qq.py](app/api/qq.py) | `POST /api/channels/qq/events`：接收 NapCat 回调，Bearer / `X-OneBot-Token` / `X-Signature` 校验 |
 | [app/schemas.py](app/schemas.py) | Pydantic 校验与提示词注入防护 |
 | [app/main.py](app/main.py) | FastAPI 入口、CORS、启动检查 |
 | [scripts/mock_onebot.py](scripts/mock_onebot.py) | 本地假 NapCat：接收 `send_group_msg` 并落盘 |
 | [scripts/qq_simulate.py](scripts/qq_simulate.py) | 伪造一条群消息发给本地后端 |
 | [scripts/qq_probe.py](scripts/qq_probe.py) | 在服务器上探测 NapCat 的 `get_status` / `get_login_info` |
-| [tests/](tests/) | JWT、额度并发、agent 防循环、接口 401/429、QQ 适配器 |
+| [tests/](tests/) | JWT、额度并发、账号额度继承、agent 防循环、接口 401/429、QQ 适配器/绑定/命令/双额度 |
 | [app/kb/sync.py](app/kb/sync.py) | 从 WordPress REST 拉文章、切块、写入索引（命令行入口） |
 | [app/kb/text.py](app/kb/text.py) | HTML 清洗、图片提取、jieba 分词、切块、摘要 |
 | [app/kb/db.py](app/kb/db.py) | SQLite 连接与 FTS5 表结构、图片描述缓存 |
@@ -216,43 +217,52 @@ uv run python scripts/chat_preview.py --guest "你能做什么？"
 它会真实调用 DeepSeek，产生少量 token 费用；如果 `MOCK_MODE=true` 或没有 Key，
 回答来自假模型，测不出人设。脚本会同时打印检索来源和跳转按钮，方便确认工具是否被调用。
 
-## QQ 通道（实验性，默认关闭）
+## QQ 通道（默认关闭）
 
 QQ 走 OneBot 11 协议，NapCat 负责登录 QQ 和收发消息。我们不把 NapCat 的代码
-嵌入后端，只做一层“薄适配器”：
+嵌入后端，只做一层适配：
 
 ```
-QQ 群
-  │  @梅林
+QQ（私聊 / 群）
+  │  文本消息
   ▼
 NapCat ──反向 HTTP──▶ POST /api/channels/qq/events   （app/api/qq.py）
                               │
                               ▼
-                    QQAdapter 解析/去重/白名单
+              QQAdapter：去重 → 触发 → 斜杠命令
+                       → 绑定判定 → 额度
                               │
                               ▼
-                    stream_reply()（同一套人设、知识库、工具）
+        stream_reply(channel="qq_private" | "qq_group")
                               │
                               ▼
-NapCat ◀──正向 HTTP── POST /send_group_msg            （app/channels/qq/client.py）
+NapCat ◀──正向 HTTP── send_private_msg / send_group_msg（client.py）
 ```
 
-这层只处理**白名单群里的文本消息**，默认拒绝：
-- `QQ_ALLOWED_GROUPS` 为空时，任何群都不回；
-- 只处理 `message_type=group`，私聊/图片/表情先忽略；
-- `message` 需要是 OneBot 的数组格式（NapCat 默认就是）；CQ 码字符串暂不解析；
-- 群消息只作为 `role=user` 的内容，不会进入 system prompt，也不会改变管理员身份；
-- 同一个 `message_id` 只处理一次，避免 NapCat 重发导致重复回复；
-- 短期历史只存在内存里，进程重启就清空；账号绑定和长期记忆还没做。
+处理顺序都在 `adapter.py` 里，值得记住：
 
-**回调鉴权**：`QQ_EVENT_TOKEN` 同时支持三种带法——`Authorization: Bearer`、
-`X-OneBot-Token`，以及 **NapCat 的 HTTP 客户端实际使用的 `X-Signature: sha1=<hex>`**。
-最后一种是 `HMAC-SHA1(key=token, msg=原始请求体)`，NapCat 从不发明文 token，
-所以只校验前两种的话，真实消息会全部收到 401。
+1. 只处理**文本消息**；图片、表情、CQ 码字符串忽略；
+2. 群消息要求群号在 `QQ_ALLOWED_GROUPS` 里，再按 `QQ_TRIGGER`（`at`/`prefix`/`all`）
+   判断是不是在叫梅林；私聊整条文本都是正文；
+3. 同一个 `message_id` 只处理一次，避免 NapCat 重发导致重复回复；
+4. 斜杠命令（`/绑定`、`/帮助`）先于一切，**永不进入模型、永不写进历史**（`commands.py`）；
+5. 未绑定的 QQ：私聊回绑定引导（带上 `WP_SITE_URL`），群里只提示去私聊；
+   `QQ_ADMIN_USERS` 是管理员自救通道，不需要绑定；
+6. 额度判定，两种模式见下；
+7. 正常聊天带 `channel` 调 `stream_reply`，人设据此选择 `qq_private` / `qq_group` 覆盖层；
+8. 短期历史只存在内存里，进程重启就清空。
 
-**注意**：当前 QQ 消息**不经过**网页的每日额度/全站额度，也没有内容审核。
-在接入生产前必须补上独立额度和限流，否则白名单群里的用户可以无限调用模型。
-这也是它默认关闭的原因。
+**回调鉴权**：`QQ_EVENT_TOKEN` 支持三种带法——`Authorization: Bearer`、
+`X-OneBot-Token`，以及 `X-Signature: sha1=<hex>`。当前 NapCat 4.18.41 的打包代码
+会带 Bearer，同时也支持对原始请求体做 HMAC-SHA1 签名；其它版本/实现可能只给签名，
+所以三种都接受。走签名时必须用**原始请求体**验证，不能先解析 JSON 再序列化。
+
+**额度**：默认 QQ 独立计数（`QQ_DAILY_QUOTA` / `QQ_MEMBER_DAILY_QUOTA` /
+`QQ_GLOBAL_DAILY_QUOTA`）；在 WordPress 后台勾选「与网页共用每日额度」后，
+改走网页那套计数。两种模式下 **QQ 全站每日总额度都生效**；管理员不计数；
+模型没产出正文（报错、空回复）时这一条退款。运营时在后台改，保存即生效。
+
+**注意**：QQ 通道**没有内容审核**，开生产群前建议先补敏感词/图片审核。
 
 ### 本地没有 NapCat 怎么联调
 
@@ -316,9 +326,9 @@ uv run python scripts/qq_probe.py --base-url http://127.0.0.1:3000
 它只调用 `get_status` 和 `get_login_info`，默认不发消息。要验证真实发送，
 必须同时加 `--send-test <群号> --confirm`，避免误发到群里。
 
-QQ 通道目前**没有**接入生产：还需要 WordPress 侧的“QQ 通道”设置页、
-群白名单管理、独立额度、账号绑定和内容审核。默认 `QQ_ENABLED=false`，
-不影响现有网页聊天。
+QQ 通道已经接入生产（NapCat 4.18.41 + OneBot 11）：私聊/群聊收发、账号绑定、
+斜杠命令、两种额度模式、频道人设覆盖层都已上线。剩下的主要是**内容审核**和
+主动消息（见根目录 README 的待办）。默认 `QQ_ENABLED=false`，不影响网页聊天。
 
 ## 知识库：已实现的部分
 

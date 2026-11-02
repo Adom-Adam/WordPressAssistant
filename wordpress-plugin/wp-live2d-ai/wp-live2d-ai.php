@@ -3,7 +3,7 @@
  * Plugin Name:       Live2D AI 小助手
  * Plugin URI:        https://github.com/Adom-Adam/WordPressAssistant
  * Description:       在博客左下角显示 Live2D AI 助手。前端只负责展示与交互，AI 逻辑由独立的 Python 服务提供。
- * Version:           0.3.4
+ * Version:           0.3.7
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * Author:            Adom
@@ -16,12 +16,18 @@ defined( 'ABSPATH' ) || exit;
 // 只有“有人注册”这一条链路会走到，放在主文件里会让主文件更难读。
 require_once __DIR__ . '/includes/class-l2d-ai-guard.php';
 require_once __DIR__ . '/includes/class-l2d-ai-users.php';
+// 中文用户名：用官方过滤器放行汉字，不改 WordPress 核心。
+require_once __DIR__ . '/includes/class-l2d-ai-chinese-usernames.php';
 // QQ 绑定：个人资料页的绑定卡片（绑定码、刷新、解绑）。
 require_once __DIR__ . '/includes/class-l2d-ai-bind.php';
+// 账号自助：改用户名、注销账号、注销后的额度继承。
+require_once __DIR__ . '/includes/class-l2d-ai-account.php';
+// 邮箱验证：没有它，同邮箱继承额度只是“谁先填谁拿走”。
+require_once __DIR__ . '/includes/class-l2d-ai-email-verification.php';
 
 final class L2D_AI_Plugin {
 
-	const VERSION          = '0.3.4';
+	const VERSION          = '0.3.7';
 	const OPTION_API_BASE  = 'l2d_ai_api_base';
 	const OPTION_NAME      = 'l2d_ai_assistant_name';
 	const OPTION_SIZE      = 'l2d_ai_size_preset';
@@ -62,10 +68,16 @@ final class L2D_AI_Plugin {
 
 		// 注册防护：邮箱域名黑名单 + 同一 IP 的频率限制。
 		L2D_AI_Guard::init();
+		// 中文用户名：注册时允许汉字，作者别名自动转 ASCII。
+		L2D_AI_Chinese_Usernames::init();
 		// 用户与额度：后台查看用户、调整等级、发额度、生成兑换码。
 		L2D_AI_Users::init();
 		// QQ 绑定：个人资料页的绑定卡片。
 		L2D_AI_Bind::init();
+		// 账号自助：改用户名、注销、注销后的额度继承。
+		L2D_AI_Account::init();
+		// 邮箱验证：注册后发信，未验证不能换小助手 token / 绑定 QQ / 继承额度。
+		L2D_AI_Email_Verification::init();
 	}
 
 	/**
@@ -695,6 +707,20 @@ final class L2D_AI_Plugin {
 			return new WP_Error( 'l2d_ai_no_user', '找不到当前用户', array( 'status' => 401 ) );
 		}
 
+		// 邮箱没验证就不发 token：额度继承只看“同一个邮箱”，不验证的话
+		// 知道别人注销邮箱的人可以抢先注册把额度领走。
+		if ( ! L2D_AI_Email_Verification::is_verified( $user->ID ) ) {
+			return new WP_Error(
+				'l2d_ai_email_unverified',
+				'请先在个人资料页验证邮箱，再使用小助手。',
+				array( 'status' => 403 )
+			);
+		}
+
+		// 注销后重新注册的账号：如果这个邮箱有墓碑，先把旧账号的额度
+		// 并过来再发 token。失败不阻塞聊天，下次换 token 会重试。
+		L2D_AI_Account::inherit_quota( $user->ID );
+
 		$now  = time();
 		$data = array(
 			'iss'   => self::JWT_ISSUER,
@@ -848,8 +874,8 @@ final class L2D_AI_Plugin {
 	 * 为什么要单独签一个 token：绑定码属于用户自己的数据，不能借用
 	 * 管理员 token——后端会把 admin 写进档案，等于给所有绑定用户开无限额度。
 	 */
-	public static function user_backend_request( $user_id, $method, $path, $body = null ) {
-		$token = self::user_token( (int) $user_id );
+	public static function user_backend_request( $user_id, $method, $path, $body = null, $extra_claims = array() ) {
+		$token = self::user_token( (int) $user_id, is_array( $extra_claims ) ? $extra_claims : array() );
 		if ( is_wp_error( $token ) ) {
 			return $token;
 		}
@@ -860,8 +886,11 @@ final class L2D_AI_Plugin {
 	/**
 	 * 给指定用户签一个短时 JWT，与 issue_token() 同构，但用户可以不是当前用户。
 	 * `admin` 取自该用户的真实角色，后端据此决定是否计额度。
+	 *
+	 * `$extra_claims` 只给插件内部用（目前是额度继承的旧用户 ID）；
+	 * 核心 claim 放在数组后面合并，调用方覆盖不了 sub/admin。
 	 */
-	private static function user_token( $user_id ) {
+	private static function user_token( $user_id, $extra_claims = array() ) {
 		$secret = self::jwt_secret();
 		if ( is_wp_error( $secret ) ) {
 			return $secret;
@@ -872,21 +901,24 @@ final class L2D_AI_Plugin {
 			return new WP_Error( 'l2d_ai_no_user', '找不到该用户', array( 'status' => 404 ) );
 		}
 
-		$now = time();
-
-		return self::encode_jwt(
-			array(
-				'iss'   => self::JWT_ISSUER,
-				'aud'   => self::JWT_AUDIENCE,
-				'sub'   => (string) $user->ID,
-				'name'  => (string) $user->display_name,
-				'admin' => user_can( $user->ID, 'manage_options' ),
-				'iat'   => $now,
-				'exp'   => $now + self::JWT_TTL,
-				'jti'   => wp_generate_uuid4(),
-			),
-			$secret
+		$now     = time();
+		$payload = array(
+			'iss'   => self::JWT_ISSUER,
+			'aud'   => self::JWT_AUDIENCE,
+			'sub'   => (string) $user->ID,
+			'name'  => (string) $user->display_name,
+			'admin' => user_can( $user->ID, 'manage_options' ),
+			'iat'   => $now,
+			'exp'   => $now + self::JWT_TTL,
+			'jti'   => wp_generate_uuid4(),
 		);
+
+		// 核心 claim 放后面：即使调用方误传了 sub/admin，也覆盖不了。
+		if ( ! empty( $extra_claims ) ) {
+			$payload = array_merge( $extra_claims, $payload );
+		}
+
+		return self::encode_jwt( $payload, $secret );
 	}
 
 	/**

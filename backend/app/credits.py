@@ -105,6 +105,15 @@ CREATE TABLE IF NOT EXISTS redeem_log (
     used_at TEXT    NOT NULL,
     PRIMARY KEY (code, user_id)
 );
+
+-- 注销后重新注册时，把旧 WordPress 用户 ID 的额度状态并到新 ID。
+-- 这条记录同时是幂等标记：同一个旧账号只能被转移一次，
+-- 失败重试时不会把额外额度加两遍。
+CREATE TABLE IF NOT EXISTS identity_transfer (
+    from_user_id INTEGER PRIMARY KEY,
+    to_user_id   INTEGER NOT NULL,
+    created_at   TEXT    NOT NULL
+);
 """
 
 
@@ -160,6 +169,21 @@ class QQBinding:
     user_id: int
     tier: str
     is_admin: bool
+
+
+@dataclass(frozen=True, slots=True)
+class TransferResult:
+    """一次额度继承的结果。
+
+    三个列表都存旧 WordPress 用户 ID：
+    - transferred：这次真的并过来了；
+    - already：之前已经并到同一个新账号，重复请求直接跳过；
+    - conflicts：之前并到了别的账号，拒绝再次搬动。
+    """
+
+    transferred: tuple[int, ...]
+    already: tuple[int, ...]
+    conflicts: tuple[int, ...]
 
 
 def _normalize_bind_code(raw: str) -> str:
@@ -565,6 +589,217 @@ class CreditStore:
                 ),
             )
         return profiles
+
+    # ------------------------------------------------------------------
+    # 注销后重新注册：额度继承
+    # ------------------------------------------------------------------
+    def inherit_identity(
+        self, to_user_id: int, from_user_ids: Iterable[int]
+    ) -> TransferResult:
+        """把已注销账号的额度状态并到重新注册的新账号。
+
+        为什么由后端搬数据：额度全在 SQLite 里，WordPress 删用户时
+        并不知道、也不应该直接改这些表。WordPress 只负责在删号时记下
+        “某个邮箱对应过哪些旧用户 ID”，新账号第一次换 token 时带着
+        这些 ID 请求一次；搬完就把 WordPress 侧的记录删掉。
+
+        合并规则（只搬“额度”，不搬身份）：
+        - daily_usage：同一天取两边较大的已用次数，避免任何一边被清零；
+        - credit_balance：两边相加；
+        - credit_ledger：整段流水改挂到新 ID，保留审计记录；
+        - redeem_log：兑换记录一起搬，防止同一个码被再兑一次；
+        - user_profile：只继承仍然有效的会员等级和到期时间；
+          QQ 绑定、管理员标记、备注都不继承。
+
+        `identity_transfer` 在同一事务里先写入，再搬数据。重复请求看到
+        记录就直接跳过，所以网络超时后重试不会把额外额度加两遍。
+        搬到一个已经被别人认领过的旧 ID 时记为 conflict，绝不二次搬动。
+        """
+        target = int(to_user_id)
+        if target <= 0:
+            raise ValueError("新账号 ID 不合法")
+
+        sources: list[int] = []
+        for raw in from_user_ids:
+            # bool 是 int 的子类，先排除，避免 True 被当成用户 1。
+            if isinstance(raw, bool):
+                continue
+            try:
+                source = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if source <= 0 or source == target or source in sources:
+                continue
+            sources.append(source)
+            if len(sources) >= 20:
+                break
+
+        if not sources:
+            return TransferResult((), (), ())
+
+        transferred: list[int] = []
+        already: list[int] = []
+        conflicts: list[int] = []
+
+        with self._connection() as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                for source in sources:
+                    previous = conn.execute(
+                        "SELECT to_user_id FROM identity_transfer WHERE from_user_id = ?",
+                        (source,),
+                    ).fetchone()
+                    if previous is not None:
+                        if int(previous["to_user_id"]) == target:
+                            already.append(source)
+                        else:
+                            conflicts.append(source)
+                        continue
+
+                    # 先占位再搬：事务中途崩溃会一起回滚；
+                    # 提交之后重试只会命中上面的 already 分支。
+                    conn.execute(
+                        """
+                        INSERT INTO identity_transfer
+                            (from_user_id, to_user_id, created_at)
+                        VALUES (?, ?, ?)
+                        """,
+                        (source, target, self._now_iso()),
+                    )
+                    self._merge_quota_locked(conn, source, target)
+                    transferred.append(source)
+
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+        if transferred:
+            logger.info(
+                "额度继承 from=%s to=%s", ",".join(map(str, transferred)), target
+            )
+        if conflicts:
+            logger.warning(
+                "额度继承冲突（旧账号已被别的账号认领）from=%s to=%s",
+                ",".join(map(str, conflicts)),
+                target,
+            )
+
+        return TransferResult(tuple(transferred), tuple(already), tuple(conflicts))
+
+    def _merge_quota_locked(
+        self, conn: sqlite3.Connection, source: int, target: int
+    ) -> None:
+        """在调用方的事务里搬一个旧账号的额度数据。
+
+        `daily_usage` 由 QuotaStore 建表；生产启动时两个 store 都初始化，
+        这里直接使用同一份 SQLite 文件里的表。
+        """
+        # 每日已用：同一天取较大值。取 max 而不是相加，是因为两边
+        # 可能都产生过计数；相加会把一次聊天算成两次。
+        conn.execute(
+            """
+            INSERT INTO daily_usage (user_id, day, used)
+            SELECT ?, day, used
+              FROM daily_usage
+             WHERE user_id = ?
+            ON CONFLICT(user_id, day) DO UPDATE
+               SET used = max(daily_usage.used, excluded.used)
+            """,
+            (target, source),
+        )
+        conn.execute("DELETE FROM daily_usage WHERE user_id = ?", (source,))
+
+        # 额外额度是存量，两边相加；上限由管理员发放时控制，
+        # 继承属于“物归原主”，这里不再二次截断。
+        conn.execute(
+            """
+            INSERT INTO credit_balance (user_id, balance, updated_at)
+            SELECT ?, balance, ?
+              FROM credit_balance
+             WHERE user_id = ?
+            ON CONFLICT(user_id) DO UPDATE
+               SET balance = credit_balance.balance + excluded.balance,
+                   updated_at = excluded.updated_at
+            """,
+            (target, self._now_iso(), source),
+        )
+        conn.execute("DELETE FROM credit_balance WHERE user_id = ?", (source,))
+
+        # 流水保留原顺序，只换 user_id。
+        conn.execute(
+            "UPDATE credit_ledger SET user_id = ? WHERE user_id = ?",
+            (target, source),
+        )
+
+        # 新账号可能已经兑换过同一个码：INSERT OR IGNORE 保留新账号那条，
+        # 随后统一删掉旧账号的记录，避免主键冲突。
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO redeem_log (code, user_id, used_at)
+            SELECT code, ?, used_at
+              FROM redeem_log
+             WHERE user_id = ?
+            """,
+            (target, source),
+        )
+        conn.execute("DELETE FROM redeem_log WHERE user_id = ?", (source,))
+
+        self._merge_profile_locked(conn, source, target)
+
+    def _merge_profile_locked(
+        self, conn: sqlite3.Connection, source: int, target: int
+    ) -> None:
+        """只继承有效的会员等级；身份字段留在新账号上。"""
+        old = conn.execute(
+            "SELECT created_at FROM user_profile WHERE user_id = ?",
+            (source,),
+        ).fetchone()
+        if old is None:
+            return
+
+        old_tier, old_expires = self._tier_locked(conn, source)
+        new_exists = conn.execute(
+            "SELECT 1 FROM user_profile WHERE user_id = ?",
+            (target,),
+        ).fetchone()
+        new_tier, new_expires = self._tier_locked(conn, target) if new_exists else ("user", None)
+
+        tier, expires = new_tier, new_expires
+        if old_tier == "member":
+            if new_tier != "member":
+                tier, expires = "member", old_expires
+            else:
+                # 两边都是会员时保留较晚的到期时间。
+                try:
+                    if (
+                        old_expires is not None
+                        and (
+                            new_expires is None
+                            or datetime.fromisoformat(old_expires)
+                            > datetime.fromisoformat(new_expires)
+                        )
+                    ):
+                        expires = old_expires
+                except ValueError:
+                    # 时间格式坏了就保留新账号的原值，不让继承中断。
+                    pass
+
+        stamped = self._now_iso()
+        conn.execute(
+            """
+            INSERT INTO user_profile
+                (user_id, tier, tier_expires_at, is_admin, note, created_at, updated_at)
+            VALUES (?, ?, ?, 0, NULL, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE
+               SET tier = excluded.tier,
+                   tier_expires_at = excluded.tier_expires_at,
+                   created_at = min(user_profile.created_at, excluded.created_at),
+                   updated_at = excluded.updated_at
+            """,
+            (target, tier, expires, str(old["created_at"]), stamped),
+        )
+        conn.execute("DELETE FROM user_profile WHERE user_id = ?", (source,))
 
     # ------------------------------------------------------------------
     # QQ 绑定
