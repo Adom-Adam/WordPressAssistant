@@ -44,12 +44,22 @@ final class L2D_AI_Email_Verification {
 	/** 只记录本类发信失败的提示，不把其它插件的密码重置失败也算进来。 */
 	private static $sending = false;
 
+	/** 资料页底部表单的目标用户；0 表示本次没有需要输出的表单。 */
+	private static $footer_user_id = 0;
+
+	/** 本次是否渲染了「重新发送验证邮件」按钮。 */
+	private static $need_resend_form = false;
+
+	/** 本次是否渲染了「手动标记为已验证」按钮。 */
+	private static $need_admin_verify_form = false;
+
 	public static function init() {
 		add_action( 'user_register', array( __CLASS__, 'on_register' ) );
 		add_action( 'profile_update', array( __CLASS__, 'on_profile_update' ), 10, 2 );
 
 		add_action( 'show_user_profile', array( __CLASS__, 'render_card' ) );
 		add_action( 'edit_user_profile', array( __CLASS__, 'render_card' ) );
+		add_action( 'admin_footer', array( __CLASS__, 'render_forms' ) );
 
 		// GET：显示确认页，不消费 token；POST：用户点按钮后才真正验证。
 		add_action( 'admin_post_nopriv_l2d_ai_verify_email', array( __CLASS__, 'render_confirm_page' ) );
@@ -415,28 +425,83 @@ final class L2D_AI_Email_Verification {
 				</p>
 
 				<?php if ( $is_self && '' !== $email ) : ?>
-					<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="margin:0 0 12px;">
-						<input type="hidden" name="action" value="l2d_ai_resend_verification">
-						<?php wp_nonce_field( self::NONCE_ACTION ); ?>
-						<button type="submit" class="button button-primary">
+					<?php
+					self::$footer_user_id      = $user_id;
+					self::$need_resend_form    = true;
+					?>
+					<p style="margin:0 0 12px;">
+						<button
+							type="submit"
+							class="button button-primary"
+							form="l2d-ai-email-resend-form"
+						>
 							<?php echo esc_html( '重新发送验证邮件' ); ?>
 						</button>
-					</form>
+					</p>
 				<?php endif; ?>
 
 				<?php if ( current_user_can( 'manage_options' ) ) : ?>
-					<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="margin:0;">
-						<input type="hidden" name="action" value="l2d_ai_admin_verify_email">
-						<input type="hidden" name="user_id" value="<?php echo esc_attr( (string) $user_id ); ?>">
-						<?php wp_nonce_field( self::NONCE_ACTION ); ?>
-						<button type="submit" class="button" onclick="return confirm('确认这个邮箱已经通过其他方式核实？');">
+					<?php
+					self::$footer_user_id          = $user_id;
+					self::$need_admin_verify_form = true;
+					?>
+					<p style="margin:0;">
+						<button
+							type="submit"
+							class="button"
+							form="l2d-ai-email-admin-verify-form"
+							onclick="return confirm('确认这个邮箱已经通过其他方式核实？');"
+						>
 							<?php echo esc_html( '手动标记为已验证' ); ?>
 						</button>
-					</form>
+					</p>
 				<?php endif; ?>
 			<?php endif; ?>
 		</div>
 		<?php
+	}
+
+	/**
+	 * 在页面底部输出资料卡片按钮要提交的表单。
+	 *
+	 * WordPress 资料页本身是一个 `<form>`，卡片里再套 `<form>` 会破坏
+	 * 外层表单，导致底部「更新个人资料」点了没反应。这里把容器放到
+	 * admin_footer（外层表单之外），卡片按钮通过 `form` 属性关联。
+	 */
+	public static function render_forms() {
+		$user_id = (int) self::$footer_user_id;
+		if ( $user_id <= 0 || ( ! self::$need_resend_form && ! self::$need_admin_verify_form ) ) {
+			return;
+		}
+
+		if ( self::$need_resend_form ) {
+			?>
+			<form
+				id="l2d-ai-email-resend-form"
+				method="post"
+				action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>"
+				style="display:none;"
+			>
+				<input type="hidden" name="action" value="l2d_ai_resend_verification">
+				<?php wp_nonce_field( self::NONCE_ACTION ); ?>
+			</form>
+			<?php
+		}
+
+		if ( self::$need_admin_verify_form ) {
+			?>
+			<form
+				id="l2d-ai-email-admin-verify-form"
+				method="post"
+				action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>"
+				style="display:none;"
+			>
+				<input type="hidden" name="action" value="l2d_ai_admin_verify_email">
+				<input type="hidden" name="user_id" value="<?php echo esc_attr( (string) $user_id ); ?>">
+				<?php wp_nonce_field( self::NONCE_ACTION ); ?>
+			</form>
+			<?php
+		}
 	}
 
 	public static function handle_resend() {

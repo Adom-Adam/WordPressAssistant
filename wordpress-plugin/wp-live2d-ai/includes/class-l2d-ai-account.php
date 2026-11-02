@@ -1,17 +1,19 @@
 <?php
 /**
- * 账号自助：改用户名、注销账号，以及注销后的额度继承。
+ * 账号自助：改昵称、注销账号，以及注销后的额度继承。
  *
  * ==================================================================
- * 改用户名
+ * 用户名与昵称
  * ==================================================================
- * WordPress 资料页默认不提供改 user_login 的入口，但 wp_update_user()
- * 本身支持。这里只补三件核心没做的事：
- * - 校验当前密码，避免别人借走已登录的浏览器直接改名；
- * - 检查新用户名是否已被占用（核心更新时不会检查唯一性）；
- * - 改完重新签发登录 cookie，否则旧 cookie 里还是旧用户名，会立刻掉线。
+ * WordPress 里有两个容易混淆的字段：
+ * - `user_login`（用户名）是登录凭据，全局唯一，还参与登录 cookie、
+ *   作者页别名等；改它风险高，注册后直接锁定；
+ * - `display_name`（显示名）是评论、导航、助手面板里给别人看的名字，
+ *   可以随时改。昵称/显示名不另做表单，沿用资料页自带字段；保存时如果
+ *   原来的显示名就是昵称，会跟着新昵称走，避免两个地方各显示一个名字。
  *
- * 中文用户名的放行仍由 L2D_AI_Chinese_Usernames 的过滤器负责。
+ * 中文用户名的放行仍由 L2D_AI_Chinese_Usernames 的过滤器负责，
+ * 但只用于注册，不再提供改名入口。
  *
  * ==================================================================
  * 注销与额度继承
@@ -50,6 +52,9 @@ final class L2D_AI_Account {
 	/** 删号前这个账号的邮箱是否已验证；未验证的账号不留可继承的墓碑。 */
 	private static $pending_verified = array();
 
+	/** 同步 display_name 时避免 wp_update_user() 再次触发 profile_update 造成递归。 */
+	private static $syncing_display_name = false;
+
 	/**
 	 * 只有“用户自己注销”才留墓碑。
 	 *
@@ -61,7 +66,8 @@ final class L2D_AI_Account {
 
 	public static function init() {
 		add_action( 'show_user_profile', array( __CLASS__, 'render_card' ) );
-		add_action( 'admin_post_l2d_ai_change_username', array( __CLASS__, 'handle_change_username' ) );
+		add_action( 'admin_footer', array( __CLASS__, 'render_delete_form' ) );
+		add_action( 'profile_update', array( __CLASS__, 'sync_display_name' ), 10, 2 );
 		add_action( 'admin_post_l2d_ai_delete_account', array( __CLASS__, 'handle_delete_account' ) );
 		add_action( 'delete_user', array( __CLASS__, 'capture_deletion' ), 10, 3 );
 		add_action( 'deleted_user', array( __CLASS__, 'record_tombstone' ), 10, 3 );
@@ -90,39 +96,20 @@ final class L2D_AI_Account {
 		<div class="l2d-ai-account-card" style="max-width:640px;padding:16px 20px;border:1px solid #dcdcde;border-radius:8px;background:#fff;">
 			<?php self::render_notice(); ?>
 
-			<h3 style="margin-top:0;">更改用户名</h3>
-			<p style="margin:0 0 12px;color:#646970;">
-				<?php echo esc_html( '用户名用于登录。没单独设过昵称时，显示名会一起改；设过就保持原昵称。' ); ?>
+			<h3 style="margin-top:0;">账号信息</h3>
+			<p style="margin:0 0 8px;">
+				<strong>用户名</strong>：
+				<code><?php echo esc_html( (string) $user->user_login ); ?></code>
+				<span style="color:#646970;">（登录用，注册后不可更改）</span>
 			</p>
-			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
-				<input type="hidden" name="action" value="l2d_ai_change_username">
-				<input type="hidden" name="user_id" value="<?php echo esc_attr( (string) $user_id ); ?>">
-				<?php wp_nonce_field( self::NONCE_ACTION ); ?>
-				<p style="margin:0 0 8px;">
-					<label for="l2d-ai-new-login"><strong>新用户名</strong></label><br>
-					<input
-						type="text"
-						id="l2d-ai-new-login"
-						name="new_login"
-						class="regular-text"
-						autocomplete="username"
-						placeholder="<?php echo esc_attr( (string) $user->user_login ); ?>"
-						required
-					>
-				</p>
-				<p style="margin:0 0 12px;">
-					<label for="l2d-ai-username-password"><strong>当前密码</strong></label><br>
-					<input
-						type="password"
-						id="l2d-ai-username-password"
-						name="current_password"
-						class="regular-text"
-						autocomplete="current-password"
-						required
-					>
-				</p>
-				<button type="submit" class="button button-primary">保存新用户名</button>
-			</form>
+			<p style="margin:0 0 16px;color:#646970;">
+				<?php
+				echo esc_html(
+					'昵称和显示名请使用上方个人设置里的「昵称」「显示名」字段，改完点页面底部的「更新个人资料」；当前显示名：'
+				);
+				?>
+				<strong><?php echo esc_html( (string) $user->display_name ); ?></strong>
+			</p>
 
 			<hr style="margin:24px 0;">
 
@@ -138,40 +125,37 @@ final class L2D_AI_Account {
 				<p style="margin:0 0 12px;color:#646970;">
 					<?php echo esc_html( '如果你之后用同一个邮箱重新注册，今日已用次数、额外额度和会员会继承过来；QQ 绑定需要重新绑。' ); ?>
 				</p>
-				<form
-					method="post"
-					action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>"
-					onsubmit="return confirm('这是不可撤销的操作，确定要注销吗？');"
-				>
-					<input type="hidden" name="action" value="l2d_ai_delete_account">
-					<input type="hidden" name="user_id" value="<?php echo esc_attr( (string) $user_id ); ?>">
-					<?php wp_nonce_field( self::NONCE_ACTION ); ?>
-					<p style="margin:0 0 8px;">
-						<label for="l2d-ai-delete-password"><strong>当前密码</strong></label><br>
-						<input
-							type="password"
-							id="l2d-ai-delete-password"
-							name="delete_password"
-							class="regular-text"
-							autocomplete="current-password"
-							required
-						>
-					</p>
-					<p style="margin:0 0 12px;">
-						<label for="l2d-ai-delete-confirm">
-							<strong>确认</strong>：输入「注销」两个字
-						</label><br>
-						<input
-							type="text"
-							id="l2d-ai-delete-confirm"
-							name="confirm_delete"
-							class="regular-text"
-							autocomplete="off"
-							required
-						>
-					</p>
-					<button type="submit" class="button button-link-delete">永久注销账号</button>
-				</form>
+				<p style="margin:0 0 8px;">
+					<label for="l2d-ai-delete-password"><strong>当前密码</strong></label><br>
+					<input
+						type="password"
+						id="l2d-ai-delete-password"
+						name="delete_password"
+						class="regular-text"
+						form="l2d-ai-delete-account-form"
+						autocomplete="current-password"
+						required
+					>
+				</p>
+				<p style="margin:0 0 12px;">
+					<label for="l2d-ai-delete-confirm">
+						<strong>确认</strong>：输入「注销」两个字
+					</label><br>
+					<input
+						type="text"
+						id="l2d-ai-delete-confirm"
+						name="confirm_delete"
+						class="regular-text"
+						form="l2d-ai-delete-account-form"
+						autocomplete="off"
+						required
+					>
+				</p>
+				<button
+					type="submit"
+					class="button button-link-delete"
+					form="l2d-ai-delete-account-form"
+				>永久注销账号</button>
 			<?php endif; ?>
 		</div>
 		<?php
@@ -198,82 +182,112 @@ final class L2D_AI_Account {
 	}
 
 	// ------------------------------------------------------------------
-	// 改用户名
+	// 资料页更新：昵称跟随显示名
 	// ------------------------------------------------------------------
 
-	public static function handle_change_username() {
-		$user_id = self::authorize_self();
+	/**
+	 * 用户点「更新个人资料」后，如果原来的显示名就是昵称，就让它跟着新昵称走。
+	 *
+	 * WordPress 的「昵称」和「显示名」是两个字段：只改昵称时，公开显示名
+	 * 不会自动变化。这里只在“显示名原本等于昵称”时同步，用户如果主动在
+	 * 「显示名」下拉框里选了别的值，就尊重他的选择，不覆盖。
+	 *
+	 * @param int     $user_id       用户 ID。
+	 * @param WP_User $old_user_data 更新前的用户对象。
+	 */
+	public static function sync_display_name( $user_id, $old_user_data ) {
+		if ( self::$syncing_display_name || ! isset( $_POST['nickname'] ) ) {
+			return;
+		}
+
+		$user_id = (int) $user_id;
 		$user    = get_userdata( $user_id );
-		if ( ! $user instanceof WP_User ) {
-			self::fail( '找不到当前账号。' );
+		if ( $user_id <= 0 || ! $user instanceof WP_User ) {
+			return;
 		}
 
-		$password = isset( $_POST['current_password'] )
-			? (string) wp_unslash( $_POST['current_password'] )
+		$nickname = trim( sanitize_text_field( wp_unslash( $_POST['nickname'] ) ) );
+		if ( '' === $nickname ) {
+			return;
+		}
+
+		$old_display  = isset( $old_user_data->display_name )
+			? (string) $old_user_data->display_name
 			: '';
-		if ( '' === $password || ! wp_check_password( $password, $user->user_pass, $user_id ) ) {
-			self::fail( '当前密码不正确，用户名没有修改。' );
-		}
-
-		$new_login = isset( $_POST['new_login'] )
-			? trim( (string) wp_unslash( $_POST['new_login'] ) )
+		$old_nickname = isset( $old_user_data->nickname )
+			? (string) $old_user_data->nickname
 			: '';
-		if ( '' === $new_login ) {
-			self::fail( '请填写新用户名。' );
-		}
-		if ( strlen( $new_login ) > 60 ) {
-			self::fail( '用户名太长，最多 60 个字节。' );
-		}
-		if ( ! validate_username( $new_login ) ) {
-			self::fail( '这个用户名包含不允许的字符。' );
-		}
-		// validate_username() 用的是非严格清洗，会把 UTF-8 高位字节都放过；
-		// 这里再用核心更新时真正使用的严格模式比一次，表情符号、全角标点
-		// 就不会出现“校验通过、保存时被悄悄删掉”的情况。
-		if ( sanitize_user( $new_login, true ) !== $new_login ) {
-			self::fail( '这个用户名包含不允许的字符。' );
-		}
-		if ( $new_login === $user->user_login ) {
-			self::fail( '新用户名和现在一样。' );
+
+		// 原来的显示名不是昵称，说明用户一直用别的公开名字；不擅自改。
+		if ( $old_display !== $old_nickname ) {
+			return;
 		}
 
-		$existing = username_exists( $new_login );
-		if ( $existing && (int) $existing !== $user_id ) {
-			self::fail( '这个用户名已经被占用了。' );
+		// 用户在「显示名」下拉框里主动选了别的值：保留他的选择。
+		$posted_display = isset( $_POST['display_name'] )
+			? sanitize_text_field( wp_unslash( $_POST['display_name'] ) )
+			: null;
+		if (
+			null !== $posted_display
+			&& $posted_display !== $old_display
+			&& $posted_display !== $nickname
+		) {
+			return;
 		}
 
-		// 和注册流程一样尊重 illegal_user_logins，避免用户改成保留名。
-		$illegal = array_map(
-			'strtolower',
-			array_map( 'strval', (array) apply_filters( 'illegal_user_logins', array() ) )
+		if ( $user->display_name === $nickname ) {
+			return;
+		}
+
+		self::$syncing_display_name = true;
+		wp_update_user(
+			array(
+				'ID'           => $user_id,
+				'display_name' => $nickname,
+			)
 		);
-		if ( in_array( strtolower( $new_login ), $illegal, true ) ) {
-			self::fail( '这个用户名不可用。' );
+		self::$syncing_display_name = false;
+	}
+
+	// ------------------------------------------------------------------
+	// 注销表单的容器
+	// ------------------------------------------------------------------
+
+	/**
+	 * 资料页的「更新个人资料」本身是一个 `<form>`，注销表单不能再嵌一个
+	 * `<form>`，否则浏览器会提前关掉外层表单，底部的「更新个人资料」
+	 * 按钮就会点了没反应。
+	 *
+	 * 这里把注销表单的容器放到页面底部（外层表单之外），卡片里的密码框、
+	 * 确认框和按钮用 HTML5 的 `form="..."` 属性关联过去。这样两个表单
+	 * 各走各的，互不嵌套。
+	 */
+	public static function render_delete_form() {
+		if ( ! is_admin() || ! function_exists( 'get_current_screen' ) ) {
+			return;
+		}
+		$screen = get_current_screen();
+		if ( ! $screen || 'profile' !== $screen->id ) {
+			return;
 		}
 
-		$args = array(
-			'ID'         => $user_id,
-			'user_login' => $new_login,
-		);
-		// 大多数人从没单独设过昵称，显示名默认等于用户名；这种情况下
-		// 一起改掉，否则评论区会继续显示旧名字，用户会以为没生效。
-		if ( $user->display_name === $user->user_login ) {
-			$args['display_name'] = $new_login;
+		$user_id = get_current_user_id();
+		if ( $user_id <= 0 || user_can( $user_id, 'manage_options' ) ) {
+			return;
 		}
-
-		$result = wp_update_user( $args );
-		if ( is_wp_error( $result ) ) {
-			self::fail( $result->get_error_message() );
-		}
-
-		// 登录 cookie 里带着用户名，不重新签发的话下一次请求就会掉线。
-		// 先清缓存，确保新 cookie 用的是新用户名，而不是旧对象。
-		clean_user_cache( $user_id );
-		wp_set_auth_cookie( $user_id, true, is_ssl() );
-		wp_set_current_user( $user_id );
-
-		self::notice( '用户名已改为 ' . $new_login . '，下次登录请使用新用户名。' );
-		self::redirect();
+		?>
+		<form
+			id="l2d-ai-delete-account-form"
+			method="post"
+			action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>"
+			onsubmit="return confirm('这是不可撤销的操作，确定要注销吗？');"
+			style="display:none;"
+		>
+			<input type="hidden" name="action" value="l2d_ai_delete_account">
+			<input type="hidden" name="user_id" value="<?php echo esc_attr( (string) $user_id ); ?>">
+			<?php wp_nonce_field( self::NONCE_ACTION ); ?>
+		</form>
+		<?php
 	}
 
 	// ------------------------------------------------------------------

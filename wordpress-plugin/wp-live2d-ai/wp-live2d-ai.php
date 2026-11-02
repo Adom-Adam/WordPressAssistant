@@ -3,7 +3,7 @@
  * Plugin Name:       Live2D AI 小助手
  * Plugin URI:        https://github.com/Adom-Adam/WordPressAssistant
  * Description:       在博客左下角显示 Live2D AI 助手。前端只负责展示与交互，AI 逻辑由独立的 Python 服务提供。
- * Version:           0.3.7
+ * Version:           0.3.9
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * Author:            Adom
@@ -20,14 +20,16 @@ require_once __DIR__ . '/includes/class-l2d-ai-users.php';
 require_once __DIR__ . '/includes/class-l2d-ai-chinese-usernames.php';
 // QQ 绑定：个人资料页的绑定卡片（绑定码、刷新、解绑）。
 require_once __DIR__ . '/includes/class-l2d-ai-bind.php';
-// 账号自助：改用户名、注销账号、注销后的额度继承。
+// 注册页：设置密码，并说明用户名不可改、昵称可改。
+require_once __DIR__ . '/includes/class-l2d-ai-registration.php';
+// 账号自助：改昵称、注销账号、注销后的额度继承。
 require_once __DIR__ . '/includes/class-l2d-ai-account.php';
 // 邮箱验证：没有它，同邮箱继承额度只是“谁先填谁拿走”。
 require_once __DIR__ . '/includes/class-l2d-ai-email-verification.php';
 
 final class L2D_AI_Plugin {
 
-	const VERSION          = '0.3.7';
+	const VERSION          = '0.3.9';
 	const OPTION_API_BASE  = 'l2d_ai_api_base';
 	const OPTION_NAME      = 'l2d_ai_assistant_name';
 	const OPTION_SIZE      = 'l2d_ai_size_preset';
@@ -74,7 +76,9 @@ final class L2D_AI_Plugin {
 		L2D_AI_Users::init();
 		// QQ 绑定：个人资料页的绑定卡片。
 		L2D_AI_Bind::init();
-		// 账号自助：改用户名、注销、注销后的额度继承。
+		// 注册页：设置密码 + 用户名/昵称说明。
+		L2D_AI_Registration::init();
+		// 账号自助：改昵称、注销、注销后的额度继承。
 		L2D_AI_Account::init();
 		// 邮箱验证：注册后发信，未验证不能换小助手 token / 绑定 QQ / 继承额度。
 		L2D_AI_Email_Verification::init();

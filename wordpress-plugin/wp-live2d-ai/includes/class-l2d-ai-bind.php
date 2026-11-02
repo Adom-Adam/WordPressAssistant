@@ -26,8 +26,19 @@ final class L2D_AI_Bind {
 
 	const NONCE_ACTION = 'l2d_ai_bind';
 
+	/**
+	 * 需要放到资料页底部（外层资料表单之外）的表单：类型 => 用户 ID。
+	 *
+	 * 资料页本身是一个 `<form>`，卡片里再嵌 `<form>` 会让浏览器提前关掉
+	 * 外层表单，底部「更新个人资料」就点了没反应。这里只记录本次要渲染
+	 * 哪几个表单，真正容器由 admin_footer 输出，卡片里的按钮用 HTML5
+	 * `form` 属性关联过去。
+	 */
+	private static $footer_forms = array();
+
 	public static function init() {
 		add_action( 'show_user_profile', array( __CLASS__, 'render_card' ) );
+		add_action( 'admin_footer', array( __CLASS__, 'render_forms' ) );
 		add_action( 'admin_post_l2d_ai_bind_refresh', array( __CLASS__, 'handle_refresh' ) );
 		add_action( 'admin_post_l2d_ai_bind_unbind', array( __CLASS__, 'handle_unbind' ) );
 		// 有人被删号时顺手解绑，免得那个 QQ 永远占着“已绑定”。
@@ -126,16 +137,13 @@ final class L2D_AI_Bind {
 		<p style="margin:0 0 12px;color:#646970;">
 			<?php echo esc_html( '如需换绑，请先解绑，再刷新绑定码用新的 QQ 绑定。' ); ?>
 		</p>
-		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
-			<input type="hidden" name="action" value="l2d_ai_bind_unbind">
-			<input type="hidden" name="user_id" value="<?php echo esc_attr( (string) $user_id ); ?>">
-			<?php wp_nonce_field( self::NONCE_ACTION ); ?>
-			<button
-				type="submit"
-				class="button"
-				onclick="return confirm('解绑后这个 QQ 将无法再和我聊天，确定吗？');"
-			><?php echo esc_html( '解绑这个 QQ' ); ?></button>
-		</form>
+		<?php self::$footer_forms['unbind'] = $user_id; ?>
+		<button
+			type="submit"
+			class="button"
+			form="l2d-ai-bind-unbind-form"
+			onclick="return confirm('解绑后这个 QQ 将无法再和我聊天，确定吗？');"
+		><?php echo esc_html( '解绑这个 QQ' ); ?></button>
 		<?php
 	}
 
@@ -167,12 +175,14 @@ final class L2D_AI_Bind {
 				<?php echo esc_html( '绑定码暂时没能同步到 AI 服务，稍后刷新页面会自动重试：' . $sync_error ); ?>
 			</p>
 		<?php endif; ?>
-		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="margin-top:12px;">
-			<input type="hidden" name="action" value="l2d_ai_bind_refresh">
-			<input type="hidden" name="user_id" value="<?php echo esc_attr( (string) $user_id ); ?>">
-			<?php wp_nonce_field( self::NONCE_ACTION ); ?>
-			<button type="submit" class="button"><?php echo esc_html( '刷新绑定码' ); ?></button>
-		</form>
+		<?php self::$footer_forms['refresh'] = $user_id; ?>
+		<p style="margin-top:12px;">
+			<button
+				type="submit"
+				class="button"
+				form="l2d-ai-bind-refresh-form"
+			><?php echo esc_html( '刷新绑定码' ); ?></button>
+		</p>
 		<script>
 		(function () {
 			var buttons = document.querySelectorAll('[data-l2d-bind-copy]');
@@ -194,6 +204,48 @@ final class L2D_AI_Bind {
 		})();
 		</script>
 		<?php
+	}
+
+	/**
+	 * 在页面底部输出卡片按钮真正要提交的表单容器。
+	 *
+	 * 只有 render_card 确实渲染了对应按钮时才输出；容器放在资料页外层
+	 * 表单之外，避免嵌套。表单本身用 display:none 隐藏，用户只会看到
+	 * 卡片里的按钮。
+	 */
+	public static function render_forms() {
+		if ( empty( self::$footer_forms ) ) {
+			return;
+		}
+
+		foreach ( self::$footer_forms as $kind => $user_id ) {
+			$user_id = (int) $user_id;
+			if ( $user_id <= 0 ) {
+				continue;
+			}
+
+			if ( 'unbind' === $kind ) {
+				$form_id = 'l2d-ai-bind-unbind-form';
+				$action  = 'l2d_ai_bind_unbind';
+			} elseif ( 'refresh' === $kind ) {
+				$form_id = 'l2d-ai-bind-refresh-form';
+				$action  = 'l2d_ai_bind_refresh';
+			} else {
+				continue;
+			}
+			?>
+			<form
+				id="<?php echo esc_attr( $form_id ); ?>"
+				method="post"
+				action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>"
+				style="display:none;"
+			>
+				<input type="hidden" name="action" value="<?php echo esc_attr( $action ); ?>">
+				<input type="hidden" name="user_id" value="<?php echo esc_attr( (string) $user_id ); ?>">
+				<?php wp_nonce_field( self::NONCE_ACTION ); ?>
+			</form>
+			<?php
+		}
 	}
 
 	// ------------------------------------------------------------------
