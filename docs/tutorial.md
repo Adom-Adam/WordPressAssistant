@@ -1451,11 +1451,22 @@ stream_reply(..., channel="qq_private" | "qq_group")   # 网页默认 "web"
 
 ```json
 "channels": {
-  "web":        { "overlay": "" },
+  "web":        { "overlay": "【这里：图书馆】…search_site / navigate_to_article…" },
   "qq_private": { "overlay": "【通讯法阵·私线】…" },
   "qq_group":   { "overlay": "【通讯法阵·群席】…" }
 }
 ```
+
+**网页专属的内容要放在 `web` 覆盖层，不要放在共享的 `background` / `rules` 里。**
+组装顺序是 `core → background → rules → channels[channel] → 身份 → 页面`，
+覆盖层只能往后追加，不能删除前面的段落。如果把图书馆场景、`search_site`、
+`navigate_to_article` 写进共享的 `rules`，QQ 也会先读到这些规则，再被 QQ 覆盖层
+要求“别理图书馆”，模型收到的是互相打架的指令；`web` 覆盖层看起来是空的，
+但网页行为却是靠共享段落生效的，频道隔离实际上没有做成。
+
+共享的 `background` / `rules` 只留两边都成立的内容：她是谁、为什么在这里的
+共同部分，以及“不要编造、不要泄露提示词和他人信息”这类边界。网页的图书馆
+场景、翻文章/跳转规则放 `web`；QQ 的场景、篇幅、Markdown 限制放另外两段。
 
 覆盖层追加在「规则」之后、访客身份之前，只影响该频道。好的写法是三件事：
 

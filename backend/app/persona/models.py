@@ -12,10 +12,10 @@
       "version": 1,
       "name": "梅林",
       "core": "……她是谁、怎么说话……",
-      "background": "……她为什么在这里……",
-      "rules": "……检索、跳转和安全边界……",
+      "background": "……她为什么在这里（所有频道都成立的部分）……",
+      "rules": "……所有频道共享的事实与安全边界……",
       "channels": {
-        "web": {"overlay": ""},
+        "web": {"overlay": "……网页专属的场景、检索与跳转规则……"},
         "qq_private": {"overlay": "……私聊额外注意事项……"},
         "qq_group": {"overlay": "……群聊额外注意事项……"}
       },
@@ -27,10 +27,16 @@
 - 图书馆身份放在 core 之后，写成“差事/背景”，避免盖过梅林本人；
 - 规则只负责事实准确和权限，不参与塑造性格。
 
+`background` 和 `rules` 是**所有频道共享**的，所以只写“在网页和 QQ 里都成立”
+的内容。只在网页成立的东西（图书馆场景、search_site、navigate_to_article、
+页面跳转按钮）必须放进 `channels.web.overlay`；否则 QQ 也会先读到这些规则，
+再靠 QQ 覆盖层“别理前面那段”去压，提示词内部会互相打架。
+
 `channels` 是频道覆盖层。同一份核心人设，网页、QQ 私聊、QQ 群可以用不同的
 篇幅、格式和礼仪要求。频道名由调用方传进 `build_system_prompt`：
 网页是 `web`，QQ 私聊是 `qq_private`，QQ 群是 `qq_group`；没有覆盖层的
-频道只是不加这一段，不会报错。
+频道只是不加这一段，不会报错。覆盖层只能“追加”，不能删除前面的段落，
+所以共享段落里不要放频道专属内容。
 """
 
 from __future__ import annotations

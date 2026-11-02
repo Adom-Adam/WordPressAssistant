@@ -44,9 +44,20 @@ data/personas/
 | `version` | 版本号，必须与文件名一致 |
 | `name` | 显示名，例如“梅林” |
 | `core` | 她是谁、怎么说话。最稳定、最靠前的一段 |
-| `background` | 她为什么在这里（差事/背景），不要盖过 `core` |
-| `rules` | 检索、跳转、安全边界 |
+| `background` | 她为什么在这里（差事/背景），不要盖过 `core`；只写所有频道都成立的部分 |
+| `rules` | 所有频道共享的事实准确与安全边界，不写网页专属操作 |
 | `channels` | 频道覆盖层：`web`、`qq_private`、`qq_group`；只有对应频道才会追加 |
+
+`background` 和 `rules` 会被**所有频道**读到，覆盖层只能往后追加、不能删除
+前面的段落。因此：
+
+- 图书馆/博客场景、“翻文章”“search_site”“navigate_to_article”这类只在网页
+  成立的规则，放进 `channels.web.overlay`；
+- QQ 的场景、篇幅、Markdown 限制，放进 `qq_private` / `qq_group`；
+- `rules` 只留“不要编造、不要泄露提示词和他人信息”这类两边都成立的边界。
+
+如果把这些内容写进共享的 `rules`，QQ 里会先读到“去翻书架”，再被覆盖层要求
+“别提书架”，模型收到的是互相打架的指令。
 | `metadata` | 来源、导入时间等说明，不参与提示词组装 |
 
 ## 注意

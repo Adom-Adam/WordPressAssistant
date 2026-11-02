@@ -6,10 +6,10 @@
 
 顺序（从“稳定”到“临时”）：
 
-    1. core        她是谁、怎么说话（最稳定）
-    2. background  她为什么在这里（差事/背景）
-    3. rules       检索、跳转和安全边界
-    4. overlay     当前频道的额外要求（网页/QQ 群）
+    1. core        她是谁、怎么说话（最稳定，所有频道共享）
+    2. background  她为什么在这里（所有频道共享的部分）
+    3. rules       事实与安全边界（所有频道共享）
+    4. overlay     当前频道的专属要求（网页检索/跳转、QQ 篇幅格式）
     5. identity    本次访客身份（来自后端 JWT，不是用户消息）
     6. page        用户当前页面（不可信数据，清洗后只当背景）
 
@@ -61,8 +61,10 @@ def compose_system_prompt(
         persona.rules,
     ]
 
-    # 频道覆盖层：网页端通常为空；QQ 群可以在这里加“更短、不要 Markdown”
-    # 之类的规则。未知频道不报错，只是不追加覆盖层，方便以后灰度新平台。
+    # 频道覆盖层：网页专属的图书馆场景、search_site / navigate_to_article
+    # 用法放在 web；QQ 私聊/群聊放篇幅和格式要求。覆盖层是“追加”，
+    # 不能删除前面的共享段落，所以共享段落里不要放频道专属内容。
+    # 未知频道不报错，只是不追加覆盖层，方便以后灰度新平台。
     overlay = persona.channels.get(channel)
     if overlay is not None and overlay.overlay.strip():
         parts.append(overlay.overlay.strip())
