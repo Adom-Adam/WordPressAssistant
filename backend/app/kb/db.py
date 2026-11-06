@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import get_settings
+from app.kb import vectors
 
 # db.py 在 backend/app/kb/ 下，parents[2] 就是 backend/。
 # 配置里的相对路径统一以 backend/ 为基准，避免受启动目录影响。
@@ -101,6 +102,9 @@ def connect() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
+    # 每条连接都要单独加载扩展；加载失败只是让向量检索不可用，
+    # FTS5 查询和写入仍然正常。
+    vectors.load_extension(conn)
     return conn
 
 
@@ -112,6 +116,8 @@ def init_schema(conn: sqlite3.Connection | None = None) -> None:
     try:
         conn.executescript(_SCHEMA)
         conn.commit()
+        settings = get_settings()
+        vectors.ensure_schema(conn, getattr(settings, "embedding_dim", 512))
     finally:
         if owns_connection:
             conn.close()
@@ -211,6 +217,8 @@ def clear_index(conn: sqlite3.Connection) -> None:
     只有图片 URL 或内容变化时才需要重新调用视觉模型。
     """
 
+    # 先删向量：向量的 rowid 指向 chunks，反过来删除会留下悬空向量。
+    vectors.clear(conn)
     conn.execute("DELETE FROM chunks")
     conn.execute("DELETE FROM posts")
     conn.commit()
@@ -231,6 +239,7 @@ def stats(conn: sqlite3.Connection | None = None) -> dict[str, int]:
             "images": "SELECT COUNT(*) FROM images WHERE error IS NULL",
         }.items():
             result[key] = int(conn.execute(sql).fetchone()[0])
+        result["vectors"] = vectors.stats(conn)["vectors"]
         return result
     finally:
         if owns_connection:
