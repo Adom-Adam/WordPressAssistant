@@ -30,7 +30,8 @@ import sqlite3
 from typing import Any
 
 from app.config import get_settings
-from app.kb import db
+from app.embeddings import get_embedder
+from app.kb import db, vectors
 from app.kb.text import build_match_query, make_excerpt, tokenize
 
 # bm25() 的权重按 FTS5 表的列顺序传入：
@@ -41,6 +42,7 @@ _BM25 = "bm25(chunks, 0, 0, 0, 0, 0, 8.0, 1.0, 3.0)"
 
 _SELECT = f"""
     SELECT
+        rowid,
         post_id,
         chunk_index,
         kind,
@@ -57,11 +59,26 @@ _SELECT = f"""
 _RECENT_WORDS = {"最近", "最新", "更新", "新东西", "东西"}
 
 
+def _rowid_of(row: Any) -> int:
+    """取出块的主键；sqlite3.Row 缺列抛 IndexError，dict 缺键抛 KeyError。"""
+    for key in ("rowid", "_rowid"):
+        try:
+            return int(row[key])
+        except (IndexError, KeyError, TypeError, ValueError):
+            continue
+    return 0
+
+
 def _row_to_result(row: sqlite3.Row, tokens: list[str]) -> dict[str, Any]:
     """把一行 SQLite 结果转成前端/工具使用的字典。"""
 
     body = str(row["body"] or "")
     kind = str(row["kind"] or "text")
+    try:
+        rank = float(row["rank"])
+    except (IndexError, KeyError, TypeError, ValueError):
+        # 向量召回的 dict 可能没有 bm25 分数；后续会用 RRF 分数覆盖。
+        rank = 0.0
     if kind == "image":
         # 图片块的 body 末尾有一行“关键词：a、b、c”，只用于检索，
         # 不适合展示在来源摘要里，所以截取时先去掉它。
@@ -78,7 +95,7 @@ def _row_to_result(row: sqlite3.Row, tokens: list[str]) -> dict[str, Any]:
         "kind": "image" if kind == "image" else "article",
         "image_url": row["image_url"] if kind == "image" else None,
         # rank 是 BM25 分数，越小越相关；取负数变成“越大越好”，方便阅读。
-        "score": round(-float(row["rank"]), 6),
+        "score": round(-rank, 6),
     }
 
 
@@ -104,22 +121,32 @@ def _title_bonus(title: str, tokens: list[str]) -> float:
     return 1.5 * hits / len(tokens)
 
 
-def _dedupe_by_post(rows: list[sqlite3.Row], tokens: list[str]) -> list[dict[str, Any]]:
+def _dedupe_by_post(
+    rows: list[Any],
+    tokens: list[str],
+    *,
+    base_scores: dict[int, float] | None = None,
+) -> list[dict[str, Any]]:
     """同一篇文章可能命中多个块，只保留最相关的一条。
 
     如果这篇文章的文字块先被保留，但后面又出现了图片块，
     就把图片地址补到结果上，让来源卡片能显示缩略图。
-    最后按“BM25 分数 + 标题命中加成”重新排序，
+    最后按“基础分数 + 标题命中加成”重新排序，
     让标题就包含关键词的文章排在最前面。
+
+    `base_scores` 存在时使用 RRF 分数（块 rowid → 分数）；不存在时
+    保持原来的“-BM25”逻辑，所以纯 FTS 路径的行为不变。
     """
 
     results: dict[int, dict[str, Any]] = {}
+    rowids: dict[int, int] = {}
     order: list[int] = []
 
     for row in rows:
         post_id = int(row["post_id"])
         if post_id not in results:
             results[post_id] = _row_to_result(row, tokens)
+            rowids[post_id] = _rowid_of(row)
             order.append(post_id)
             continue
 
@@ -129,11 +156,14 @@ def _dedupe_by_post(rows: list[sqlite3.Row], tokens: list[str]) -> list[dict[str
 
     deduped = [results[post_id] for post_id in order]
     for item in deduped:
-        item["score"] = round(
-            float(item["score"]) + _title_bonus(item["title"], tokens), 6
-        )
+        post_id = int(item["post_id"])
+        if base_scores is None:
+            base = float(item["score"])
+        else:
+            base = base_scores.get(rowids.get(post_id, 0), 0.0)
+        item["score"] = round(base + _title_bonus(item["title"], tokens), 6)
 
-    # score 越大越相关；分数相同时保持原来的 FTS 顺序（sorted 是稳定排序）。
+    # score 越大越相关；分数相同时保持原来的召回顺序（sorted 是稳定排序）。
     deduped.sort(key=lambda item: item["score"], reverse=True)
     return deduped
 
@@ -227,6 +257,115 @@ def list_recent(limit: int = 4) -> list[dict[str, Any]]:
         conn.close()
 
 
+def _fts_candidates(
+    conn: sqlite3.Connection,
+    tokens: list[str],
+    query: str,
+    limit: int,
+) -> list[sqlite3.Row]:
+    """纯 FTS 召回：AND → OR 过滤 → 单词重查 → LIKE 兜底。"""
+    rows: list[sqlite3.Row] = []
+
+    if tokens:
+        # 第一轮：AND，要求所有关键词都出现。准确率高，适合大多数问题。
+        # 候选集要取得比最终结果大很多：同一篇文章有很多块，
+        # 如果只取 limit*5，标题完全匹配的文章可能排在第 16 个块，
+        # 根本进不了后面的“按文章去重 + 标题加成”阶段。
+        # 知识库只有几百个块，一次多取几十行成本可以忽略。
+        rows = _run_fts(conn, build_match_query(tokens, "AND"), max(limit * 20, 60))
+
+        # 第二轮：如果 AND 太严格，退一步用 OR 提高召回，
+        # 但要求命中足够多的关键词，过滤掉“只碰巧命中一个词”的结果。
+        if not rows and len(tokens) > 1:
+            candidates = _run_fts(conn, build_match_query(tokens, "OR"), limit * 10)
+            required = max(2, math.ceil(len(tokens) * 0.6))
+            rows = [
+                row
+                for row in candidates
+                if _matched_token_count(f"{row['title']} {row['body']}", tokens)
+                >= required
+            ]
+
+        # 只有一个关键词时，AND/OR 等价，直接再查一次即可。
+        if not rows and len(tokens) == 1:
+            rows = _run_fts(conn, build_match_query(tokens, "OR"), limit * 5)
+
+    # 兜底：分词后没有有效词，或 FTS 完全没命中时，用 LIKE 做一次
+    # 连续子串匹配。LIKE 会全表扫描，但知识库通常只有几百块，影响可接受。
+    if not rows:
+        like = f"%{query}%"
+        rows = list(
+            conn.execute(
+                _SELECT + " WHERE title LIKE ? OR body LIKE ? ORDER BY post_id LIMIT ?",
+                (like, like, limit * 5),
+            )
+        )
+    return rows
+
+
+def _vector_candidates(
+    conn: sqlite3.Connection,
+    query: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """向量召回：返回普通 dict，按向量距离从近到远排列。"""
+    encoder = get_embedder()
+    if not getattr(encoder, "available", False):
+        return []
+
+    encoded = encoder.encode([query], query=True)
+    if not encoded:
+        return []
+
+    ids = [rowid for rowid, _distance in vectors.search(conn, encoded[0], limit)]
+    if not ids:
+        return []
+
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        "SELECT rowid, post_id, chunk_index, kind, image_url, url, title, body, "
+        f"0.0 AS rank FROM chunks WHERE rowid IN ({placeholders})",
+        ids,
+    ).fetchall()
+    by_id = {int(row["rowid"]): dict(row) for row in rows}
+    return [by_id[rowid] for rowid in ids if rowid in by_id]
+
+
+def _rrf_merge(
+    fts_rows: list[Any],
+    vec_rows: list[Any],
+    k: int = 60,
+) -> list[dict[str, Any]]:
+    """Reciprocal Rank Fusion：两条召回路径按名次累加，不比较原始分数。
+
+    BM25 分值和余弦距离量纲不同，直接相加没有意义；RRF 只看“排第几”，
+    所以不需要归一化。同时被两路命中的块会得到两份分数，自然排前面。
+    """
+    scores: dict[int, float] = {}
+    rows_by_id: dict[int, dict[str, Any]] = {}
+
+    for rank, row in enumerate(fts_rows):
+        rowid = _rowid_of(row)
+        if not rowid:
+            continue
+        rows_by_id.setdefault(rowid, dict(row))
+        scores[rowid] = scores.get(rowid, 0.0) + 1.0 / (k + rank + 1)
+
+    for rank, row in enumerate(vec_rows):
+        rowid = _rowid_of(row)
+        if not rowid:
+            continue
+        rows_by_id.setdefault(rowid, dict(row))
+        scores[rowid] = scores.get(rowid, 0.0) + 1.0 / (k + rank + 1)
+
+    merged: list[dict[str, Any]] = []
+    for rowid, score in sorted(scores.items(), key=lambda item: item[1], reverse=True):
+        item = dict(rows_by_id[rowid])
+        item["_rrf_score"] = score
+        merged.append(item)
+    return merged
+
+
 def search_site(query: str, limit: int | None = None) -> list[dict[str, Any]]:
     """检索站内文章，返回最多 limit 条来源。"""
 
@@ -254,43 +393,31 @@ def search_site(query: str, limit: int | None = None) -> list[dict[str, Any]]:
     db.init_schema()
     conn = db.connect()
     try:
-        rows: list[sqlite3.Row] = []
+        rows = _fts_candidates(conn, tokens, query, limit)
 
-        if tokens:
-            # 第一轮：AND，要求所有关键词都出现。准确率高，适合大多数问题。
-            # 候选集要取得比最终结果大很多：同一篇文章有很多块，
-            # 如果只取 limit*5，标题完全匹配的文章可能排在第 16 个块，
-            # 根本进不了后面的“按文章去重 + 标题加成”阶段。
-            # 知识库只有几百个块，一次多取几十行成本可以忽略。
-            rows = _run_fts(conn, build_match_query(tokens, "AND"), max(limit * 20, 60))
-
-            # 第二轮：如果 AND 太严格，退一步用 OR 提高召回，
-            # 但要求命中足够多的关键词，过滤掉“只碰巧命中一个词”的结果。
-            if not rows and len(tokens) > 1:
-                candidates = _run_fts(conn, build_match_query(tokens, "OR"), limit * 10)
-                required = max(2, math.ceil(len(tokens) * 0.6))
-                rows = [
-                    row
-                    for row in candidates
-                    if _matched_token_count(f"{row['title']} {row['body']}", tokens)
-                    >= required
-                ]
-
-            # 只有一个关键词时，AND/OR 等价，直接再查一次即可。
-            if not rows and len(tokens) == 1:
-                rows = _run_fts(conn, build_match_query(tokens, "OR"), limit * 5)
-
-        # 兜底：分词后没有有效词，或 FTS 完全没命中时，用 LIKE 做一次
-        # 连续子串匹配。LIKE 会全表扫描，但知识库通常只有几百块，影响可接受。
-        if not rows:
-            like = f"%{query}%"
-            rows = list(
-                conn.execute(
-                    _SELECT
-                    + " WHERE title LIKE ? OR body LIKE ? ORDER BY post_id LIMIT ?",
-                    (like, like, limit * 5),
-                )
+        # 向量召回是 FTS 的补充：关键词完全对不上、但语义相近的内容
+        # 只有向量能找到。模型不可用或 sqlite-vec 加载失败时返回空列表，
+        # 下面的逻辑自动退化成纯 FTS，行为与引入向量前一致。
+        vec_rows: list[dict[str, Any]] = []
+        if getattr(settings, "kb_vector_enabled", False) and tokens:
+            vec_rows = _vector_candidates(
+                conn,
+                query,
+                getattr(settings, "kb_hybrid_recall", 40),
             )
+
+        if vec_rows:
+            merged = _rrf_merge(
+                rows,
+                vec_rows,
+                k=getattr(settings, "kb_rrf_k", 60),
+            )
+            # 按文章去重时用 RRF 分数排序：BM25 与向量距离量纲不同，
+            # 只有融合后的名次分数可以放在一起比较。
+            base_scores = {
+                _rowid_of(item): float(item["_rrf_score"]) for item in merged
+            }
+            return _dedupe_by_post(merged, tokens, base_scores=base_scores)[:limit]
 
         return _dedupe_by_post(rows, tokens)[:limit]
     finally:
