@@ -806,6 +806,39 @@ curl -sN -X POST http://127.0.0.1:18080/api/chat \
 修完后「ROS2 节点」第一条是《ROS2学习记录（2）-节点》，
 「ROS2 话题」第一条是《ROS2学习记录（3）-话题》。
 
+### 9.7 向量检索（可选增强）
+
+关键词检索要求问题和正文有字面重合。用户问“分布式通信中间件”，
+而文章里只写“DDS 是通信总线”时，FTS 一条都命中不了。
+向量检索把文本变成 512 维向量，用语义距离找相近的块，补上这类“换个说法就搜不到”的缺口。
+
+模型：`BAAI/bge-small-zh-v1.5`，24M 参数，CPU 上也能跑。
+把模型文件放到 `backend/model/bge-small-zh-v1.5/`（目录里要有 `config.json`），
+该目录已在 `.gitignore` 里，不会进仓库。`sentence-transformers` 和 `torch`
+是可选依赖，装在 `backend/.venv` 里。
+
+```bash
+# 首次同步：FTS + 向量
+cd backend
+uv run python -m app.kb.sync
+
+# 暂时不生成向量，只建 FTS 索引
+uv run python -m app.kb.sync --no-vectors
+
+# 模型后来才下载：不重新拉文章，只给现有块补向量
+uv run python -m app.kb.sync --vectors-only
+```
+
+同步完成的统计里会多一行 `向量：N 条`。
+
+检索时两条召回路径各自排序，再用 RRF（Reciprocal Rank Fusion）融合：
+只看“排第几”，不看原始分数，因为 BM25 分值和余弦距离量纲不同，直接相加没有意义。
+同时被两路命中的块会拿到两份分数，自然排到前面。
+
+**降级是硬要求**：模型目录不存在、`sentence-transformers` 没装或加载失败时，
+同步只打印一句提示并跳过向量，检索自动退回纯 FTS，聊天功能不受影响。
+部署时忘传模型，最坏的结果是“语义检索没生效”，而不是“后端起不来”。
+
 ---
 
 ## 10. 注册、登录与邮件：先用 WordPress 原生能力
@@ -1546,6 +1579,7 @@ stream_reply(..., channel="qq_private" | "qq_group")   # 网页默认 "web"
 | 标题匹配的文章排不到第一 | `MATCH` 只查了 `tokens`，标题权重无效 | 扩大候选集 + 标题命中加成 |
 | 改了 `.env` 但模型没变 | 配置在进程启动时缓存 | 重启后端再看 `/api/health` |
 | 搜不到刚发的文章 | 索引未更新 | 重新 `uv run python -m app.kb.sync` |
+| 同步提示“本地嵌入模型不可用” | 模型目录或可选依赖缺失 | 检查 `backend/model/bge-small-zh-v1.5/`，再跑 `uv run python -m app.kb.sync --vectors-only`；不修也能用，只是退回纯 FTS |
 
 ---
 

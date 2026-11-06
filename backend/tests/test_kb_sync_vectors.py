@@ -81,6 +81,12 @@ def test_resync_does_not_leave_stale_vectors(tmp_path, monkeypatch) -> None:
         conn.close()
 
 
+def test_build_vectors_with_unavailable_embedder_returns_zero(tmp_path, monkeypatch) -> None:
+    _patch(monkeypatch, tmp_path)
+    sync.sync(with_vision=False, embedder=FakeEmbedder(), with_vectors=False)
+    assert sync.build_vectors(embedder=UnavailableEmbedder()) == 0
+
+
 def test_build_vectors_backfills_all_chunks(tmp_path, monkeypatch) -> None:
     _patch(monkeypatch, tmp_path)
     sync.sync(with_vision=False, embedder=FakeEmbedder(), with_vectors=False)

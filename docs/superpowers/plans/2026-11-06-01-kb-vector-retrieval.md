@@ -580,14 +580,25 @@ def _seed(tmp_path, monkeypatch, rows):
 
 
 def test_vector_recall_finds_chunk_without_keyword_overlap(tmp_path, monkeypatch) -> None:
-    _seed(
+    ids = _seed(
         tmp_path,
         monkeypatch,
         [
-            (1, "通信笔记", "DDS 是一种分布式通信中间件。"),
+            (1, "通信笔记", "DDS 是通信总线。"),
             (2, "天气", "今天天气很好。"),
         ],
     )
+    conn = db.connect()
+    try:
+        vectors.upsert(
+            conn,
+            [
+                (ids[0], [1.0, 0.0, 0.0, 0.0]),
+                (ids[1], [0.0, 1.0, 0.0, 0.0]),
+            ],
+        )
+    finally:
+        conn.close()
     monkeypatch.setattr(search, "get_embedder", lambda: FakeEmbedder())
 
     results = search.search_site("分布式中间件", limit=1)
