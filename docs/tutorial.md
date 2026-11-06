@@ -814,8 +814,9 @@ curl -sN -X POST http://127.0.0.1:18080/api/chat \
 
 模型：`BAAI/bge-small-zh-v1.5`，24M 参数，CPU 上也能跑。
 把模型文件放到 `backend/model/bge-small-zh-v1.5/`（目录里要有 `config.json`），
-该目录已在 `.gitignore` 里，不会进仓库。`sentence-transformers` 和 `torch`
-是可选依赖，装在 `backend/.venv` 里。
+该目录已在 `.gitignore` 里，不会进仓库。`sentence-transformers` 已写进
+`backend/pyproject.toml`（会连带装上 CPU 版 `torch`），`uv sync` 时一起安装。
+模型文件本身不随依赖下载，需要单独放进去。
 
 ```bash
 # 首次同步：FTS + 向量
