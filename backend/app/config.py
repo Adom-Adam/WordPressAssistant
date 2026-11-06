@@ -204,6 +204,16 @@ class Settings(BaseSettings):
     kb_chunk_size: int = 600
     kb_chunk_overlap: int = 80
 
+    # 本地向量检索。模型目录相对 backend/；文件不存在时自动降级为纯 FTS，
+    # 所以部署时忘传模型不会让聊天整体不可用。
+    embedding_model_path: str = "model/bge-small-zh-v1.5"
+    embedding_dim: int = 512
+    kb_vector_enabled: bool = True
+    # 向量单路召回条数；最终条数仍由 kb_top_k 控制。
+    kb_hybrid_recall: int = 40
+    # RRF 的平滑常数：越大，单路排名第一的优势越小。
+    kb_rrf_k: int = 60
+
     # 拉取 WordPress REST 接口的超时和 User-Agent。
     kb_request_timeout: float = 30.0
     kb_user_agent: str = "WordPressAssistant-KB/1.0"
