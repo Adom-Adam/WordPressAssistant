@@ -30,7 +30,8 @@ from typing import Any
 import httpx
 
 from app.config import get_settings
-from app.kb import db, vision
+from app.embeddings import Encoder, get_embedder
+from app.kb import db, vectors, vision
 from app.kb.text import (
     chunk_text,
     extract_images,
@@ -207,8 +208,14 @@ def sync(
     with_vision: bool = True,
     limit: int | None = None,
     per_page: int = 100,
+    embedder: Encoder | None = None,
+    with_vectors: bool = True,
 ) -> dict[str, int]:
-    """执行一次完整同步，返回知识库统计。"""
+    """执行一次完整同步，返回知识库统计。
+
+    `with_vectors=False` 只建 FTS 索引；`embedder` 主要给测试注入
+    确定性的假编码器，生产不传时使用全局本地模型。
+    """
 
     settings = get_settings()
     site_url = (site_url or settings.wp_site_url).strip()
@@ -217,6 +224,17 @@ def sync(
             "没有配置站点地址。请在 backend/.env 里设置 WP_SITE_URL，"
             "或运行 uv run python -m app.kb.sync --site https://你的域名"
         )
+
+    encoder: Encoder | None = None
+    if with_vectors:
+        candidate = embedder or get_embedder()
+        if getattr(candidate, "available", False):
+            encoder = candidate
+        else:
+            print(
+                "本地嵌入模型不可用（检查 backend/model/bge-small-zh-v1.5/ "
+                "与 sentence-transformers 安装）。已跳过向量生成，FTS 检索不受影响。"
+            )
 
     db.init_schema()
     posts = fetch_posts(site_url, per_page=per_page)
@@ -327,17 +345,21 @@ def sync(
                 logger.info("文章《%s》没有可索引的正文或图片，跳过", title)
                 continue
 
+            # 先删旧向量，再删旧文本块：反过来会留下指向已删除 rowid 的悬空向量。
+            vectors.delete_post(conn, post_id)
+
             # 每篇文章一个事务：要么整篇更新成功，要么保持原样。
             with conn:
                 conn.execute("DELETE FROM chunks WHERE post_id = ?", (post_id,))
-                conn.executemany(
-                    """
-                    INSERT INTO chunks
-                        (post_id, chunk_index, kind, image_url, url, title, body, tokens)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    rows,
-                )
+                for row in rows:
+                    conn.execute(
+                        """
+                        INSERT INTO chunks
+                            (post_id, chunk_index, kind, image_url, url, title, body, tokens)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        row,
+                    )
                 conn.execute(
                     """
                     INSERT INTO posts (post_id, title, url, modified, synced_at)
@@ -357,9 +379,30 @@ def sync(
                     ),
                 )
 
+            # 事务提交后再嵌入，避免模型推理期间一直持有 SQLite 写锁。
+            rowids = [
+                int(row[0])
+                for row in conn.execute(
+                    "SELECT rowid FROM chunks WHERE post_id = ? ORDER BY rowid",
+                    (post_id,),
+                )
+            ]
+            encoded: list[list[float]] = []
+            if encoder is not None and len(rowids) == len(rows):
+                encoded = encoder.encode([str(row[6]) for row in rows])
+                if len(encoded) != len(rowids):
+                    logger.warning(
+                        "向量数量与文本块不一致，跳过本篇向量：post_id=%s", post_id
+                    )
+                    encoded = []
+                elif encoded:
+                    with conn:
+                        vectors.upsert(conn, list(zip(rowids, encoded)))
+
             print(
                 f"[{index}/{len(posts)}] 《{title}》 "
-                f"正文 {len(text_chunks)} 块，图片 {image_count} 张"
+                f"正文 {len(text_chunks)} 块，图片 {image_count} 张，"
+                f"向量 {len(encoded)} 条"
             )
 
         statistics = db.stats(conn)
@@ -370,11 +413,55 @@ def sync(
     print(f"  文章：{statistics['posts']} 篇")
     print(f"  文本块：{statistics['text_chunks']} 个")
     print(f"  图片块：{statistics['image_chunks']} 个（本次处理图片 {total_images} 张）")
+    print(f"  向量：{statistics['vectors']} 条")
     print(f"  图片描述缓存：{statistics['images']} 条")
     if with_vision:
         print(f"  本次有描述的图片：{vision_used} 张")
     print(f"  数据库：{db.resolve_db_path()}")
     return statistics
+
+
+def build_vectors(
+    embedder: Encoder | None = None,
+    batch_size: int = 32,
+) -> int:
+    """只为现有文本块补向量，不重新拉取文章。
+
+    模型是后来才下载、或者之前用 `--no-vectors` 同步过时，用这个入口
+    补索引。写入前清空旧向量，避免文章删改后留下孤儿。
+    """
+
+    db.init_schema()
+    encoder = embedder or get_embedder()
+    if not getattr(encoder, "available", False):
+        print(
+            "本地嵌入模型不可用（检查 backend/model/bge-small-zh-v1.5/ "
+            "与 sentence-transformers 安装）。已跳过向量生成，FTS 检索不受影响。"
+        )
+        return 0
+
+    conn = db.connect()
+    try:
+        rows = conn.execute("SELECT rowid, body FROM chunks ORDER BY rowid").fetchall()
+        vectors.clear(conn)
+        conn.commit()
+
+        total = 0
+        for start in range(0, len(rows), batch_size):
+            batch = rows[start : start + batch_size]
+            encoded = encoder.encode([str(row["body"] or "") for row in batch])
+            if len(encoded) != len(batch):
+                logger.warning(
+                    "向量数量与文本块不一致，跳过这一批：offset=%s", start
+                )
+                continue
+            total += vectors.upsert(
+                conn,
+                list(zip([int(row["rowid"]) for row in batch], encoded)),
+            )
+        return total
+    finally:
+        conn.close()
 
 
 def main() -> None:
@@ -389,6 +476,16 @@ def main() -> None:
     )
     parser.add_argument("--limit", type=int, help="只同步前 N 篇，方便调试")
     parser.add_argument("--per-page", type=int, default=100, help="每页拉取数量（最大 100）")
+    parser.add_argument(
+        "--no-vectors",
+        action="store_true",
+        help="不生成向量，只建 FTS 索引",
+    )
+    parser.add_argument(
+        "--vectors-only",
+        action="store_true",
+        help="不拉取文章，只为现有文本块补向量",
+    )
     parser.add_argument("--verbose", action="store_true", help="输出详细日志")
     args = parser.parse_args()
 
@@ -398,11 +495,17 @@ def main() -> None:
     )
 
     try:
+        if args.vectors_only:
+            count = build_vectors()
+            print(f"向量补建完成：{count} 条")
+            return
+
         sync(
             site_url=args.site,
             with_vision=not args.no_vision,
             limit=args.limit,
             per_page=args.per_page,
+            with_vectors=not args.no_vectors,
         )
     except KeyboardInterrupt:
         print("\n已取消。", file=sys.stderr)
