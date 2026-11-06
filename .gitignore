@@ -15,6 +15,13 @@ backend/.venv/
 # 包含 data/personas/（真实人设）。这些正文不要提交，也不要 git add -f。
 backend/data/
 
+# ---- Local embedding models (large binary assets) ----
+# 例如 backend/models/bge-small-zh-v1.5/。模型体积大、且可能涉及第三方许可，
+# 部署时单独上传，不要提交到公开仓库，也不要 git add -f。
+# 单复数两种目录名都忽略，避免本地放错一层就被 git status 暴露出来。
+backend/models/
+backend/model/
+
 # ---- Build output ----
 frontend/dist/
 frontend/.vite/
