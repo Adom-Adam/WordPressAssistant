@@ -82,9 +82,36 @@ def link_identity(
 
     不合并历史行、不改写谁名下的记忆，只给每一行补上相同的
     `wp_user_id` / `qq_uin`，之后 `linked_keys()` 就能把它们连起来。
+
+    换绑时旧关联必须失效：`unbind_user` 只清额度库，碰不到这张表，
+    如果这里只覆盖本组两行，前一个账号那一行还留着同一个 QQ 号，
+    `linked_keys()` 会把新账号和旧账号连在一起。所以先把“声称同一个
+    wp/qq、但不属于这组 key”的行清空，再建立新关联。
     """
+    qq = str(qq_uin).strip() if qq_uin is not None else None
+    if qq is not None or wp_user_id is not None:
+        conditions: list[str] = []
+        params: list[object] = []
+        if qq is not None:
+            conditions.append("qq_uin = ?")
+            params.append(qq)
+        if wp_user_id is not None:
+            conditions.append("wp_user_id = ?")
+            params.append(int(wp_user_id))
+        placeholders = ",".join("?" for _ in keys)
+        conn.execute(
+            f"""
+            UPDATE persons
+               SET wp_user_id = NULL, qq_uin = NULL
+             WHERE ({" OR ".join(conditions)})
+               AND person_key NOT IN ({placeholders})
+            """,
+            [*params, *keys],
+        )
+        conn.commit()
+
     for key in keys:
-        touch_person(conn, key, wp_user_id=wp_user_id, qq_uin=qq_uin)
+        touch_person(conn, key, wp_user_id=wp_user_id, qq_uin=qq)
 
 
 def linked_keys(conn: sqlite3.Connection, person_key: str) -> list[str]:

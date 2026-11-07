@@ -68,8 +68,12 @@ def qq_viewer(
             wp_user_id=bound_user_id,
             qq_uin=str(qq_uin),
         )
+        keys = identity.linked_keys(conn, person_key)
+    else:
+        # 没绑定时只认自己。`persons` 里可能还留着解绑前的旧关联，
+        # 拿它扩权等于让已解绑的 QQ 继续读原账号的记忆。
+        keys = [person_key]
 
-    keys = identity.linked_keys(conn, person_key)
     return Viewer(tuple(keys), channel, group_id=group_id)
 
 

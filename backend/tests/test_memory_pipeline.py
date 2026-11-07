@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-from app.memory import db, pipeline, retrieval, store
+from app.memory import db, identity, pipeline, retrieval, store
 from app.memory.extract import Turn
 from app.memory.store import MemoryDraft
 
@@ -115,3 +115,70 @@ def test_schedule_extraction_respects_flag(tmp_path, monkeypatch) -> None:
     )
     assert pipeline.schedule_extraction(turn) is None
     assert settings.memory_extract_enabled is False
+
+
+def test_unbound_qq_does_not_read_previous_account_memories(tmp_path, monkeypatch) -> None:
+    """解绑后 persons 里仍留着旧关联，但不能继续读旧账号的记忆。"""
+    _patch(monkeypatch, tmp_path)
+    binding = SimpleNamespace(user_id=42)
+    pipeline.record_qq_turn(123456, None, binding, "在吗", "在的")
+
+    conn = db.connect()
+    try:
+        store.add_memory(
+            conn,
+            MemoryDraft(
+                person_key="wp:42",
+                type="fact",
+                text="阿东在学 ROS2",
+                scope="personal",
+                audience=["wp:42"],
+            ),
+            embedder=SimpleNamespace(available=False, encode=lambda *a, **k: []),
+        )
+        viewer = pipeline.qq_viewer(conn, 123456, None, None)
+    finally:
+        conn.close()
+
+    assert viewer.person_keys == ("qq:123456",)
+    assert "阿东在学 ROS2" not in pipeline.qq_memory_context(
+        123456, None, None, "ROS2"
+    )
+
+
+def test_rebinding_does_not_leak_previous_account_memories(tmp_path, monkeypatch) -> None:
+    """同一个 QQ 换绑到新账号后，不能通过旧的 wp 关联读到前一个账号的记忆。"""
+    _patch(monkeypatch, tmp_path)
+    pipeline.record_qq_turn(123456, None, SimpleNamespace(user_id=7), "在吗", "在的")
+
+    conn = db.connect()
+    try:
+        store.add_memory(
+            conn,
+            MemoryDraft(
+                person_key="wp:7",
+                type="fact",
+                text="旧账号的私事",
+                scope="personal",
+                audience=["wp:7"],
+            ),
+            embedder=SimpleNamespace(available=False, encode=lambda *a, **k: []),
+        )
+    finally:
+        conn.close()
+
+    new_binding = SimpleNamespace(user_id=8)
+    pipeline.record_qq_turn(123456, None, new_binding, "你好", "你好呀")
+
+    conn = db.connect()
+    try:
+        old_links = identity.linked_keys(conn, "wp:7")
+        new_links = identity.linked_keys(conn, "wp:8")
+    finally:
+        conn.close()
+
+    assert old_links == ["wp:7"]
+    assert "wp:7" not in new_links
+    assert "旧账号的私事" not in pipeline.qq_memory_context(
+        123456, None, new_binding, "私事"
+    )
