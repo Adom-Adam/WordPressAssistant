@@ -221,6 +221,17 @@ class Settings(BaseSettings):
     # 单张图片下载上限。超过就跳过，避免把几十 MB 的图片塞进请求。
     kb_image_max_bytes: int = 12_000_000
 
+    # ---- 统一记忆（阶段 2）----
+    # 事件时间线与提炼后的记忆。与额度库分开：一个是内容，一个是计数，
+    # 备份、按人删除、清理的粒度完全不同。
+    memory_enabled: bool = True
+    memory_db_path: str = "data/memory.sqlite3"
+    # 关掉后不再调用模型提炼，但仍会写事件时间线。
+    memory_extract_enabled: bool = True
+    # 记忆检索是否用向量。测试和小内存机器可以关掉：
+    # 关掉后检索仍按重要性 + 新鲜度排序，只是不加载嵌入模型。
+    memory_vector_enabled: bool = True
+
     # 是否用视觉模型给文章图片生成描述/OCR。
     vision_enabled: bool = True
     vision_model: str = "deepseek-flash"
