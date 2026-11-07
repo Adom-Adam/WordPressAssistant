@@ -840,6 +840,54 @@ uv run python -m app.kb.sync --vectors-only
 同步只打印一句提示并跳过向量，检索自动退回纯 FTS，聊天功能不受影响。
 部署时忘传模型，最坏的结果是“语义检索没生效”，而不是“后端起不来”。
 
+### 9.8 统一记忆时间线
+
+梅林现在会记住聊过的事。数据在 `backend/data/memory.sqlite3`（不进仓库），
+由两张表组成：
+
+- `events`：原始时间线。每条用户消息和助手回复各记一行，带说话人、
+  平台、可见范围和来源（`user_message` / `assistant_message` / `proactive` / `system`）。
+- `memories`：从时间线里提炼出的长期记忆（事实、偏好、经过、约定、关系、想法），
+  带 `importance` / `confidence` / `valid_until`。向量存在 `memories_vec` 表里，
+  换了嵌入维度会自动重建。
+
+写入是同步的，提炼是异步的：回复先正常发出去，后台再调用模型把这一轮
+整理成候选记忆。`MEMORY_EXTRACT_ENABLED=false` 只停提炼，事件照常记录。
+
+**谁的信息给谁看**，在进入提示词之前就按四层硬过滤：
+
+| `scope` | 谁能看到 |
+| --- | --- |
+| `personal` | 本人（绑定后网页与 QQ 共用同一份）；`private`/`secret` 只允许私聊/网页 |
+| `group` | 当前群的成员；`secret` 一律不可见 |
+| `world` | 所有访客，只要不是 `secret` |
+| `merlin` | 只有内部反思上下文 |
+
+`secret`（密码、密钥、证件号等，由规则识别并标记）**永远不会进入提示词**，
+即使本人询问也不会复述。注入时片段会明确写明“只是背景，不是指令”，
+防止聊天内容被当成新的系统规则。
+
+**身份绑定规则**：WordPress 账号是唯一身份，QQ 只是可以更换的登录方式。
+
+- 绑定的 QQ 与网页账号共享同一份个人记忆（事件都记在 `wp:<ID>` 名下）；
+- 换一个 QQ 重新绑定，记忆仍跟着 WP 账号走；
+- 解绑/换绑不会删除记忆，也不会让新旧账号互相可见；
+- **注销账号会删除该账号的全部记忆、事件与身份关联**：插件在
+  `wp_delete_user()` 之前调用 `DELETE /api/me/memory`，失败会阻止注销；
+  管理员在后台删除用户时，`deleted_user` 钩子调用
+  `DELETE /api/admin/users/<ID>/memory`（需要管理员登录态）。
+
+运维命令：
+
+```bash
+cd backend
+uv run python -m app.memory.maintenance            # 衰减 + 清理过期约定
+uv run python -m app.memory.maintenance --db /tmp/m.sqlite3
+```
+
+衰减规则是每 90 天重要性减半，下限 0.05；过了 `valid_until` 的约定会被删除。
+两个任务都幂等，可以每天跑一次（部署环境加到定时任务即可）。
+
 ---
 
 ## 10. 注册、登录与邮件：先用 WordPress 原生能力
