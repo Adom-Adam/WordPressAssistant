@@ -156,11 +156,22 @@ class VectorTable:
                 )
                 continue
             try:
-                conn.execute(
-                    f"INSERT OR REPLACE INTO {self.table} (rowid, embedding) "
-                    "VALUES (?, ?)",
-                    (int(rowid), _serialize(vector)),
-                )
+                # vec0 虚拟表不支持 REPLACE 语义：已存在的 rowid 会报
+                # UNIQUE 而不是覆盖。先删再插，才能支持“合并后更新向量”。
+                try:
+                    conn.execute(
+                        f"INSERT OR REPLACE INTO {self.table} (rowid, embedding) "
+                        "VALUES (?, ?)",
+                        (int(rowid), _serialize(vector)),
+                    )
+                except sqlite3.Error:
+                    conn.execute(
+                        f"DELETE FROM {self.table} WHERE rowid = ?", (int(rowid),)
+                    )
+                    conn.execute(
+                        f"INSERT INTO {self.table} (rowid, embedding) VALUES (?, ?)",
+                        (int(rowid), _serialize(vector)),
+                    )
                 written += 1
             except sqlite3.Error as exc:
                 logger.warning(

@@ -61,6 +61,19 @@ def test_search_orders_by_distance(tmp_path) -> None:
         conn.close()
 
 
+def test_upsert_replaces_existing_row(tmp_path) -> None:
+    table = vector_store.VectorTable("t_vec", "vec_dim:t")
+    conn = _conn(tmp_path)
+    try:
+        table.ensure(conn, 3)
+        assert table.upsert(conn, [(1, [1.0, 0.0, 0.0])]) == 1
+        assert table.upsert(conn, [(1, [0.0, 1.0, 0.0])]) == 1
+        assert table.count(conn) == 1
+        assert table.search(conn, [0.0, 1.0, 0.0], 1)[0][0] == 1
+    finally:
+        conn.close()
+
+
 def test_missing_extension_degrades_to_empty(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(vector_store, "_extension_loaded", lambda conn: False)
     monkeypatch.setattr(vector_store, "sqlite_vec", None)
