@@ -203,6 +203,30 @@ async def test_bound_group_reaches_agent(tmp_path: Any) -> None:
     assert sender.group == [(888, "我在")]
 
 
+@async_test
+async def test_error_after_partial_output_does_not_record_turn(tmp_path: Any) -> None:
+    """说完半截再报错的回合不能入库，否则半截回复会被当成完整回答提炼。"""
+
+    async def failing_stream(messages: Any, **kwargs: Any) -> Any:
+        yield {"type": "delta", "content": "从前有座山"}
+        yield {"type": "error", "message": "AI 服务暂时不可用"}
+
+    adapter, sender, store = make_adapter(tmp_path, stream=failing_stream)
+    bind(store)
+
+    await adapter.handle_event(private_event(10001, "讲个长故事"))
+
+    from app.memory import db as memory_db
+
+    conn = memory_db.connect()
+    try:
+        assert memory_db.stats(conn)["events"] == 0
+    finally:
+        conn.close()
+    # 失败回合也不写进上下文历史。
+    assert (0, 10001) not in adapter._history
+
+
 def recording_stream(seen: dict[str, Any], text: str = "我在") -> Any:
     """记录调用参数的一次流式回答。
 

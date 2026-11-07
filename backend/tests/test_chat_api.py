@@ -397,3 +397,61 @@ def test_chat_records_events_and_injects_memory(
         assert memory_db.stats(conn)["events"] == 2
     finally:
         conn.close()
+
+
+def test_error_after_partial_output_writes_only_user_event(
+    client: TestClient, monkeypatch
+) -> None:
+    """先说半截、随后报错的轮次，不能把半截回复当成完整助手事件提炼。"""
+    payload = {"messages": [{"role": "user", "content": "讲个长故事"}]}
+
+    async def failing_stream(**kwargs: object) -> AsyncIterator[dict[str, object]]:
+        yield {"type": "delta", "content": "从前有座山"}
+        yield {"type": "error", "message": "AI 服务暂时不可用"}
+
+    monkeypatch.setattr(chat_module, "stream_reply", failing_stream)
+
+    response = client.post("/api/chat", json=payload, headers=auth_header())
+    assert response.status_code == 200
+    assert "从前有座山" in response.text
+    assert '"error"' in response.text
+
+    from app.memory import db as memory_db
+
+    conn = memory_db.connect()
+    try:
+        rows = conn.execute("SELECT source FROM events ORDER BY id").fetchall()
+    finally:
+        conn.close()
+    # 用户说过的话已经进时间线；失败的半截回复不能进来。
+    assert [row["source"] for row in rows] == ["user_message"]
+
+
+def test_memory_write_failure_still_refunds_quota(client: TestClient, monkeypatch) -> None:
+    """写记忆事件失败时用户拿不到回复，这次额度必须退回。"""
+    payload = {"messages": [{"role": "user", "content": "hi"}]}
+    monkeypatch.setenv("DAILY_QUOTA", "1")
+    get_settings.cache_clear()
+    get_runtime_store.cache_clear()
+
+    from app.memory import pipeline
+
+    calls = {"count": 0}
+
+    def flaky_record(user_id: int, text: str):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("模拟记忆库故障")
+        return None
+
+    monkeypatch.setattr(pipeline, "record_web_user_event", flaky_record)
+
+    first = client.post("/api/chat", json=payload, headers=auth_header())
+    assert first.status_code == 200
+    assert '"error"' in first.text
+
+    second = client.post("/api/chat", json=payload, headers=auth_header())
+    assert second.status_code == 200
+
+    third = client.post("/api/chat", json=payload, headers=auth_header())
+    assert third.status_code == 429

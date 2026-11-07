@@ -852,7 +852,10 @@ uv run python -m app.kb.sync --vectors-only
   换了嵌入维度会自动重建。
 
 写入是同步的，提炼是异步的：回复先正常发出去，后台再调用模型把这一轮
-整理成候选记忆。`MEMORY_EXTRACT_ENABLED=false` 只停提炼，事件照常记录。
+整理成候选记忆。`MEMORY_EXTRACT_ENABLED=false` 只停提炼，事件照常记录；
+`MEMORY_ENABLED=false` 只停“检索并注入提示词”，事件与提炼仍按上面的开关
+执行——它不是隐私总闸，要按账号清空请用 `/me/memory`（管理员用
+`/admin/users/<ID>/memory`）。
 
 **谁的信息给谁看**，在进入提示词之前就按四层硬过滤：
 

@@ -183,17 +183,23 @@ async def chat(
             ),
             "",
         )
-        # 用户事件在流开始前写入：哪怕模型随后失败，用户说过的话也已经
-        # 进入时间线。两个调用都是同步 SQLite，用 to_thread 避免卡住事件循环。
-        user_event_id = await asyncio.to_thread(
-            pipeline.record_web_user_event, user.id, query
-        )
-        memory_context = await asyncio.to_thread(
-            pipeline.web_memory_context, user.id, query
-        )
+        user_event_id: int | None = None
+        memory_context = ""
         parts: list[str] = []
+        errored = False
 
         try:
+            # 用户事件在流开始前写入：哪怕模型随后失败，用户说过的话也已经
+            # 进入时间线。两个调用都是同步 SQLite，用 to_thread 避免卡住事件循环。
+            #
+            # 放在 try 里面而不是前面：写事件/检索记忆本身出错（或客户端
+            # 恰好在这时断开）时，finally 的退款仍然会执行，不会白扣额度。
+            user_event_id = await asyncio.to_thread(
+                pipeline.record_web_user_event, user.id, query
+            )
+            memory_context = await asyncio.to_thread(
+                pipeline.web_memory_context, user.id, query
+            )
             # asyncio.timeout 是 Python 3.11 的写法：
             # 代码块超过 90 秒会被取消，并在这里抛出 TimeoutError。
             # 它防的是“工具卡死”这类调用次数不会增加的问题。
@@ -215,11 +221,17 @@ async def chat(
                     if event.get("type") == "delta" and event.get("content"):
                         produced = True
                         parts.append(str(event.get("content") or ""))
+                    elif event.get("type") == "error":
+                        # agent 内部报错是作为事件发出来的，不会抛异常；
+                        # 如果之前已经输出过半截正文，这里仍要记下来，否则
+                        # 循环正常结束后会把半截回复当成完整回答入库。
+                        errored = True
                     yield {"data": json.dumps(event, ensure_ascii=False)}
 
-                # 只有流正常走完才写助手事件：超时、异常、客户端中断都不写，
-                # 避免把半截回复当成完整的一问一答去提炼。
-                if produced and "".join(parts).strip():
+                # 只有流正常走完且没有报错才写助手事件：超时、异常、
+                # 客户端中断、半截报错都不写，避免把失败的回复当成
+                # 完整的一问一答去提炼。
+                if produced and not errored and "".join(parts).strip():
                     turn = await asyncio.to_thread(
                         pipeline.record_web_assistant_event,
                         user.id,

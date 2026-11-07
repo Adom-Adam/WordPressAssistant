@@ -224,6 +224,7 @@ class Settings(BaseSettings):
     # ---- 统一记忆（阶段 2）----
     # 事件时间线与提炼后的记忆。与额度库分开：一个是内容，一个是计数，
     # 备份、按人删除、清理的粒度完全不同。
+    # 关掉后不再检索/注入记忆；事件时间线仍会写入（提炼看下面的开关）。
     memory_enabled: bool = True
     memory_db_path: str = "data/memory.sqlite3"
     # 关掉后不再调用模型提炼，但仍会写事件时间线。

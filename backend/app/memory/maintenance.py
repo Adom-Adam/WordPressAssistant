@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 
 MIN_IMPORTANCE = 0.05
 
+# meta 表里记录上次衰减的时间。没有它，每天都按“绝对年龄”乘一次因子，
+# 一周后就会变成几何级数衰减：0.5^(1/90) 连续乘 30 次远小于 0.5^(30/90)。
+_LAST_DECAY_KEY = "maintenance:last_decay"
+
 
 def _parse_time(value: str | None) -> datetime | None:
     if not value:
@@ -50,14 +54,22 @@ def decay_importance(
 ) -> int:
     """按“每过一个半衰期减半”衰减重要性，返回实际更新的行数。
 
-    只处理至少一天没更新过的行：同一天内反复跑不会把当天的记忆
-    越衰减越轻。衰减有下限 `MIN_IMPORTANCE`，避免长期记忆彻底归零、
-    再也排不上来。
+    只处理至少一天没衰减过的行（不是“没更新过”）：一条记忆可能天天被
+    检索，但重要性仍然应该随时间下降。上次衰减的时间存在 meta 表里，
+    每次只按“距上次衰减的间隔”乘因子，连续跑 N 次恰好等于跑一次；
+    否则每天按绝对年龄乘一次，几天内就会把记忆全部压到下限。
+
+    衰减有下限 `MIN_IMPORTANCE`，避免长期记忆彻底归零、再也排不上来。
     """
     if half_life_days <= 0:
         raise ValueError("half_life_days 必须大于 0")
 
     moment = now or datetime.now(timezone.utc)
+    last_row = conn.execute(
+        "SELECT value FROM meta WHERE key = ?", (_LAST_DECAY_KEY,)
+    ).fetchone()
+    last_decay = _parse_time(last_row[0]) if last_row is not None else None
+
     rows = conn.execute(
         "SELECT id, importance, updated_at, created_at FROM memories"
     ).fetchall()
@@ -67,7 +79,12 @@ def decay_importance(
         stamp = _parse_time(row["updated_at"]) or _parse_time(row["created_at"])
         if stamp is None:
             continue
-        age_days = (moment - stamp).total_seconds() / 86400.0
+        # 上次衰减之后新写/更新过的记忆，从它自己的时间算起；
+        # 其余记忆从上次衰减的时间算起，保证因子只乘一次。
+        base = stamp
+        if last_decay is not None and stamp < last_decay:
+            base = last_decay
+        age_days = (moment - base).total_seconds() / 86400.0
         if age_days < 1:
             continue
 
@@ -85,6 +102,13 @@ def decay_importance(
         )
         changed += 1
 
+    # 无论这次是否真的衰减了行，都要记下时间：本次检查已经把“截至现在”
+    # 的衰减算过了，下次从这一刻重新起算。
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (_LAST_DECAY_KEY, moment.isoformat(timespec="seconds")),
+    )
     conn.commit()
     return changed
 

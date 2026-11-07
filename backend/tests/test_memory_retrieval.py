@@ -95,6 +95,23 @@ def test_group_viewer_gets_group_and_world(tmp_path, monkeypatch) -> None:
         conn.close()
 
 
+def test_group_viewer_gets_no_private_or_secret_own_memories(
+    tmp_path, monkeypatch
+) -> None:
+    """群里说话时，连自己的私聊记忆和密钥类内容都不能被检索出来。"""
+    conn = _conn(tmp_path, monkeypatch)
+    try:
+        _add(conn, "wp:12", "只在私聊里说过的心事", sensitivity="private")
+        _add(conn, "wp:12", "密码是 abc12345", sensitivity="secret", importance=1.0)
+        _add(conn, "wp:12", "公开的喜好", scope="world", audience=["public"])
+        hits = retrieval.select_memories(
+            conn, Viewer(("wp:12",), "qq_group", group_id=789), "", embedder=FakeEmbedder()
+        )
+        assert {hit["text"] for hit in hits} == {"公开的喜好"}
+    finally:
+        conn.close()
+
+
 def test_secret_is_never_selected(tmp_path, monkeypatch) -> None:
     conn = _conn(tmp_path, monkeypatch)
     try:

@@ -75,3 +75,27 @@ def test_run_reports_counts(tmp_path, monkeypatch) -> None:
         assert result["expired"] == 1
     finally:
         conn.close()
+
+
+def test_decay_is_not_compounded_by_repeated_runs(tmp_path, monkeypatch) -> None:
+    """每天跑一次维护，不能把同一条记忆按“绝对年龄”反复衰减。"""
+    conn = _conn(tmp_path, monkeypatch)
+    try:
+        memory_id = _add(conn)
+        now = datetime.now(timezone.utc)
+        old = (now - timedelta(days=30)).isoformat(timespec="seconds")
+        conn.execute("UPDATE memories SET updated_at = ? WHERE id = ?", (old, memory_id))
+        conn.commit()
+
+        maintenance.decay_importance(conn, half_life_days=90.0, now=now)
+        maintenance.decay_importance(
+            conn, half_life_days=90.0, now=now + timedelta(days=1)
+        )
+
+        importance = conn.execute(
+            "SELECT importance FROM memories WHERE id = ?", (memory_id,)
+        ).fetchone()[0]
+        expected = 0.8 * 0.5 ** (31 / 90)
+        assert abs(importance - expected) < 0.01
+    finally:
+        conn.close()

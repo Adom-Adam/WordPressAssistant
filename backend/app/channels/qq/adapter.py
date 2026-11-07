@@ -197,7 +197,7 @@ class QQAdapter:
                 memory_context = ""
 
             # 4. 正常聊天。
-            reply, messages_for_history, produced = await self._reply(
+            reply, messages_for_history, produced, ok = await self._reply(
                 key,
                 content,
                 is_admin=is_admin,
@@ -205,20 +205,22 @@ class QQAdapter:
                 memory_context=memory_context or None,
             )
             if produced:
-                if messages_for_history:
-                    self._history[key] = messages_for_history
-                # QQ 侧在回复产出后一次性写两条事件：这一轮整体入库，
-                # 失败轮次（没产出正文）本来也没有完整的一问一答可提炼。
-                turn = await asyncio.to_thread(
-                    pipeline.record_qq_turn,
-                    incoming.user_id,
-                    incoming.group_id or None,
-                    binding,
-                    content,
-                    reply,
-                )
-                if turn is not None:
-                    pipeline.schedule_extraction(turn)
+                # 已经输出过正文就说明用户看到了内容，不退款；但报错（可能是
+                # 半截之后报错）的回合不能入库，否则残句会被当成完整回答提炼。
+                if ok:
+                    if messages_for_history:
+                        self._history[key] = messages_for_history
+                    # QQ 侧在回复产出后一次性写两条事件：这一轮整体入库。
+                    turn = await asyncio.to_thread(
+                        pipeline.record_qq_turn,
+                        incoming.user_id,
+                        incoming.group_id or None,
+                        binding,
+                        content,
+                        reply,
+                    )
+                    if turn is not None:
+                        pipeline.schedule_extraction(turn)
             else:
                 # 没产出正文（模型报错/断流）：这次不算，退款，也别污染上下文。
                 self._refund(usage)
@@ -397,10 +399,12 @@ class QQAdapter:
         is_admin: bool,
         channel: str,
         memory_context: str | None = None,
-    ) -> tuple[str, list[ChatMessage], bool]:
-        """调用 agent，返回 (要发送的文本, 更新后的历史, 是否产出过正文)。
+    ) -> tuple[str, list[ChatMessage], bool, bool]:
+        """调用 agent，返回 (要发送的文本, 更新后的历史, 是否产出过正文, 是否成功)。
 
         第三个返回值给额度层用：没产出正文的失败要退款。
+        第四个返回值给记忆层用：报错的回合不写事件、不进历史——哪怕已经
+        输出了半截正文（用户看到了内容，所以不退款，但残句不能入库）。
 
         `channel` 只影响人设覆盖层。QQ 里她是在用通讯法阵和人说话，
         眼前没有书架、没有页面，所以 page_url/page_title 一律传 None。
@@ -436,9 +440,10 @@ class QQAdapter:
         # 空 delta 也算没交付，额度要退、历史不能写。
         produced = any(part.strip() for part in parts)
 
-        # agent 出错时不把错误写进历史，避免下一轮模型把报错当成事实。
-        if error_message and not produced:
-            return reply, history, produced
+        # agent 出错时不把错误（哪怕是半截回复）写进历史/时间线，
+        # 避免下一轮模型把失败内容当成事实。
+        if error_message:
+            return reply, history, produced, False
 
         # 只保留最近 N 轮。1 轮 = 用户一条 + 助手一条。
         new_history = [
@@ -450,7 +455,7 @@ class QQAdapter:
             new_history = new_history[-max_messages:]
         else:
             new_history = []
-        return reply, new_history, produced
+        return reply, new_history, produced, True
 
     # ------------------------------------------------------------------
     # 输出格式
