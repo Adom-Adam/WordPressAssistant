@@ -83,6 +83,7 @@ def make_stream(calls: list[dict[str, Any]], reply: str = "你好呀"):
         *,
         is_admin: bool = False,
         channel: str = "web",
+        memory_context: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         calls.append(
             {
@@ -91,6 +92,7 @@ def make_stream(calls: list[dict[str, Any]], reply: str = "你好呀"):
                 "page_title": page_title,
                 "is_admin": is_admin,
                 "channel": channel,
+                "memory_context": memory_context,
             }
         )
         yield {"type": "delta", "content": reply}
@@ -287,6 +289,17 @@ def test_long_reply_is_split_into_multiple_messages() -> None:
 # ----------------------------------------------------------------------
 # HTTP 入口：验证 token/开关，并走一遍 mock 模式的完整链路
 # ----------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def memory_isolation(tmp_path, monkeypatch) -> None:
+    """每个测试用临时记忆库，别往真实的 backend/data/ 里写事件。"""
+    monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "memory.sqlite3"))
+    monkeypatch.setenv("MEMORY_EXTRACT_ENABLED", "false")
+    monkeypatch.setenv("MEMORY_VECTOR_ENABLED", "false")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 @pytest.fixture(autouse=True)
 def clear_config_caches() -> None:
     """每个测试前后清掉 Settings/适配器/额度库缓存，避免环境变量串味。"""

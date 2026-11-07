@@ -14,13 +14,26 @@ import functools
 import sqlite3
 from typing import Any
 
+import pytest
+
 from app.channels.qq import commands
 from app.channels.qq.adapter import QQAdapter
-from app.config import Settings
+from app.config import Settings, get_settings
 from app.credits import CreditStore, hash_bind_code
 from app.qq_quota import QQQuotaGate, QQQuotaStore
 from app.quota import QuotaStore
 from app.runtime_settings import RuntimeSettings
+
+
+@pytest.fixture(autouse=True)
+def memory_isolation(tmp_path: Any, monkeypatch: Any) -> Any:
+    """每个测试用临时记忆库，别往真实的 backend/data/ 里写事件。"""
+    monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "memory.sqlite3"))
+    monkeypatch.setenv("MEMORY_EXTRACT_ENABLED", "false")
+    monkeypatch.setenv("MEMORY_VECTOR_ENABLED", "false")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def async_test(fn: Any) -> Any:

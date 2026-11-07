@@ -35,6 +35,7 @@ from app.channels.qq.client import OneBotError, OneBotTransport
 from app.channels.qq.commands import CommandContext, dispatch, parse_command
 from app.config import Settings
 from app.credits import CreditStore, get_credit_store
+from app.memory import pipeline
 from app.qq_quota import QQQuotaGate, QQUsage, get_qq_quota_gate
 from app.schemas import ChatMessage
 
@@ -182,16 +183,42 @@ class QQAdapter:
                     incoming, commands.QUOTA_GLOBAL, reason="quota_exhausted"
                 )
 
+            # 3.5 取这一轮要注入的记忆。失败时为空字符串，回复照常。
+            try:
+                memory_context = await asyncio.to_thread(
+                    pipeline.qq_memory_context,
+                    incoming.user_id,
+                    incoming.group_id or None,
+                    binding,
+                    content,
+                )
+            except Exception:  # noqa: BLE001 - 记忆只是增强
+                logger.warning("QQ 记忆检索失败 qq=%s", incoming.user_id, exc_info=True)
+                memory_context = ""
+
             # 4. 正常聊天。
             reply, messages_for_history, produced = await self._reply(
                 key,
                 content,
                 is_admin=is_admin,
                 channel="qq_private" if is_private else "qq_group",
+                memory_context=memory_context or None,
             )
             if produced:
                 if messages_for_history:
                     self._history[key] = messages_for_history
+                # QQ 侧在回复产出后一次性写两条事件：这一轮整体入库，
+                # 失败轮次（没产出正文）本来也没有完整的一问一答可提炼。
+                turn = await asyncio.to_thread(
+                    pipeline.record_qq_turn,
+                    incoming.user_id,
+                    incoming.group_id or None,
+                    binding,
+                    content,
+                    reply,
+                )
+                if turn is not None:
+                    pipeline.schedule_extraction(turn)
             else:
                 # 没产出正文（模型报错/断流）：这次不算，退款，也别污染上下文。
                 self._refund(usage)
@@ -369,6 +396,7 @@ class QQAdapter:
         *,
         is_admin: bool,
         channel: str,
+        memory_context: str | None = None,
     ) -> tuple[str, list[ChatMessage], bool]:
         """调用 agent，返回 (要发送的文本, 更新后的历史, 是否产出过正文)。
 
@@ -389,6 +417,7 @@ class QQAdapter:
                 page_title=None,
                 is_admin=is_admin,
                 channel=channel,
+                memory_context=memory_context,
             ):
                 event_type = event.get("type")
                 if event_type == "delta":

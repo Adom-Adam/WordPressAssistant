@@ -43,6 +43,7 @@ from app.agent.core import stream_reply
 from app.api.deps import require_user
 from app.auth import AuthUser
 from app.credits import get_credit_store
+from app.memory import pipeline
 from app.quota import GlobalQuotaExceeded, get_quota_store
 from app.runtime_settings import get_runtime_store
 from app.schemas import ChatRequest
@@ -173,6 +174,25 @@ async def chat(
         # - 已经说过话 → 不退（模型确实花了 token，用户也看到了内容）。
         produced = False
 
+        # 这一轮的用户原话：既用于检索记忆，也作为时间线里用户事件的正文。
+        query = next(
+            (
+                item.content
+                for item in reversed(request.messages)
+                if item.role == "user"
+            ),
+            "",
+        )
+        # 用户事件在流开始前写入：哪怕模型随后失败，用户说过的话也已经
+        # 进入时间线。两个调用都是同步 SQLite，用 to_thread 避免卡住事件循环。
+        user_event_id = await asyncio.to_thread(
+            pipeline.record_web_user_event, user.id, query
+        )
+        memory_context = await asyncio.to_thread(
+            pipeline.web_memory_context, user.id, query
+        )
+        parts: list[str] = []
+
         try:
             # asyncio.timeout 是 Python 3.11 的写法：
             # 代码块超过 90 秒会被取消，并在这里抛出 TimeoutError。
@@ -190,10 +210,24 @@ async def chat(
                     page_url=request.page_url,
                     page_title=request.page_title,
                     is_admin=user.is_admin,
+                    memory_context=memory_context or None,
                 ):
                     if event.get("type") == "delta" and event.get("content"):
                         produced = True
+                        parts.append(str(event.get("content") or ""))
                     yield {"data": json.dumps(event, ensure_ascii=False)}
+
+                # 只有流正常走完才写助手事件：超时、异常、客户端中断都不写，
+                # 避免把半截回复当成完整的一问一答去提炼。
+                if produced and "".join(parts).strip():
+                    turn = await asyncio.to_thread(
+                        pipeline.record_web_assistant_event,
+                        user.id,
+                        "".join(parts),
+                        user_event_id,
+                    )
+                    if turn is not None:
+                        pipeline.schedule_extraction(turn)
 
         except TimeoutError:
             # 超时不一定代表出错：可能是模型/工具卡住了。

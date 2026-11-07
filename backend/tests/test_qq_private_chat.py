@@ -12,11 +12,24 @@ import asyncio
 import functools
 from typing import Any
 
+import pytest
+
 from app.channels.qq import commands
 from app.channels.qq.adapter import QQAdapter
-from app.config import Settings
+from app.config import Settings, get_settings
 from app.credits import CreditStore, hash_bind_code
 from app.qq_quota import QQUsage
+
+
+@pytest.fixture(autouse=True)
+def memory_isolation(tmp_path: Any, monkeypatch: Any) -> Any:
+    """每个测试用临时记忆库，别往真实的 backend/data/ 里写事件。"""
+    monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "memory.sqlite3"))
+    monkeypatch.setenv("MEMORY_EXTRACT_ENABLED", "false")
+    monkeypatch.setenv("MEMORY_VECTOR_ENABLED", "false")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def async_test(fn: Any) -> Any:
@@ -293,3 +306,26 @@ async def test_command_not_written_to_history(tmp_path: Any) -> None:
     await adapter.handle_event(private_event(10001, "/帮助", 1))
 
     assert (0, 10001) not in adapter._history
+
+
+@async_test
+async def test_qq_reply_receives_memory_context(tmp_path: Any, monkeypatch: Any) -> None:
+    # 记忆库同样指到临时目录；关掉提炼，避免异步任务真的去调模型。
+    monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "memory.sqlite3"))
+    monkeypatch.setenv("MEMORY_EXTRACT_ENABLED", "false")
+    monkeypatch.setenv("MEMORY_VECTOR_ENABLED", "false")
+    get_settings.cache_clear()
+
+    captured: dict[str, Any] = {}
+
+    async def recording_stream(messages: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        yield {"type": "delta", "content": "我在"}
+
+    adapter, sender, store = make_adapter(tmp_path, stream=recording_stream)
+    bind(store)
+
+    await adapter.handle_event(private_event(10001, "在吗"))
+
+    assert "memory_context" in captured
+    get_settings.cache_clear()

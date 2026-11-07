@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 
 import jwt
 import pytest
@@ -69,6 +70,12 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DAILY_QUOTA", "2")
     monkeypatch.setenv("QUOTA_DB_PATH", str(tmp_path / "quota.sqlite3"))
     monkeypatch.setenv("RUNTIME_SETTINGS_PATH", str(tmp_path / "runtime.json"))
+    # 记忆库同样指到临时目录：否则每个对话测试都会往真实的
+    # backend/data/memory.sqlite3 里写事件，跑几轮就污染开发数据。
+    # 关掉提炼和向量：测试不该因为后台任务去调模型或加载嵌入模型。
+    monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "memory.sqlite3"))
+    monkeypatch.setenv("MEMORY_EXTRACT_ENABLED", "false")
+    monkeypatch.setenv("MEMORY_VECTOR_ENABLED", "false")
     get_settings.cache_clear()
     get_quota_store.cache_clear()
     get_runtime_store.cache_clear()
@@ -335,3 +342,58 @@ def test_failure_before_output_refunds_quota(
     # 第三请求应当用尽额度。
     third = client.post("/api/chat", json=payload, headers=auth_header())
     assert third.status_code == 429
+
+
+def test_chat_records_events_and_injects_memory(
+    client: TestClient, tmp_path, monkeypatch
+) -> None:
+    from app.memory import db as memory_db
+    from app.memory import store as memory_store
+    from app.memory.store import MemoryDraft
+
+    # 记忆库必须和额度库一样指到临时目录：否则会写进真实的
+    # backend/data/memory.sqlite3，跑几轮就污染开发数据。
+    monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "memory.sqlite3"))
+    monkeypatch.setenv("MEMORY_EXTRACT_ENABLED", "false")
+    monkeypatch.setenv("MEMORY_VECTOR_ENABLED", "false")
+    get_settings.cache_clear()
+    memory_db.init_schema()
+    conn = memory_db.connect()
+    try:
+        memory_store.add_memory(
+            conn,
+            MemoryDraft(
+                person_key="wp:42",
+                type="fact",
+                text="阿东在学 ROS2",
+                scope="personal",
+                audience=["wp:42"],
+                importance=0.9,
+            ),
+            embedder=SimpleNamespace(available=False, encode=lambda *a, **k: []),
+        )
+    finally:
+        conn.close()
+
+    captured: dict[str, object] = {}
+
+    async def recording_stream(**kwargs: object):
+        captured.update(kwargs)
+        yield {"type": "delta", "content": "好"}
+        yield {"type": "done"}
+
+    monkeypatch.setattr(chat_module, "stream_reply", recording_stream)
+
+    response = client.post(
+        "/api/chat",
+        json={"messages": [{"role": "user", "content": "还记得我在学什么吗"}]},
+        headers=auth_header(),
+    )
+    assert response.status_code == 200
+    assert "阿东在学 ROS2" in str(captured["memory_context"])
+
+    conn = memory_db.connect()
+    try:
+        assert memory_db.stats(conn)["events"] == 2
+    finally:
+        conn.close()
