@@ -20,6 +20,7 @@ from app.embeddings import get_embedder
 
 from app.memory import db, events, identity, retrieval, store
 from app.memory.extract import Extractor, Turn
+from app.memory.vectors import MEMORIES_VEC
 from app.memory.visibility import Viewer
 
 logger = logging.getLogger(__name__)
@@ -310,6 +311,45 @@ async def extract_turn(turn: Turn, extractor: object | None = None) -> int:
         logger.warning("记忆库不可用，丢弃本轮提炼结果", exc_info=True)
         return 0
     return written
+
+
+def delete_user_memory(user_id: int) -> dict[str, int]:
+    """删除一个 WP 账号名下的全部记忆数据，返回删除条数。
+
+    WordPress 账号是唯一身份，QQ 只是可更换的登录方式：注销账号时，
+    这个人的记忆、事件和身份关联都要一起删掉。绑定期写入的事件本来就
+    记在 `wp:<id>` 名下，这里再把仍关联着的 QQ key 一并清空。
+
+    与聊天链路相反，这里**不吞异常**：注销流程必须知道删除是否成功，
+    失败时要阻止注销，不能留下“账号没了、记忆还在”。
+    """
+    conn = _connect()
+    try:
+        key = identity.person_key_web(user_id)
+        keys = identity.linked_keys(conn, key)
+        placeholders = ",".join("?" for _ in keys)
+
+        ids = [
+            int(row[0])
+            for row in conn.execute(
+                f"SELECT id FROM memories WHERE person_key IN ({placeholders})", keys
+            ).fetchall()
+        ]
+        if ids:
+            MEMORIES_VEC.delete_ids(conn, ids)
+
+        conn.execute(
+            f"DELETE FROM memories WHERE person_key IN ({placeholders})", keys
+        )
+        deleted_events = conn.execute(
+            f"DELETE FROM events WHERE person_key IN ({placeholders})", keys
+        ).rowcount
+        conn.execute(f"DELETE FROM persons WHERE person_key IN ({placeholders})", keys)
+        conn.commit()
+
+        return {"memories": len(ids), "events": max(deleted_events, 0)}
+    finally:
+        conn.close()
 
 
 def _log_task_result(task: asyncio.Task) -> None:

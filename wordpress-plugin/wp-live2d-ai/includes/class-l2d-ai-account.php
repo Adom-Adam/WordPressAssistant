@@ -120,10 +120,10 @@ final class L2D_AI_Account {
 				</p>
 			<?php else : ?>
 				<p style="margin:0 0 8px;color:#b32d2e;">
-					<?php echo esc_html( '注销后无法用这个账号登录；名下文章会转交给站长，不会跟着删除。' ); ?>
+					<?php echo esc_html( '注销后无法用这个账号登录；名下文章会转交给站长，不会跟着删除。梅林对你的记忆也会一起删除。' ); ?>
 				</p>
 				<p style="margin:0 0 12px;color:#646970;">
-					<?php echo esc_html( '如果你之后用同一个邮箱重新注册，今日已用次数、额外额度和会员会继承过来；QQ 绑定需要重新绑。' ); ?>
+					<?php echo esc_html( '如果你之后用同一个邮箱重新注册，今日已用次数、额外额度和会员会继承过来；QQ 绑定和聊天记忆不会继承，记忆从空白开始。' ); ?>
 				</p>
 				<p style="margin:0 0 8px;">
 					<label for="l2d-ai-delete-password"><strong>当前密码</strong></label><br>
@@ -333,6 +333,15 @@ final class L2D_AI_Account {
 		if ( is_wp_error( $unbind ) ) {
 			self::fail(
 				'暂时无法解绑 QQ，账号没有删除。请稍后再试：' . $unbind->get_error_message()
+			);
+		}
+
+		// 再删除记忆：WordPress 账号是唯一身份，QQ 可以换绑，但账号注销后
+		// 记忆必须一起消失。失败同样停止注销，避免留下“账号没了、记忆还在”。
+		$purge = L2D_AI_Plugin::user_backend_request( $user_id, 'DELETE', '/me/memory' );
+		if ( is_wp_error( $purge ) ) {
+			self::fail(
+				'暂时无法删除记忆数据，账号没有删除。请稍后再试：' . $purge->get_error_message()
 			);
 		}
 

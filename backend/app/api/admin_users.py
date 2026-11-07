@@ -27,6 +27,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from app.api.deps import require_admin
 from app.auth import AuthUser
 from app.credits import get_credit_store
+from app.memory import pipeline
 from app.quota import get_quota_store
 from app.runtime_settings import get_runtime_store
 from app.schemas import CodeCreate, CreditGrant, UserPatch
@@ -138,6 +139,31 @@ async def force_unbind(
         raise HTTPException(status_code=503, detail="绑定服务暂时不可用") from None
 
     logger.info("管理员解绑 QQ user=%s", user_id)
+    return Response(status_code=204)
+
+
+@router.delete("/admin/users/{user_id}/memory", status_code=204)
+async def purge_user_memory(
+    user_id: int,
+    _admin: AuthUser = Depends(require_admin),
+) -> Response:
+    """管理员删除用户后清空其记忆。
+
+    与“解绑 QQ”分开：解绑只是换登录方式，记忆必须保留；这里服务于
+    “账号已经删除”，由 WordPress 的 `deleted_user` 钩子调用。
+    """
+    try:
+        result = await asyncio.to_thread(pipeline.delete_user_memory, user_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("管理员删除用户记忆失败 user=%s", user_id)
+        raise HTTPException(status_code=503, detail="记忆服务暂时不可用") from None
+
+    logger.info(
+        "管理员删除用户记忆 user=%s memories=%s events=%s",
+        user_id,
+        result.get("memories", 0),
+        result.get("events", 0),
+    )
     return Response(status_code=204)
 
 

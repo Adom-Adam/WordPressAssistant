@@ -182,3 +182,28 @@ def test_rebinding_does_not_leak_previous_account_memories(tmp_path, monkeypatch
     assert "旧账号的私事" not in pipeline.qq_memory_context(
         123456, None, new_binding, "私事"
     )
+
+
+def test_replacement_qq_reads_memories_bound_to_wp_account(tmp_path, monkeypatch) -> None:
+    """QQ 只是登录方式：换一个新 QQ 绑同一账号，记忆仍跟着 wp 账号走。"""
+    _patch(monkeypatch, tmp_path)
+    conn = db.connect()
+    try:
+        store.add_memory(
+            conn,
+            MemoryDraft(
+                person_key="wp:42",
+                type="fact",
+                text="阿东在学 ROS2",
+                scope="personal",
+                audience=["wp:42"],
+            ),
+            embedder=SimpleNamespace(available=False, encode=lambda *a, **k: []),
+        )
+    finally:
+        conn.close()
+
+    new_qq_binding = SimpleNamespace(user_id=42)
+    assert "阿东在学 ROS2" in pipeline.qq_memory_context(
+        99999, None, new_qq_binding, "ROS2"
+    )

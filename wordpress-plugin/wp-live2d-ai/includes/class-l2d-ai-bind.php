@@ -314,6 +314,16 @@ final class L2D_AI_Bind {
 		if ( is_wp_error( $result ) ) {
 			error_log( 'L2D AI 删除用户后解绑 QQ 失败: ' . $result->get_error_message() );
 		}
+
+		// 账号已经删除，记忆不能留在后端。失败只记日志：删除动作本身
+		// 已经完成，不能让一次网络错误把后台流程弄崩。
+		$purged = L2D_AI_Plugin::request_backend(
+			'DELETE',
+			'/admin/users/' . $user_id . '/memory'
+		);
+		if ( is_wp_error( $purged ) ) {
+			error_log( 'L2D AI 删除用户后清理记忆失败: ' . $purged->get_error_message() );
+		}
 	}
 
 	/**
