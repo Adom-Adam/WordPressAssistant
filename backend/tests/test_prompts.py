@@ -130,3 +130,19 @@ def test_clean_context_removes_control_characters() -> None:
     assert clean_context("a\nb\tc\x00d", 10) == "a b cd"
     assert clean_context(None, 10) == ""
     assert len(clean_context("x" * 100, 10)) == 10
+
+
+def test_memory_context_sits_between_identity_and_page() -> None:
+    prompt = build_system_prompt(
+        "https://example.com/post/1", "某篇文章",
+        persona=_persona(),
+        memory_context="【背景资料】阿东在学 ROS2",
+    )
+    assert prompt.index("当前访客身份") < prompt.index("背景资料")
+    assert prompt.index("背景资料") < prompt.index("用户当前所在页面")
+
+
+def test_empty_memory_context_does_not_change_prompt() -> None:
+    without = build_system_prompt(None, None, persona=_persona())
+    with_empty = build_system_prompt(None, None, persona=_persona(), memory_context="   ")
+    assert without == with_empty

@@ -105,6 +105,7 @@ def _build_agent(
     *,
     is_admin: bool = False,
     channel: str = "web",
+    memory_context: str | None = None,
 ) -> Any:
     """创建一个带工具和页面上下文的 agent。
 
@@ -173,6 +174,7 @@ def _build_agent(
             page_title,
             is_admin=is_admin,
             channel=channel,
+            memory_context=memory_context,
         ),
         middleware=safeguards,
     )
@@ -254,6 +256,7 @@ async def stream_reply(
     *,
     is_admin: bool = False,
     channel: str = "web",
+    memory_context: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """核心入口：产出一系列前端可直接消费的事件字典。
 
@@ -290,6 +293,7 @@ async def stream_reply(
         page_title=page_title,
         is_admin=is_admin,
         channel=channel,
+        memory_context=memory_context,
     )
 
     # 用字典按 URL 去重：agent 可能连续检索多次，

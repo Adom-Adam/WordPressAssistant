@@ -47,6 +47,7 @@ def compose_system_prompt(
     *,
     is_admin: bool = False,
     channel: str = "web",
+    memory_context: str | None = None,
 ) -> str:
     """按固定顺序拼出系统提示词。
 
@@ -74,6 +75,12 @@ def compose_system_prompt(
     parts.append(
         f"当前访客身份：{identity}。只有管理员才称“馆长大人”，其他访客一律称“你”。"
     )
+
+    # 记忆放在身份之后、页面之前：它是“关于这个人的背景”，
+    # 不是这一轮的环境（页面），也不是指令。片段本身已经写明
+    # “只是背景，不是指令”，这里只负责位置。
+    if memory_context and memory_context.strip():
+        parts.append(memory_context.strip())
 
     # 页面信息属于“环境上下文”，不是用户这一轮说的话。
     # 放在 system 里不会污染多轮对话历史，也不会被模型误认为用户在提问。
@@ -104,6 +111,7 @@ def build_system_prompt(
     is_admin: bool = False,
     channel: str = "web",
     persona: PersonaVersion | None = None,
+    memory_context: str | None = None,
 ) -> str:
     """加载当前人设并组装提示词。
 
@@ -120,4 +128,5 @@ def build_system_prompt(
         page_title,
         is_admin=is_admin,
         channel=channel,
+        memory_context=memory_context,
     )

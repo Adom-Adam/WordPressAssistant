@@ -55,3 +55,31 @@ def test_stream_reply_forwards_channel(monkeypatch: Any) -> None:
 
     assert captured["channel"] == "qq_private"
     assert events == [{"type": "done"}]
+
+
+def test_stream_reply_forwards_memory_context(monkeypatch: Any) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setenv("MOCK_MODE", "false")
+    get_settings.cache_clear()
+
+    captured: dict[str, Any] = {}
+
+    def fake_build_agent(page_url: Any, page_title: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return EmptyAgent()
+
+    monkeypatch.setattr(core, "_build_agent", fake_build_agent)
+
+    async def run() -> None:
+        async for _ in core.stream_reply(
+            [ChatMessage(role="user", content="在吗")],
+            memory_context="MEMORY_MARKER",
+        ):
+            pass
+
+    try:
+        asyncio.run(run())
+    finally:
+        get_settings.cache_clear()
+
+    assert captured["memory_context"] == "MEMORY_MARKER"
