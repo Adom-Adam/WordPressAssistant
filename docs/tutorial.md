@@ -854,8 +854,10 @@ uv run python -m app.kb.sync --vectors-only
 写入是同步的，提炼是异步的：回复先正常发出去，后台再调用模型把这一轮
 整理成候选记忆。`MEMORY_EXTRACT_ENABLED=false` 只停提炼，事件照常记录；
 `MEMORY_ENABLED=false` 只停“检索并注入提示词”，事件与提炼仍按上面的开关
-执行——它不是隐私总闸，要按账号清空请用 `/me/memory`（管理员用
-`/admin/users/<ID>/memory`）。
+执行——它不是隐私总闸。记忆**不向用户提供主动修改/清空的入口**，避免
+“梅林”被随意调教；用户确有需要请联系管理员，由管理员调用
+`DELETE /api/admin/users/<ID>/memory` 清空。`/me/memory` 只在自助注销
+流程内部使用。
 
 **谁的信息给谁看**，在进入提示词之前就按四层硬过滤：
 
@@ -877,8 +879,12 @@ uv run python -m app.kb.sync --vectors-only
 - 解绑/换绑不会删除记忆，也不会让新旧账号互相可见；
 - **注销账号会删除该账号的全部记忆、事件与身份关联**：插件在
   `wp_delete_user()` 之前调用 `DELETE /api/me/memory`，失败会阻止注销；
-  管理员在后台删除用户时，`deleted_user` 钩子调用
-  `DELETE /api/admin/users/<ID>/memory`（需要管理员登录态）。
+  管理员或 WP-CLI 删除用户后，`deleted_user` 钩子用插件内的系统令牌
+  调用 `DELETE /api/admin/users/<ID>/{bind,memory}`，不再依赖管理员登录态。
+- **每日对账兜底**：插件每天对比“上次见过的用户名单”和当前账号，差集
+  逐个清理；首次运行只记录名单、不删数据。即使删号时后端不可用，第二天
+  也会补上。WP-Cron 由站点访问触发，长期没有访问时不会准时；需要立即
+  执行可用 `wp cron event run l2d_ai_reconcile_users`（WP-CLI）。
 
 运维命令：
 

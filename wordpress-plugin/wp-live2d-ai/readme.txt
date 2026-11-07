@@ -2,7 +2,7 @@
 Contributors: adom
 Requires at least: 6.0
 Requires PHP: 7.4
-Stable tag: 0.3.9
+Stable tag: 0.4.0
 License: GPLv2 or later
 
 在博客左下角显示 Live2D AI 助手，对话由独立的 Python 服务提供。
@@ -51,6 +51,13 @@ Spine 4.2 模型放在 `frontend/public/spine/models/<模型文件夹>/`，
 Spine 加载失败会自动回退 Live2D。
 
 == 更新日志 ==
+
+= 0.4.0 =
+
+- 新增每日对账任务：对比上次见过的用户名单和当前账号，清理已删除账号
+  在后端的 QQ 绑定与聊天记忆。首次运行只记录名单，不删除数据。
+- 删除用户后的清理改用插件内系统令牌，WP-CLI（`wp user delete`）或程序化
+  删除也能立即生效，不再依赖管理员登录态；失败时由次日对账补上。
 
 = 0.3.9 =
 

@@ -3,7 +3,7 @@
  * Plugin Name:       Live2D AI 小助手
  * Plugin URI:        https://github.com/Adom-Adam/WordPressAssistant
  * Description:       在博客左下角显示 Live2D AI 助手。前端只负责展示与交互，AI 逻辑由独立的 Python 服务提供。
- * Version:           0.3.9
+ * Version:           0.4.0
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * Author:            Adom
@@ -26,10 +26,12 @@ require_once __DIR__ . '/includes/class-l2d-ai-registration.php';
 require_once __DIR__ . '/includes/class-l2d-ai-account.php';
 // 邮箱验证：没有它，同邮箱继承额度只是“谁先填谁拿走”。
 require_once __DIR__ . '/includes/class-l2d-ai-email-verification.php';
+// 每日对账：清理 WP-CLI 等非登录态删除用户后遗留的后端绑定与记忆。
+require_once __DIR__ . '/includes/class-l2d-ai-reconcile.php';
 
 final class L2D_AI_Plugin {
 
-	const VERSION          = '0.3.9';
+	const VERSION          = '0.4.0';
 	const OPTION_API_BASE  = 'l2d_ai_api_base';
 	const OPTION_NAME      = 'l2d_ai_assistant_name';
 	const OPTION_SIZE      = 'l2d_ai_size_preset';
@@ -82,6 +84,8 @@ final class L2D_AI_Plugin {
 		L2D_AI_Account::init();
 		// 邮箱验证：注册后发信，未验证不能换小助手 token / 绑定 QQ / 继承额度。
 		L2D_AI_Email_Verification::init();
+		// 每日对账：兜底清理已删除账号的后端数据。
+		L2D_AI_Reconcile::init();
 	}
 
 	/**
@@ -868,6 +872,52 @@ final class L2D_AI_Plugin {
 		if ( is_wp_error( $token ) ) {
 			return $token;
 		}
+
+		return self::backend_request_with_token( $token, $method, $path, $body );
+	}
+
+	/**
+	 * 服务器自身的后台请求：没有登录用户时（WP-Cron、WP-CLI）也能用。
+	 *
+	 * 为什么需要它：删号清理要在定时任务里跑，而 `admin_token()` 取的是
+	 * “当前登录用户”，定时任务里没有。这里改成取站点第一个管理员作为
+	 * 签发对象——token 仍然只在 WordPress 进程内产生，浏览器接触不到。
+	 *
+	 * 只给清理解绑/记忆这类运维动作使用；用户请求一律走
+	 * `request_backend()` 或 `user_backend_request()`。
+	 */
+	public static function system_backend_request( $method, $path, $body = null ) {
+		$secret = self::jwt_secret();
+		if ( is_wp_error( $secret ) ) {
+			return $secret;
+		}
+
+		$admins = get_users(
+			array(
+				'role'   => 'administrator',
+				'number' => 1,
+				'fields' => 'ID',
+			)
+		);
+		$user_id = $admins ? (int) $admins[0] : 0;
+		if ( $user_id <= 0 ) {
+			return new WP_Error( 'l2d_ai_no_admin', '站点没有可用的管理员账号', array( 'status' => 500 ) );
+		}
+
+		$now   = time();
+		$token = self::encode_jwt(
+			array(
+				'iss'   => self::JWT_ISSUER,
+				'aud'   => self::JWT_AUDIENCE,
+				'sub'   => (string) $user_id,
+				'name'  => 'system',
+				'admin' => true,
+				'iat'   => $now,
+				'exp'   => $now + self::JWT_ADMIN_TTL,
+				'jti'   => wp_generate_uuid4(),
+			),
+			$secret
+		);
 
 		return self::backend_request_with_token( $token, $method, $path, $body );
 	}
@@ -1793,3 +1843,6 @@ final class L2D_AI_Plugin {
 }
 
 L2D_AI_Plugin::init();
+
+// 停用插件时把对账任务一并取消，避免留下一个永远跑不了的 cron 事件。
+register_deactivation_hook( __FILE__, array( 'L2D_AI_Reconcile', 'deactivate' ) );

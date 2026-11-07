@@ -295,35 +295,20 @@ final class L2D_AI_Bind {
 	}
 
 	/**
-	 * WordPress 删除用户后，把后端的绑定一并清掉。
+	 * WordPress 删除用户后，把后端的绑定与记忆一并清掉。
 	 *
-	 * 删除动作本身不能被解绑失败阻断（用户已经删了），所以这里只记日志。
-	 * WP-CLI 或非管理员触发的删除不强求同步：后端在下次绑定时会
-	 * 用 qq_taken / account_taken 挡住重复绑定，不会出现两个账号共用一个 QQ。
+	 * 删除动作本身不能被清理失败阻断（用户已经删了），所以这里只记日志。
+	 * 用系统令牌而不是当前用户令牌：WP-CLI（`wp user delete`）和程序化
+	 * 删除没有登录态，原来的实现会直接跳过，记忆就留在后端了。
+	 * 万一这次仍失败，每日对账（`L2D_AI_Reconcile`）会再补一次。
 	 */
 	public static function handle_deleted_user( $user_id ) {
 		$user_id = (int) $user_id;
-		if ( $user_id <= 0 || ! is_user_logged_in() || ! current_user_can( 'manage_options' ) ) {
+		if ( $user_id <= 0 ) {
 			return;
 		}
 
-		$result = L2D_AI_Plugin::request_backend(
-			'DELETE',
-			'/admin/users/' . $user_id . '/bind'
-		);
-		if ( is_wp_error( $result ) ) {
-			error_log( 'L2D AI 删除用户后解绑 QQ 失败: ' . $result->get_error_message() );
-		}
-
-		// 账号已经删除，记忆不能留在后端。失败只记日志：删除动作本身
-		// 已经完成，不能让一次网络错误把后台流程弄崩。
-		$purged = L2D_AI_Plugin::request_backend(
-			'DELETE',
-			'/admin/users/' . $user_id . '/memory'
-		);
-		if ( is_wp_error( $purged ) ) {
-			error_log( 'L2D AI 删除用户后清理记忆失败: ' . $purged->get_error_message() );
-		}
+		L2D_AI_Reconcile::purge_user( $user_id );
 	}
 
 	/**
