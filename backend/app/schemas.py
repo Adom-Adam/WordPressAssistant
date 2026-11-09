@@ -56,6 +56,14 @@ class RuntimeSettingsUpdate(BaseModel):
     qq_global_daily_quota: int | None = Field(default=None, ge=0, le=1_000_000)
     qq_quota_shared: bool | None = None
     qq_unlimited: bool | None = None
+    appraisal_enabled: bool | None = None
+    appraisal_timeout_seconds: float | None = Field(default=None, ge=0.2, le=5.0)
+    appraisal_global_daily_budget: int | None = Field(
+        default=None, ge=0, le=1_000_000
+    )
+    appraisal_per_user_daily_budget: int | None = Field(
+        default=None, ge=0, le=1000
+    )
     agent_max_model_calls: int | None = Field(default=None, ge=1, le=20)
     agent_max_tool_calls: int | None = Field(default=None, ge=1, le=20)
     agent_max_seconds: float | None = Field(default=None, ge=5, le=300)

@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS persons (
     qq_uin TEXT,
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
-    note TEXT
+    note TEXT,
+    role TEXT NOT NULL DEFAULT 'normal'
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -76,6 +77,119 @@ CREATE TABLE IF NOT EXISTS memories (
 
 CREATE INDEX IF NOT EXISTS idx_memories_person ON memories(person_key, id);
 CREATE INDEX IF NOT EXISTS idx_memories_audience ON memories(audience_key, id);
+
+CREATE TABLE IF NOT EXISTS relationship_state (
+    persona_key TEXT NOT NULL,
+    person_key TEXT NOT NULL,
+    affection REAL NOT NULL DEFAULT 0,
+    missing REAL NOT NULL DEFAULT 50,
+    security REAL NOT NULL DEFAULT 70,
+    patience REAL NOT NULL DEFAULT 70,
+    valence REAL NOT NULL DEFAULT 0,
+    energy REAL NOT NULL DEFAULT 1,
+    fatigue REAL NOT NULL DEFAULT 0,
+    reply_debt REAL NOT NULL DEFAULT 0,
+    last_interaction_at TEXT,
+    last_proactive_at TEXT,
+    last_reply_at TEXT,
+    attention_confidence REAL NOT NULL DEFAULT 0,
+    conflict_stage TEXT NOT NULL DEFAULT 'normal',
+    stage_since TEXT,
+    scar_level REAL NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (persona_key, person_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_relationship_state_person
+    ON relationship_state(person_key);
+
+CREATE TABLE IF NOT EXISTS relationship_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    persona_key TEXT NOT NULL,
+    person_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    d_affection REAL NOT NULL DEFAULT 0,
+    d_missing REAL NOT NULL DEFAULT 0,
+    d_security REAL NOT NULL DEFAULT 0,
+    d_patience REAL NOT NULL DEFAULT 0,
+    d_valence REAL NOT NULL DEFAULT 0,
+    d_energy REAL NOT NULL DEFAULT 0,
+    d_debt REAL NOT NULL DEFAULT 0,
+    confidence REAL NOT NULL DEFAULT 1,
+    source_event_id INTEGER,
+    note TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_relationship_events_person
+    ON relationship_events(persona_key, person_key, id);
+
+-- 每次“这条私聊回不回”的决策记录。只追加、不改写，用来解释
+-- 为什么沉默、为什么回，以及调参时对照概率和随机数。
+CREATE TABLE IF NOT EXISTS decision_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    persona_key TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    person_key TEXT NOT NULL,
+    message_id TEXT,
+    rule_score REAL NOT NULL DEFAULT 0,
+    willingness REAL NOT NULL DEFAULT 0,
+    valence REAL NOT NULL DEFAULT 0,
+    energy REAL NOT NULL DEFAULT 1,
+    affinity REAL NOT NULL DEFAULT 1,
+    reply_debt REAL NOT NULL DEFAULT 0,
+    p0 REAL NOT NULL DEFAULT 1,
+    p REAL NOT NULL DEFAULT 1,
+    roll REAL,
+    verdict TEXT NOT NULL,
+    reason TEXT,
+    reply_bias REAL NOT NULL DEFAULT 0,
+    appraisal_event TEXT,
+    appraisal_confidence REAL NOT NULL DEFAULT 0,
+    conflict_stage TEXT NOT NULL DEFAULT 'normal',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_decision_log_persona
+    ON decision_log(persona_key, id);
+
+-- 每轮私聊模型评估的审计日志。原始输出、映射后的增量、实际落账值
+-- 都留一份，调参和排查“为什么这轮好感变了”时不用猜。
+CREATE TABLE IF NOT EXISTS appraisal_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    persona_key TEXT NOT NULL,
+    person_key TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    message_id TEXT,
+    event TEXT,
+    intensity REAL NOT NULL DEFAULT 0,
+    confidence REAL NOT NULL DEFAULT 0,
+    reply_bias REAL NOT NULL DEFAULT 0,
+    reason TEXT,
+    raw_output TEXT,
+    d_affection REAL NOT NULL DEFAULT 0,
+    d_valence REAL NOT NULL DEFAULT 0,
+    d_security REAL NOT NULL DEFAULT 0,
+    d_patience REAL NOT NULL DEFAULT 0,
+    applied_affection REAL NOT NULL DEFAULT 0,
+    applied_valence REAL NOT NULL DEFAULT 0,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    skipped_reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_appraisal_log_person
+    ON appraisal_log(persona_key, person_key, id);
+
+-- 模型评估的每日用量。scope 是 'global' 或 'person:<person_key>'。
+-- 用 UPSERT + WHERE 做原子占位，多进程并发时不会超发。
+CREATE TABLE IF NOT EXISTS appraisal_usage (
+    scope TEXT NOT NULL,
+    day TEXT NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (scope, day)
+);
 """
 
 
@@ -97,6 +211,78 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+def _ensure_person_role_column(conn: sqlite3.Connection) -> None:
+    """给 3a 之前的旧库补 `persons.role`；新库建表时已经带这一列。"""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(persons)")}
+    if "role" not in columns:
+        conn.execute(
+            "ALTER TABLE persons ADD COLUMN role TEXT NOT NULL DEFAULT 'normal'"
+        )
+
+
+def _ensure_relationship_state_fatigue_column(conn: sqlite3.Connection) -> None:
+    """给 3a.1 之前的旧库补 `relationship_state.fatigue`。"""
+    columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(relationship_state)")
+    }
+    if "fatigue" not in columns:
+        conn.execute(
+            "ALTER TABLE relationship_state "
+            "ADD COLUMN fatigue REAL NOT NULL DEFAULT 0"
+        )
+
+
+def _ensure_relationship_state_conflict_columns(
+    conn: sqlite3.Connection,
+) -> None:
+    """给 3c.1 之前的旧库补冲突弧字段。"""
+    columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(relationship_state)")
+    }
+    if "conflict_stage" not in columns:
+        conn.execute(
+            "ALTER TABLE relationship_state "
+            "ADD COLUMN conflict_stage TEXT NOT NULL DEFAULT 'normal'"
+        )
+    if "stage_since" not in columns:
+        conn.execute("ALTER TABLE relationship_state ADD COLUMN stage_since TEXT")
+    if "scar_level" not in columns:
+        conn.execute(
+            "ALTER TABLE relationship_state "
+            "ADD COLUMN scar_level REAL NOT NULL DEFAULT 0"
+        )
+
+
+def _ensure_decision_log_stage_column(conn: sqlite3.Connection) -> None:
+    """给 3c.1 之前的旧库补 `decision_log.conflict_stage`。"""
+    columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(decision_log)")
+    }
+    if "conflict_stage" not in columns:
+        conn.execute(
+            "ALTER TABLE decision_log "
+            "ADD COLUMN conflict_stage TEXT NOT NULL DEFAULT 'normal'"
+        )
+
+
+def _ensure_decision_log_appraisal_columns(conn: sqlite3.Connection) -> None:
+    """给 3c 之前的旧库补评估相关列。"""
+    columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(decision_log)")
+    }
+    if "reply_bias" not in columns:
+        conn.execute(
+            "ALTER TABLE decision_log ADD COLUMN reply_bias REAL NOT NULL DEFAULT 0"
+        )
+    if "appraisal_event" not in columns:
+        conn.execute("ALTER TABLE decision_log ADD COLUMN appraisal_event TEXT")
+    if "appraisal_confidence" not in columns:
+        conn.execute(
+            "ALTER TABLE decision_log "
+            "ADD COLUMN appraisal_confidence REAL NOT NULL DEFAULT 0"
+        )
+
+
 def init_schema(conn: sqlite3.Connection | None = None) -> None:
     """建表。可以反复调用；每次调用都很轻。"""
     own = conn is None
@@ -104,6 +290,11 @@ def init_schema(conn: sqlite3.Connection | None = None) -> None:
         conn = connect()
     try:
         conn.executescript(_SCHEMA)
+        _ensure_person_role_column(conn)
+        _ensure_relationship_state_fatigue_column(conn)
+        _ensure_relationship_state_conflict_columns(conn)
+        _ensure_decision_log_appraisal_columns(conn)
+        _ensure_decision_log_stage_column(conn)
         MEMORIES_VEC.ensure(conn, getattr(get_settings(), "embedding_dim", 512))
         conn.commit()
     finally:

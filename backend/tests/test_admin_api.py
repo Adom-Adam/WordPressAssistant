@@ -92,6 +92,15 @@ def test_admin_can_read_settings(client: TestClient) -> None:
     assert "deepseek_api_key" not in str(data)
 
 
+def test_admin_settings_exposes_appraisal_fields(client: TestClient) -> None:
+    data = client.get("/api/admin/settings", headers=auth_header()).json()
+
+    assert data["settings"]["appraisal_global_daily_budget"] == 1000
+    assert data["settings"]["appraisal_per_user_daily_budget"] == 60
+    assert data["settings"]["appraisal_timeout_seconds"] == 1.2
+    assert data["settings"]["appraisal_enabled"] is True
+
+
 def test_admin_update_takes_effect_immediately(client: TestClient) -> None:
     response = client.put(
         "/api/admin/settings",

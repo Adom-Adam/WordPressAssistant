@@ -20,6 +20,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from app.llm_json import strip_fence as _strip_fence
+from app.llm_json import text_of as _text_of
 from app.memory.sensitivity import detect_sensitivity
 from app.memory.store import VALID_MEMORY_TYPES, MemoryDraft
 
@@ -74,18 +76,6 @@ def build_prompt(turn: Turn) -> str:
         user_text=(turn.user_text or "")[:1500],
         assistant_text=(turn.assistant_text or "")[:1500],
     )
-
-
-def _strip_fence(raw: str) -> str:
-    text = (raw or "").strip()
-    if not text.startswith("```"):
-        return text
-    lines = text.splitlines()
-    if lines and lines[0].startswith("```"):
-        lines = lines[1:]
-    if lines and lines[-1].strip().startswith("```"):
-        lines = lines[:-1]
-    return "\n".join(lines).strip()
 
 
 def _clamp(value: Any, default: float) -> float:
@@ -162,22 +152,6 @@ def parse_candidates(raw: str, turn: Turn) -> list[MemoryDraft]:
         )
 
     return drafts
-
-
-def _text_of(result: Any) -> str:
-    """兼容 `str` 与内容块列表两种消息格式。"""
-    content = getattr(result, "content", result)
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict) and isinstance(block.get("text"), str):
-                parts.append(block["text"])
-        return "".join(parts)
-    return ""
 
 
 def _default_model() -> Any:

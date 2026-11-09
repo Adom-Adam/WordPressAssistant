@@ -26,17 +26,34 @@ import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError
 
 from app.config import get_settings
-from app.persona.models import PersonaVersion
+from app.persona.models import Dynamics, PersonaVersion
 
 logger = logging.getLogger(__name__)
 
 # 和 models.py 里的 id 规则保持一致。这里再检查一次，是因为目录名也会
 # 被拼进路径；只靠 Pydantic 校验文件内容，挡不住“目录名本身是 ../”。
 _ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
+# 运行期可调的动态参数覆盖层。它放在人设目录里、和版本文件分开，
+# 因为版本文件应当不可变；调参不该产生一个新版本。
+_OVERRIDE_FILENAME = "dynamics.override.json"
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """递归合并；覆盖层里的列表和标量整体替换，不做逐项拼接。"""
+    merged = dict(base)
+    for key, value in override.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(current, value)
+        else:
+            merged[key] = value
+    return merged
 
 
 class PersonaError(RuntimeError):
@@ -113,7 +130,37 @@ class PersonaStore:
                 f"人设文件内容与路径不一致：{path}"
                 f"（文件为 {persona.id}/v{persona.version}）"
             )
-        return persona
+        return self._apply_dynamics_override(persona)
+
+    def _apply_dynamics_override(self, persona: PersonaVersion) -> PersonaVersion:
+        """把人设目录里的 `dynamics.override.json` 深合并到默认参数上。
+
+        覆盖层整份校验：任何一处不合法（范围、字段名、JSON 语法）都
+        回退到基础值，并记一条日志。半份生效比不生效更难排查。
+        """
+        path = self._persona_dir(persona.id) / _OVERRIDE_FILENAME
+        if not path.is_file():
+            return persona
+
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("动态覆盖层无法读取，使用基础值：%s（%s）", path, exc)
+            return persona
+
+        if not isinstance(raw, dict):
+            logger.warning("动态覆盖层必须是 JSON 对象，使用基础值：%s", path)
+            return persona
+
+        merged = _deep_merge(persona.dynamics.model_dump(mode="json"), raw)
+        try:
+            dynamics = Dynamics.model_validate(merged)
+        except ValidationError as exc:
+            first = exc.errors()[0]["msg"] if exc.errors() else str(exc)
+            logger.warning("动态覆盖层格式不正确，使用基础值：%s（%s）", path, first)
+            return persona
+
+        return persona.model_copy(update={"dynamics": dynamics})
 
     def list_versions(self, persona_id: str) -> list[int]:
         """列出某个人的所有版本号，按升序返回。"""

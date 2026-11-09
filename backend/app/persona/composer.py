@@ -11,7 +11,9 @@
     3. rules       事实与安全边界（所有频道共享）
     4. overlay     当前频道的专属要求（网页检索/跳转、QQ 篇幅格式）
     5. identity    本次访客身份（来自后端 JWT，不是用户消息）
-    6. page        用户当前页面（不可信数据，清洗后只当背景）
+    6. memory      关于这个人的长期记忆（只读背景）
+    7. state       当前关系/精力/心情（只读背景）
+    8. page        用户当前页面（不可信数据，清洗后只当背景）
 
 “安全边界”目前在 rules 里。以后如果加入关系状态/记忆，会把它们
 作为“数据”放在 page 之前，并在最后再重申一次优先级。
@@ -48,6 +50,7 @@ def compose_system_prompt(
     is_admin: bool = False,
     channel: str = "web",
     memory_context: str | None = None,
+    state_context: str | None = None,
 ) -> str:
     """按固定顺序拼出系统提示词。
 
@@ -82,6 +85,12 @@ def compose_system_prompt(
     if memory_context and memory_context.strip():
         parts.append(memory_context.strip())
 
+    # 关系状态紧跟在记忆之后：两者都是“关于这个人的背景”，
+    # 但状态更临时，所以更靠近页面。它同样是自己渲染好的
+    # “只读背景”，这里只负责位置。
+    if state_context and state_context.strip():
+        parts.append(state_context.strip())
+
     # 页面信息属于“环境上下文”，不是用户这一轮说的话。
     # 放在 system 里不会污染多轮对话历史，也不会被模型误认为用户在提问。
     title = clean_context(page_title, 120)
@@ -112,6 +121,7 @@ def build_system_prompt(
     channel: str = "web",
     persona: PersonaVersion | None = None,
     memory_context: str | None = None,
+    state_context: str | None = None,
 ) -> str:
     """加载当前人设并组装提示词。
 
@@ -129,4 +139,5 @@ def build_system_prompt(
         is_admin=is_admin,
         channel=channel,
         memory_context=memory_context,
+        state_context=state_context,
     )

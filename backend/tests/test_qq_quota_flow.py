@@ -20,6 +20,7 @@ from app.channels.qq import commands
 from app.channels.qq.adapter import QQAdapter
 from app.config import Settings, get_settings
 from app.credits import CreditStore, hash_bind_code
+from app.persona.models import PersonaVersion
 from app.qq_quota import QQQuotaGate, QQQuotaStore
 from app.quota import QuotaStore
 from app.runtime_settings import RuntimeSettings
@@ -82,14 +83,44 @@ def runtime(**overrides: Any) -> RuntimeSettings:
         qq_global_daily_quota=0,
         qq_quota_shared=False,
         qq_unlimited=False,
+        appraisal_enabled=True,
+        appraisal_timeout_seconds=1.2,
+        appraisal_global_daily_budget=1000,
+        appraisal_per_user_daily_budget=60,
     )
     base.update(overrides)
     return RuntimeSettings(**base)
 
 
+def make_persona() -> PersonaVersion:
+    """额度测试只关心计数，不需要概率沉默和 1.5 秒防抖。"""
+    return PersonaVersion.model_validate(
+        {
+            "schema": "l2d.persona/v1",
+            "id": "merlin",
+            "version": 1,
+            "name": "梅林",
+            "core": "C",
+            "dynamics": {
+                "namespace": {"state": "merlin"},
+                "pacing": {
+                    "debounce_seconds": 0.0,
+                    "debounce_max_seconds": 0.0,
+                    "min_gap_ms": 0,
+                    "max_gap_ms": 0,
+                    "chars_per_second": 50.0,
+                },
+            },
+        }
+    )
+
+
 def make(tmp_path: Any, *, stream: Any, runtime_values: RuntimeSettings | None = None):
     settings = Settings(
-        qq_enabled=True, qq_allowed_groups="888", qq_mock_mode=True
+        qq_enabled=True,
+        qq_allowed_groups="888",
+        qq_mock_mode=True,
+        qq_private_reply_policy="always",
     )
     db = str(tmp_path / "quota.sqlite3")
     store = CreditStore(db)
@@ -98,7 +129,14 @@ def make(tmp_path: Any, *, stream: Any, runtime_values: RuntimeSettings | None =
     values = runtime_values or runtime()
     gate = QQQuotaGate(QuotaStore(db), QQQuotaStore(db), lambda: values)
     sender = FakeSender()
-    adapter = QQAdapter(settings, sender, stream=stream, credits=store, gate=gate)
+    adapter = QQAdapter(
+        settings,
+        sender,
+        stream=stream,
+        credits=store,
+        gate=gate,
+        persona=make_persona(),
+    )
     return adapter, sender, store
 
 
@@ -180,7 +218,12 @@ async def test_admin_binding_is_not_counted(tmp_path: Any) -> None:
     async def stream(messages: Any, **kwargs: Any) -> Any:
         yield {"type": "delta", "content": "我在"}
 
-    settings = Settings(qq_enabled=True, qq_allowed_groups="888", qq_mock_mode=True)
+    settings = Settings(
+        qq_enabled=True,
+        qq_allowed_groups="888",
+        qq_mock_mode=True,
+        qq_private_reply_policy="always",
+    )
     db = str(tmp_path / "quota.sqlite3")
     store = CreditStore(db)
     store.set_bind_code(7, hash_bind_code("1234-5678"), is_admin=True)
@@ -189,7 +232,14 @@ async def test_admin_binding_is_not_counted(tmp_path: Any) -> None:
         QuotaStore(db), QQQuotaStore(db), lambda: runtime(qq_daily_quota=0)
     )
     sender = FakeSender()
-    adapter = QQAdapter(settings, sender, stream=stream, credits=store, gate=gate)
+    adapter = QQAdapter(
+        settings,
+        sender,
+        stream=stream,
+        credits=store,
+        gate=gate,
+        persona=make_persona(),
+    )
 
     result = await adapter.handle_event(private_event(10001, "你好", 1))
 
@@ -231,6 +281,33 @@ async def test_empty_delta_counts_as_no_reply(tmp_path: Any) -> None:
 
     assert result["reply"] == commands.AGENT_ERROR
     assert qq_used(tmp_path) == 0
+
+
+@async_test
+async def test_interrupted_generation_refunds_quota(tmp_path: Any) -> None:
+    """被打断的回合没有给用户任何正文，不能吃掉额度。"""
+    started = asyncio.Event()
+    calls: list[int] = []
+
+    async def blocking_stream(messages: Any, **kwargs: Any) -> Any:
+        calls.append(1)
+        if len(calls) == 1:
+            started.set()
+            await asyncio.sleep(30)
+        yield {"type": "delta", "content": "我在"}
+
+    adapter, sender, _ = make(tmp_path, stream=blocking_stream)
+
+    first = asyncio.create_task(adapter.handle_event(private_event(10001, "第一句", 1)))
+    await started.wait()
+    second = asyncio.create_task(adapter.handle_event(private_event(10001, "第二句", 2)))
+    first_result, second_result = await asyncio.gather(first, second)
+
+    assert first_result["reason"] == "interrupted"
+    assert second_result.get("reason") is None
+    # 第一次占用的额度已退回；只有合并后的第二次真的计数。
+    assert qq_used(tmp_path) == 1
+    assert sender.private == [(10001, "我在")]
 
 
 @async_test

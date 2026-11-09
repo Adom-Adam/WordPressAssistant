@@ -146,3 +146,23 @@ def test_empty_memory_context_does_not_change_prompt() -> None:
     without = build_system_prompt(None, None, persona=_persona())
     with_empty = build_system_prompt(None, None, persona=_persona(), memory_context="   ")
     assert without == with_empty
+
+
+def test_state_context_sits_between_memory_and_page() -> None:
+    prompt = build_system_prompt(
+        "https://example.com/post/1",
+        "某篇文章",
+        persona=_persona(),
+        memory_context="MEMORY_MARKER",
+        state_context="STATE_MARKER",
+    )
+    assert prompt.index("MEMORY_MARKER") < prompt.index("STATE_MARKER")
+    assert prompt.index("STATE_MARKER") < prompt.index("用户当前所在页面")
+
+
+def test_empty_state_context_does_not_change_prompt() -> None:
+    without = build_system_prompt(None, None, persona=_persona())
+    with_empty = build_system_prompt(
+        None, None, persona=_persona(), state_context="   "
+    )
+    assert without == with_empty

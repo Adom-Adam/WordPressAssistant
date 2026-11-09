@@ -1099,6 +1099,8 @@ final class L2D_AI_Plugin {
 			'agent_max_model_calls' => array( 1, 20 ),
 			'agent_max_tool_calls'  => array( 1, 20 ),
 			'agent_max_seconds'     => array( 5, 300 ),
+			'appraisal_global_daily_budget' => array( 0, 1000000 ),
+			'appraisal_per_user_daily_budget' => array( 0, 1000 ),
 		);
 
 		$patch = array();
@@ -1120,6 +1122,20 @@ final class L2D_AI_Plugin {
 		// 未勾选的复选框在 POST 里根本不存在，所以只能按“存在即 true”处理。
 		$patch['qq_quota_shared'] = ! empty( $_POST['qq_quota_shared'] );
 		$patch['qq_unlimited']    = ! empty( $_POST['qq_unlimited'] );
+		$patch['appraisal_enabled'] = ! empty( $_POST['appraisal_enabled'] );
+
+		// 评估超时是小数，单独校验；整数规则会把 1.2 直接判错。
+		$raw_timeout = isset( $_POST['appraisal_timeout_seconds'] )
+			? trim( (string) wp_unslash( $_POST['appraisal_timeout_seconds'] ) )
+			: '';
+		if ( '' === $raw_timeout || ! preg_match( '/^\d+(\.\d+)?$/', $raw_timeout ) ) {
+			self::redirect_with_error( '关系评估超时必须是数字' );
+		}
+		$timeout = (float) $raw_timeout;
+		if ( $timeout < 0.2 || $timeout > 5 ) {
+			self::redirect_with_error( '关系评估超时必须在 0.2 到 5 秒之间' );
+		}
+		$patch['appraisal_timeout_seconds'] = $timeout;
 
 		$model = isset( $_POST['model'] ) ? trim( (string) wp_unslash( $_POST['model'] ) ) : '';
 		if ( ! preg_match( '/^[A-Za-z0-9._:-]{1,100}$/', $model ) ) {
@@ -1737,6 +1753,89 @@ final class L2D_AI_Plugin {
 									例如 <code>deepseek-chat</code>。只允许字母、数字、点、下划线、冒号和连字符。
 									保存后只影响新请求，已有的对话不受影响。
 								</p>
+							</td>
+						</tr>
+						<tr>
+							<th colspan="2">
+								<h2 style="margin:16px 0 4px;">QQ 关系评估</h2>
+								<p class="description" style="margin:0;">
+									每轮私聊在回复前先让模型判断一次“这句话对关系意味着什么”，失败或超时都退回规则。
+								</p>
+							</th>
+						</tr>
+						<tr>
+							<th scope="row">启用每轮评估</th>
+							<td>
+								<label for="l2d-ai-appraisal-enabled">
+									<input
+										type="checkbox"
+										id="l2d-ai-appraisal-enabled"
+										name="appraisal_enabled"
+										value="1"
+										<?php checked( '1', (string) $get( $settings, 'appraisal_enabled', true ) ); ?>
+									/>
+									在掷骰子前调用一次轻量模型
+								</label>
+								<p class="description">
+									关闭后不调用评估模型，关系只按规则变化（聊天、沉默等），也不消耗下面的预算。
+								</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-appraisal-timeout">单次评估超时</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-appraisal-timeout"
+									name="appraisal_timeout_seconds"
+									value="<?php echo esc_attr( $get( $settings, 'appraisal_timeout_seconds', 1.2 ) ); ?>"
+									min="0.2"
+									max="5"
+									step="0.1"
+									class="small-text"
+								/>
+								秒
+								<p class="description">评估在回复前同步等待；超时就按规则回复，不阻塞聊天。</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-appraisal-global">全站每日评估预算</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-appraisal-global"
+									name="appraisal_global_daily_budget"
+									value="<?php echo esc_attr( $get( $settings, 'appraisal_global_daily_budget', 1000 ) ); ?>"
+									min="0"
+									max="1000000"
+									step="1"
+									class="regular-text"
+								/>
+								次
+								<p class="description">0 = 不限。预算和用户聊天额度相互独立，用尽后本轮不评估但照常回复。</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-appraisal-user">每人每日评估预算</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-appraisal-user"
+									name="appraisal_per_user_daily_budget"
+									value="<?php echo esc_attr( $get( $settings, 'appraisal_per_user_daily_budget', 60 ) ); ?>"
+									min="0"
+									max="1000"
+									step="1"
+									class="small-text"
+								/>
+								次
+								<p class="description">0 = 不限。按本地日（QUOTA_TIMEZONE）重置。</p>
 							</td>
 						</tr>
 					</table>

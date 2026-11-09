@@ -66,6 +66,10 @@ class RuntimeSettings:
     qq_global_daily_quota: int
     qq_quota_shared: bool
     qq_unlimited: bool
+    appraisal_enabled: bool
+    appraisal_timeout_seconds: float
+    appraisal_global_daily_budget: int
+    appraisal_per_user_daily_budget: int
 
 
 # 每个字段的合法范围。管理员接口和读取文件时都会用同一套规则，
@@ -80,10 +84,16 @@ _INT_RANGES: dict[str, tuple[int, int]] = {
     "qq_global_daily_quota": (0, 1_000_000),
     "agent_max_model_calls": (1, 20),
     "agent_max_tool_calls": (1, 20),
+    "appraisal_global_daily_budget": (0, 1_000_000),
+    "appraisal_per_user_daily_budget": (0, 1000),
 }
 # 布尔字段单独一套规则：bool 是 int 的子类，混进 _INT_RANGES 会被当成整数。
-_BOOL_FIELDS = {"qq_quota_shared", "qq_unlimited"}
+_BOOL_FIELDS = {"qq_quota_shared", "qq_unlimited", "appraisal_enabled"}
 _SECONDS_RANGE = (5.0, 300.0)
+# 浮点字段各自的范围。评估超时故意比一轮对话短得多。
+_FLOAT_RANGES: dict[str, tuple[float, float]] = {
+    "appraisal_timeout_seconds": (0.2, 5.0),
+}
 # 模型名只允许常见字符，避免把换行/控制字符带进 HTTP 请求或日志。
 _MODEL_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,100}$")
 
@@ -103,6 +113,10 @@ def _defaults_from_settings(settings: Settings) -> RuntimeSettings:
         qq_global_daily_quota=settings.qq_global_daily_quota,
         qq_quota_shared=settings.qq_quota_shared,
         qq_unlimited=settings.qq_unlimited,
+        appraisal_enabled=settings.appraisal_enabled,
+        appraisal_timeout_seconds=settings.appraisal_timeout_seconds,
+        appraisal_global_daily_budget=settings.appraisal_global_daily_budget,
+        appraisal_per_user_daily_budget=settings.appraisal_per_user_daily_budget,
     )
 
 
@@ -139,6 +153,18 @@ def _validate(field: str, value: Any) -> Any:
         if not low <= seconds <= high:
             raise ValueError(f"agent_max_seconds 必须在 {low:g}~{high:g} 之间")
         return seconds
+
+    if field in _FLOAT_RANGES:
+        if isinstance(value, bool):
+            raise ValueError(f"{field} 必须是数字")
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{field} 必须是数字") from None
+        low, high = _FLOAT_RANGES[field]
+        if not low <= number <= high:
+            raise ValueError(f"{field} 必须在 {low:g}~{high:g} 之间")
+        return number
 
     if field == "model":
         text = str(value or "").strip()

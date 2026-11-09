@@ -19,6 +19,12 @@
       "allow_actions": false
     }
   },
+  "dynamics": {
+    "namespace": {
+      "state": "merlin",
+      "memory": "merlin"
+    }
+  },
   "metadata": {
     "source": "personas.example",
     "note": "这是格式示例，请替换成真实人设；真实人设不要提交到 Git。"

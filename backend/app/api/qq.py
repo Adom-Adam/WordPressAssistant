@@ -27,6 +27,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response
 from app.channels.qq.adapter import QQAdapter
 from app.channels.qq.client import build_onebot_client
 from app.config import get_settings
+from app.relationship.appraisal import Appraiser
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,11 @@ def get_qq_adapter() -> QQAdapter:
     测试如果需要干净状态，调用 `get_qq_adapter.cache_clear()`。
     """
     settings = get_settings()
-    return QQAdapter(settings, build_onebot_client(settings))
+    # 生产入口显式注入评估器；QQAdapter 的默认值是 None，
+    # 这样测试和离线运行不会误调真实模型。
+    return QQAdapter(
+        settings, build_onebot_client(settings), appraiser=Appraiser()
+    )
 
 
 def _extract_token(request: Request) -> str:

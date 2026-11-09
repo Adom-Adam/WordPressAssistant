@@ -23,7 +23,12 @@ from app.config import get_settings
 
 
 @lru_cache(maxsize=8)
-def build_chat_model(model_name: str | None = None) -> ChatDeepSeek:
+def build_chat_model(
+    model_name: str | None = None,
+    *,
+    temperature: float = 0.7,
+    max_tokens: int = 800,
+) -> ChatDeepSeek:
     """创建一个可复用的 DeepSeek 聊天模型实例。
 
     参数 model_name 来自运行时设置（管理员可在 WP 后台修改）。
@@ -61,8 +66,8 @@ def build_chat_model(model_name: str | None = None) -> ChatDeepSeek:
         "model": model_name or settings.deepseek_model,
         "api_key": settings.deepseek_api_key,
         "base_url": settings.deepseek_base_url,
-        "temperature": 0.7,
-        "max_tokens": 800,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
         "timeout": settings.request_timeout,
         "max_retries": 2,
     }

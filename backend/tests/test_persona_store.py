@@ -48,6 +48,14 @@ def write_persona(
     return path
 
 
+def write_override(root: Path, persona_id: str, payload: object) -> Path:
+    directory = root / persona_id
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "dynamics.override.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
 def write_active(root: Path, persona_id: str, version: int) -> None:
     (root / "active.json").write_text(
         json.dumps({"persona_id": persona_id, "version": version}),
@@ -160,6 +168,60 @@ def test_persona_model_rejects_unknown_fields() -> None:
         )
 
 
+def test_dynamics_override_is_deep_merged(tmp_path: Path) -> None:
+    write_persona(tmp_path, "merlin", 1)
+    write_override(
+        tmp_path,
+        "merlin",
+        {
+            "reply": {"base": 0.5},
+            "relationship": {
+                "roles": {"normal": {"initial": 12, "cap": 60, "growth": 0.6}}
+            },
+        },
+    )
+
+    persona = PersonaStore(tmp_path, "merlin").load("merlin", 1)
+
+    assert persona.dynamics.reply.base == 0.5
+    # 没写的同级字段保持基础值，不能被整段覆盖掉。
+    assert persona.dynamics.reply.ceiling == 0.95
+    assert persona.dynamics.relationship.roles["normal"].initial == 12
+    assert persona.dynamics.relationship.roles["owner"].initial == 60
+
+
+def test_invalid_dynamics_override_falls_back_to_base(tmp_path: Path) -> None:
+    write_persona(tmp_path, "merlin", 1)
+    # base 的上限是 1.0，5.0 会被 Pydantic 拒绝；整份覆盖层回退，
+    # 而不是半份生效或者让人设加载失败。
+    write_override(tmp_path, "merlin", {"reply": {"base": 5.0}})
+
+    persona = PersonaStore(tmp_path, "merlin").load("merlin", 1)
+
+    assert persona.dynamics.reply.base == 0.95
+
+
+def test_malformed_dynamics_override_falls_back_to_base(tmp_path: Path) -> None:
+    write_persona(tmp_path, "merlin", 1)
+    (tmp_path / "merlin" / "dynamics.override.json").write_text(
+        "{not json", encoding="utf-8"
+    )
+
+    persona = PersonaStore(tmp_path, "merlin").load("merlin", 1)
+
+    assert persona.dynamics.reply.base == 0.95
+
+
+def test_override_changes_take_effect_without_restart(tmp_path: Path) -> None:
+    write_persona(tmp_path, "merlin", 1)
+    path = write_override(tmp_path, "merlin", {"reply": {"base": 0.5}})
+    store = PersonaStore(tmp_path, "merlin")
+
+    assert store.load("merlin", 1).dynamics.reply.base == 0.5
+    path.unlink()
+    assert store.load("merlin", 1).dynamics.reply.base == 0.95
+
+
 def test_public_example_persona_is_valid() -> None:
     """公开仓库里的示例也必须能通过加载器，避免文档和代码脱节。"""
     example_root = Path(__file__).resolve().parents[1] / "personas.example"
@@ -170,3 +232,15 @@ def test_public_example_persona_is_valid() -> None:
     assert persona.id == "merlin"
     assert persona.version == 1
     assert persona.core.strip()
+
+
+def test_public_example_persona_carries_dynamics() -> None:
+    example_root = Path(__file__).resolve().parents[1] / "personas.example"
+
+    persona = PersonaStore(example_root, "merlin").load_active()
+
+    assert persona.state_key == "merlin"
+    assert persona.memory_key == "merlin"
+    assert persona.dynamics.namespace.state == "merlin"
+    assert persona.dynamics.relationship.roles["normal"].initial == 0
+    assert persona.dynamics.relationship.roles["owner"].initial == 60

@@ -47,6 +47,13 @@ data/personas/
 | `background` | 她为什么在这里（差事/背景），不要盖过 `core`；只写所有频道都成立的部分 |
 | `rules` | 所有频道共享的事实准确与安全边界，不写网页专属操作 |
 | `channels` | 频道覆盖层：`web`、`qq_private`、`qq_group`；只有对应频道才会追加 |
+| `dynamics` | 可选。心情、精力、回复概率、关系成长、节奏、安全词和隔离 namespace 的默认值；不写则用代码默认值 |
+| `metadata` | 来源、导入时间等说明，不参与提示词组装 |
+
+`dynamics.relationship` 里还有两项每轮对话的信号：`chat_affection_units`
+（正常回复涨多少好感，单位是 `affection_unit`，默认 0.5）和 `chat_valence`
+（心情变化，默认 0.03）。被忽略的一条有内容私聊不涨好感，只增加
+`dynamics.reply.debt_increment` 的回复债。
 
 `background` 和 `rules` 会被**所有频道**读到，覆盖层只能往后追加、不能删除
 前面的段落。因此：
@@ -58,7 +65,37 @@ data/personas/
 
 如果把这些内容写进共享的 `rules`，QQ 里会先读到“去翻书架”，再被覆盖层要求
 “别提书架”，模型收到的是互相打架的指令。
-| `metadata` | 来源、导入时间等说明，不参与提示词组装 |
+
+## 运行期调参：`dynamics.override.json`
+
+版本文件是**不可变基线**；调参不要改版本文件，而是在同一目录放一个
+`dynamics.override.json`：
+
+```text
+data/personas/merlin/
+├── 1.json
+└── dynamics.override.json
+```
+
+```json
+{
+  "reply": { "base": 0.9 },
+  "relationship": {
+    "growth_curve": 0.6,
+    "roles": {
+      "normal": { "initial": 10, "cap": 60, "growth": 0.6 }
+    }
+  }
+}
+```
+
+- 加载时深合并到启用版本的 `dynamics` 上：只写要改的字段，没写的保持基线；
+  列表（如 `hourly_curve`）整体替换，不逐项拼接。
+- 合并后整体重新校验。字段名拼错、数值越界、JSON 语法错误，都会**整份回退**
+  到基线并在服务端日志里告警，不会半份生效，也不会让人设加载失败。
+- QQ 适配器每轮私聊重新读取人设，保存覆盖文件后下一轮立刻生效，不需要重启。
+- 想恢复默认：删除 `dynamics.override.json` 即可。
+- 覆盖文件按 `persona_id` 隔离，升级到新版本后仍然生效。
 
 ## 注意
 

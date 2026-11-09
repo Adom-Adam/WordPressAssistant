@@ -237,6 +237,10 @@ WordPress 后台设置页
 - **后台配置**：WordPress 设置页可改模型名、单用户日额度、全站日额度、
   模型/工具调用上限和超时；保存后写入后端 `data/runtime_settings.json`，立即生效；
   支持恢复默认值提示，非法值整批拒绝；
+- **QQ 关系评估**：设置页“QQ 关系评估”分区可改 `appraisal_enabled`（每轮私聊是否在掷骰子前调用一次轻量模型）、
+  `appraisal_timeout_seconds`（0.2–5 秒，超时回退规则）、`appraisal_global_daily_budget` 与
+  `appraisal_per_user_daily_budget`（全站 / 每人每日评估次数，`0` 表示不限）。
+  评估预算独立于聊天额度，用尽只跳过评估，不影响回复；
 - **API Key 与端口**：属于部署配置，后台只读展示，不提供在线修改，也不回显 Key；
 - **形象尺寸**：后台三档预设（200×360 / 260×460 / 330×600）或自定义像素，
   由插件注入前端，手机端仍有响应式收缩；

@@ -229,6 +229,49 @@ def record_qq_turn(
         return None
 
 
+def record_qq_ignored(
+    qq_uin: int,
+    group_id: int | None,
+    binding: object | None,
+    user_text: str,
+) -> int | None:
+    """梅林选择不回复时，只把用户这条写进时间线。
+
+    沉默也是真实发生过的事：不写进去，之后的记忆和主动消息就不知道
+    “她当时没接话”。这里不写 assistant 事件，也不触发记忆提炼。
+    """
+    try:
+        conn = _connect()
+        try:
+            viewer = qq_viewer(conn, qq_uin, group_id, binding)
+            person_key = viewer.person_keys[0]
+            scope, audience = _turn_scope(viewer.channel, group_id, person_key)
+            channel_id = f"group:{group_id}" if group_id else f"private:{qq_uin}"
+            event_id = events.record_event(
+                conn,
+                person_key=person_key,
+                platform="qq",
+                channel_id=channel_id,
+                scope=scope,
+                audience=audience,
+                source="user_message",
+                content=user_text,
+            )
+            bound_user_id = getattr(binding, "user_id", None) if binding else None
+            identity.touch_person(
+                conn,
+                person_key,
+                wp_user_id=bound_user_id,
+                qq_uin=str(qq_uin),
+            )
+            return event_id
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - 记不住也不能影响回复链路
+        logger.warning("记录 QQ 未回复事件失败 qq=%s", qq_uin, exc_info=True)
+        return None
+
+
 # ----------------------------------------------------------------------
 # 记忆读取
 # ----------------------------------------------------------------------

@@ -118,6 +118,10 @@ def make_runtime(**overrides) -> RuntimeSettings:
         qq_global_daily_quota=0,
         qq_quota_shared=False,
         qq_unlimited=False,
+        appraisal_enabled=True,
+        appraisal_timeout_seconds=1.2,
+        appraisal_global_daily_budget=1000,
+        appraisal_per_user_daily_budget=60,
     )
     base.update(overrides)
     return RuntimeSettings(**base)

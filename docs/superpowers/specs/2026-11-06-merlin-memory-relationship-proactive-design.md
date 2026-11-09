@@ -94,16 +94,19 @@
 
 ### 4.1 状态量
 
-每个 `person_key` 一份：
+每个 `(persona_key, person_key)` 一份（默认按人设隔离，见第 10 节）：
 
-| 状态 | 范围 | 含义 |
-|---|---|---|
-| `affection` | 0–100 | 好感/亲近度 |
-| `missing` | 0–100 | 思念 |
-| `security` | 0–100 | 安全感 |
-| `patience` | 0–100 | 耐心 |
+| 状态 | 范围 | 时间尺度 | 含义 |
+|---|---|---|---|
+| `affection` | -100–100 | 天–周 | 好感/亲近度；0 = 陌生人 |
+| `missing` | 0–100 | 天 | 思念 |
+| `security` | 0–100 | 天 | 安全感 |
+| `patience` | 0–100 | 天 | 耐心 |
+| `valence` | -1–1 | 分钟–小时 | 心情好坏，向人格基线衰减 |
+| `energy` | 0–1 | 小时 | 精力 = 本地时段曲线 − 短期疲劳（半衰期 60 分钟，可人设覆盖） |
+| `reply_debt` | ≥0 | 8 小时半衰期 | 被忽略消息积累的回复意愿 |
 
-另记：`last_interaction_at`、`last_proactive_at`、`last_reply_at`、`attention_confidence`。
+另记：`last_interaction_at`、`last_proactive_at`、`last_reply_at`、`attention_confidence`、`updated_at`。
 
 ### 4.2 注意力置信度
 
@@ -124,20 +127,35 @@
 - 只有 `get_user_status=online` 不作为“看到了不回”的证据，最多让思念稍微慢一点。
 - 24 小时宽限期：刚发出去的消息在宽限期内不产生负面变化。
 
-### 4.3 好感单位与固定上限
+### 4.3 好感单位、范围与成长
 
-`affection_unit` 是管理员可调的最小变化单位，默认 `1.0`，范围 `0.1–5.0`。所有事件的好感变化以“单位”表示，实际变化 = `units * affection_unit`。只作用于 `affection`，不影响 `missing` / `security` / `patience`。
+`affection` 范围改为 **-100 ~ +100**；`0` 代表陌生人，负值代表不喜欢，正值代表亲近。`affection_unit` 仍是管理员可调的最小变化单位，默认 `1.0`，范围 `0.1–5.0`。只作用于 `affection`，不影响 `missing` / `security` / `patience`，也不缩放 `valence` / `energy` / `reply_debt`——它们各有自己的参数。
 
 固定角色与上限（不做动态上限）：
 
 | 角色 | 初始好感 | 上限 | 成长倍率 |
 |---|---:|---:|---:|
-| `owner`（馆长/管理员） | 85 | 100 | 1.0 |
-| `exception`（例外名单） | 50 | 85 | 0.9 |
-| `special`（特殊名单） | 40 | 75 | 0.8 |
-| `normal`（普通） | 30 | 60 | 0.6 |
+| `owner`（馆长/管理员） | 60 | 100 | 1.0 |
+| `exception`（例外名单） | 0 | 85 | 0.9 |
+| `special`（特殊名单） | 0 | 75 | 0.8 |
+| `normal`（普通） | 0 | 60 | 0.6 |
 
+- **除管理员外，所有角色都从 0 开始**；角色只决定上限和成长速度，不预设亲密关系。想让手动加名单的人一上来就更亲近，可在覆盖文件里单独调高该角色的 `initial`。
+- 取消“普通关系不低于 20”的下限，允许长期负好感；负好感不等于永久敌对，修复事件仍能把它拉回来。
+- 正面增长随当前好感递减：
+
+```text
+raw = units × affection_unit × role.growth
+ratio = clamp(max(affection, 0) / cap, 0, 1)
+gain_factor = (1 - ratio) ^ growth_curve
+d_affection = raw × gain_factor
+```
+
+`growth_curve` 默认 `0.8`。0 附近接近全额，越接近上限越难升；负值区间 `gain_factor = 1`，所以道歉和关心仍然能修复，但单次与每日上限会防止一句道歉就洗白。
+
+- 负面变化不乘成长倍率；严重事件在高好感时伤害更大，在已经很低时边际伤害略小，由 4.7 的事件类别和 `severity` 曲线控制。
 - 上限只限制**增长**，不强制把已经高于上限的值拉下来。
+- 老用户已有的好感不重置；新规则只影响新用户和后续变化。
 - 如果 owner 因长期不互动而衰减到 70，special 用户当前是 72，允许暂时高于 owner；这是状态自然变化，不是越权。
 - `exception` 名单保留，由管理员后台添加/移除；`special` 同理。普通用户不能申请或自行调整。
 - 角色按 `person_key` 判定：网页用户 `wp:<id>`，QQ 用户 `qq:<uin>`；已绑定账号取两者中更高的角色。
@@ -148,7 +166,141 @@
 - 连续主动消息未获回应：`missing` 继续上升，`affection` 可按置信度小幅下降；**不停止下一次主动**。
 - 冲突弧：`normal → hurt → cold → withdrawing → repairing → normal_with_scar`，没有永久冷战。
 - 修复：对方主动回复、解释或道歉时，`security` 回升、`missing` 回落、`affection` 小幅回升；`normal_with_scar` 保留一条 `relationship` 记忆，不抹掉发生过的事。
-- 好感下限：普通关系不低于 20；明确冲突期间可短暂更低，但 72 小时内必须开始恢复。
+- 好感下限为 **-100**；不再设置“普通关系不低于 20”。修复仍然通过道歉、解释和持续关心发生，但不设强制 72 小时恢复，避免机械感；冲突弧的终点是 `normal_with_scar`，不是永久冷战。
+- **转移是确定性的**（不使用随机数）：同一种事件、同一份状态永远得到同样的下一步；活人感来自历史、好感、安全感和强度的差异。
+- **进入冲突的门槛**：只有 `betrayal` / `hostility` 且 `confidence ≥ 0.6`、`intensity ≥ 0.5` 才算严重事件；`boundary` 需要 1 小时内 ≥3 次或 24 小时内 ≥5 次；`spam` 永不升级。低置信或低强度的负面事件只扣分，不把关系推进冲突。
+- **最短停留**（人设参数 `dynamics.conflict.min_dwell_minutes`）：`hurt` 30 分钟、`cold` 6 小时、`withdrawing` / `repairing` 各 24 小时。最早 30 分钟后才接受真诚道歉进入 `repairing`，避免“5 秒内从受伤到原谅”。
+- **无修复时的自然恶化**（只有时间参与，不新增定时任务，惰性结算）：`hurt` 满 24 小时（耐心 <50 时 12 小时）→ `cold`；`cold` 满 48 小时且安全感 <40 → `withdrawing`；`withdrawing` 满 14 天 → `normal_with_scar`，疤痕至少 0.4，绝不永久冷战；`repairing` 72 小时内没有新的正向事件 → `cold`。
+- **修复门槛**：`hurt` 阶段一次够强的道歉即可；`cold` 还要安全感 ≥40，或累计正向事件达到 `repair_points_needed`（高好感 1 次、中好感 2 次、低好感 3 次）；`withdrawing` 不接受单独一句道歉，道歉之外 24 小时内还要有其他正向互动；`repairing` 满 24 小时、安全感 ≥60 且正向事件达标才回到 `normal_with_scar`。`repairing` 期间再次发生严重事件直接升级为 `withdrawing`。
+- **伤疤**：严重事件留下 `scar_level += 0.3`，再次背叛 `+0.2`，按 14 天半衰期淡化；`scar_level` 使负面事件的 `d_affection` 额外乘 `1 + scar_level`；`normal_with_scar` 在疤痕 <0.1 且进入满 7 天后淡回 `normal`，事件与评估记录不删除。
+- **阶段影响表达**：回复概率乘阶段系数（`normal` 1.0、`normal_with_scar` 0.98、`hurt` 0.85、`cold` 0.70、`withdrawing` 0.50、`repairing` 0.90），但危机、命令、绑定引导和额度提示永远绕过；提示词只给中文定性描述（“心里还有点受伤”“有些退缩”等），不出现阶段英文名或数值。阶段变化当轮即影响提示词，数值变化下一轮生效。
+- **伤疤记忆推迟**：`memories` 表目前没有 `persona_key`，直接写跨人设的“伤疤记忆”会破坏 persona 隔离；当前用 `relationship_state`（`conflict_stage` / `stage_since` / `scar_level`）和 `appraisal_log` 承载，记忆接入另开任务。
+
+### 4.5 affinity：从 affection 派生的慢变量
+
+`affinity` 不单独存储，而是由 `affection` 换算出的回复概率倍率。因为 affection 现在可以为负，曲线必须跨过 0 平滑过渡：
+
+```text
+affinity = clamp(
+  affinity_mid + affinity_amp × tanh(affection / affinity_scale),
+  affinity_min,
+  affinity_max
+)
+```
+
+默认 `affinity_mid=0.70`、`affinity_amp=0.60`、`affinity_scale=60`、`affinity_min=0.10`、`affinity_max=1.20`，对应：
+
+| affection | -100 | -60 | -20 | 0 | 20 | 40 | 60 | 85 | 100 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| affinity | 0.14 | 0.24 | 0.51 | 0.70 | 0.89 | 1.05 | 1.16 | 1.20 | 1.20 |
+
+- 0 分对应约 0.70 的倍率：陌生人仍有基础礼貌，但不会因为初始值低就几乎不回。
+- 负值只把倍率压到 0.14 左右，不会归零；危机、命令、绑定和额度提示仍然绕过 affinity。
+- `tanh` 比原来的幂函数更适合跨 0 区间，且两端自然饱和，不需要分段。
+- 角色**不直接乘** affinity；角色通过初始值、上限、成长倍率影响 affection 的轨迹，避免双重计算。
+- affinity 只用于回复概率、主动消息评分和关系语气提示，不覆盖危机/命令/绑定/额度。
+- 后台修改 affection 后 affinity 立即随之变化；不维护第二份好感。
+
+### 4.6 精力：时钟曲线 + 短期疲劳
+
+`energy` 不是“聊天越多越累”的长期惩罚，而是“她现在几点、醒着没有”的状态：
+
+```text
+energy = clamp(hourly_curve[本地小时] - fatigue, 0, 1)
+```
+
+- `hourly_curve` 是 24 个小时值，按站点时区（`QUOTA_TIMEZONE`，默认 `Asia/Shanghai`）取本地小时；不使用 UTC 小时，也不依赖服务器本地时区。
+- `fatigue` 只由正常回复累积（`fatigue_per_turn`，默认 `0.03`），按 `fatigue_half_life_minutes` 衰减，默认 **60 分钟**：一小时后剩 50%，两小时剩 25%。白天聊得再多，到深夜也已经接近 0。
+- 不做跨天累积：白天聊天量不会让深夜更少回复；只有最近一小时内的连续聊天会叠加疲劳。
+- `fatigue` 持久化在 `relationship_state`，随状态一起读写；`energy_delta_cap` 限制单次事件对疲劳的改变。
+- 精力只读给模型：模型可以按精力调整语气和是否收尾，但不能修改精力值。
+- `quiet_hours` 的语义定为**主动消息免打扰时段**，不是私聊回复禁令：用户主动找她时，仍然按精力、心情和概率回复；危机词永远绕过。4b 的主动调度只在时段外发送。若以后不做主动消息，可以直接删除这项配置，而不是让它继续当死参数。
+
+### 4.7 模型参与关系判断（L2）
+
+规则负责客观信号，模型负责“这一轮她怎么感受”。**每一轮私聊（防抖合并后）都评估一次**，不再只评估被概率忽略的回合；回复和沉默都先评估，再掷骰子。模型不直接写绝对值，也不直接输出概率倍率。
+
+#### 输入与输出
+
+- **输入**：合并后的用户文本 + 最近几条上下文 + 定性关系状态（关系阶段、心情、精力、本地时间、最近关系事件理由），不传裸数值。
+- **输出**：
+
+```json
+{
+  "event": "care | apology | flirt | shared_interest | smalltalk | neutral | tease | boundary | betrayal | hostility | spam",
+  "intensity": 0.0,
+  "confidence": 0.0,
+  "reply_bias": 0.0,
+  "reason": "不超过 80 字"
+}
+```
+
+- `intensity` 范围 0–1，表示事件强度；`confidence` 范围 0–1；`reply_bias` 范围 -1–1，表示“这一句现在想不想接”。
+- `reason` 只用于审计，不参与计算。
+- 模型不能写 `affection` / `valence` / `energy` 的绝对值，不能写 `p0`，不能直接决定“回”或“不回”。
+
+#### 代码映射
+
+```text
+d_affection = event_cap[event] × intensity × confidence
+d_valence   = event_valence_cap[event] × intensity × confidence
+```
+
+事件上限示例（人设可调）：
+
+| 事件 | 好感方向 | 说明 |
+|---|---:|---|
+| `apology` | +1.2 | 道歉、解释 |
+| `care` | +1.0 | 关心、安慰 |
+| `flirt` | +0.8 | 撒娇、暧昧 |
+| `shared_interest` | +0.6 | 共同话题、认真交流 |
+| `smalltalk` | +0.15 | 普通闲聊 |
+| `neutral` | 0 | 中性 |
+| `tease` | 见下 | 小冒犯、调侃；高好感可转正 |
+| `boundary` | -1.0 | 越界、追问隐私、被拒绝后继续 |
+| `betrayal` | -3.0 | 背叛、欺骗、严重失信 |
+| `hostility` | -2.0 | 辱骂、攻击 |
+| `spam` | -0.3 | 刷屏、复读 |
+
+- `confidence < 0.5` 不落账。
+- 每人每天模型带来的好感变化，正向最多 **+3**，负向最多 **-3**，分开计算。
+- 心情单次变化最多 `valence_delta_cap`；角色上限、成长曲线、衰减仍然生效。
+- 重复追问、被拒绝后继续、胁迫或性骚扰一律按 `boundary` / `betrayal` 处理，不能因为好感高就归为 `tease`。
+- 写入 `relationship_events(kind="appraisal")`，保留 `confidence` 和 `reason`。
+
+#### 高好感下的容忍与反噬
+
+小冒犯和严重伤害要分开算：
+
+```text
+# 小冒犯 / 调侃：低好感偏负面，高好感可以中性甚至转正
+tolerance = clamp(
+  (affection - tease_negative_until) /
+  (tease_positive_from - tease_negative_until),
+  0, 1
+)
+base = lerp(-0.8, +0.6, tolerance)
+d_affection = base × intensity × confidence
+```
+
+默认 `tease_negative_until=0`、`tease_positive_from=60`。所以 0 好感附近的小冒犯略扣分，60 以上可能变成“娇羞、嘴上嫌弃但不真生气”的正面事件。
+
+```text
+# 背叛 / 辱骂：好感越高，伤害越大
+# event_cap 为负数（见上表），severity 只放大其绝对值
+severity = 0.5 + 0.5 × clamp(affection / 100, 0, 1)
+d_affection = event_cap[event] × intensity × confidence × severity
+```
+
+高好感不是“免死金牌”：越亲近的人背叛或辱骂，掉得越狠；同时可以额外扣 `security` / `patience`，由 3b 接入。低好感时伤害也不会归零，只是边际略小。
+
+#### 时机、成本与失败
+
+- **同步评估**：每一轮私聊在掷骰子前调用，默认超时 `1.2` 秒；超时或失败就只用规则，不改变状态。
+- `reply_bias` 只影响**本轮**的 willingness；好感、心情、耐心、安全感的变化在掷骰子之后落账，影响下一轮，避免同一句话被算两次。
+- **成本**：不扣用户额度，也不共用聊天全站额度；使用独立的全站 / 每人每日评估预算。超预算跳过评估，聊天不受影响。
+- **失败**：解析失败、模型报错、预算耗尽都 fail-open，只记日志。
+- **审计**：`appraisal_log` 保存原始输出、映射后的增量、实际落账值、耗时和回退原因；`decision_log` 保存 `p_rule`、`reply_bias`、最终 willingness。
 
 ## 5. QQ 分层与回复策略
 
@@ -161,28 +313,87 @@
 | 开关 | 取值 | 作用 |
 |---|---|---|
 | `trigger` | `mention` / `keyword` / `all` | 什么消息值得进入判断 |
-| `reply_policy` | `always` / `judge` / `silent` | 进入判断后回不回 |
+| `reply_policy` | `always` / `probabilistic` / `silent` | 进入判断后回不回 |
 | `proactive` | `true` / `false` | 是否允许在该会话主动开口 |
 
 - `trigger=mention`：只有 @ 或命中关键词才进入判断；其他消息仍写入时间线，但不回复、不耗额度。
 - `trigger=all`：白名单群内所有文本都进入判断。
 - `reply_policy=always`：进入判断就回复（现有行为）。
-- `reply_policy=judge`：先规则评分，再 LLM 门卫；可以沉默。
+- `reply_policy=probabilistic`：按 5.3 的概率模型决定；私聊默认。
 - `reply_policy=silent`：只记录，不回复。
+- 群聊第一版仍用 `always` / `silent` + `trigger`；等私聊稳定后再把同一套概率模型接到群聊。
 
-### 5.3 `judge` 流程
+### 5.3 私聊：按意愿概率回复
 
+私聊不再“进入判断就回复”，而是逐条计算回复概率。沉默是合法结果，不设白天/深夜连续沉默次数上限；只有斜杠命令、绑定引导、额度提示、危机/紧急求助强制回复。
+
+#### 状态与信号
+
+| 信号 | 来源 | 作用 |
+|---|---|---|
+| `willingness` | 规则看客观信号（问句、叫名字、紧接上一句、刷屏/复读），模型给 `reply_bias`，两者用 logit 合成 | 这一条想不想回 |
+| `valence` | 模型评估 + 衰减 + 关系事件 | 这一阵心情好坏 |
+| `energy` | 本地时段曲线 − 短期疲劳（半衰期 60 分钟） | 这一阵有没有精力 |
+| `affinity` | 4.5 由 affection 派生 | 对这个人整体愿意投入多少 |
+| `patience` | 冲突事件累积、无冲突时按天恢复 | 耐心低时压低回复意愿，最低乘 `0.80` |
+| `security` | 背叛/冷淡下降、修复事件回升 | 安全感低时压低回复意愿，最低乘 `0.85` |
+| `reply_debt` | 每忽略一轮有内容的私聊（防抖合并后）+`debt_increment`，按 `debt_half_life_hours` 衰减 | 被晾久了会更想回 |
+
+规则层只负责客观信号，不做情感判断；模型评估给有界增量，避免和规则重复计分。心情既影响下一轮概率，也注入生成提示词影响语气。
+
+#### 公式
+
+规则先算 `p_rule`，再让模型的即时反应通过 logit 合成：
+
+```text
+z = log(p_rule / (1 - p_rule))
+  + reply_bias_weight × confidence × reply_bias
+willingness = sigmoid(z)
 ```
-消息进入
-  → 6 秒防抖（同一人连续消息合并）
-  → 规则分：是否 @、是否问句、是否叫名字、是否包含群关键词、
-            是否紧接梅林上一句、是否刷屏/复读
-  → 低于阈值：沉默，写事件，不耗额度
-  → 达到阈值：LLM 门卫输出 {reply: yes/no, reason, tone}
-  → yes：正常调用 agent；no：沉默，写事件
+
+`reply_bias_weight` 默认 `1.0`，推荐范围 `0.5–1.5`。这个映射把模型的影响限制在有限 log-odds 内，模型不能输出“×10”这种失控倍率。
+
+```text
+patience_factor = patience_min + (1 - patience_min) × clamp(patience / 100, 0, 1)
+security_factor = security_min + (1 - security_min) × clamp(security / 100, 0, 1)
+
+p0 = clamp(
+  reply_base × willingness × affinity
+  × exp(0.8 × valence)
+  × (0.55 + 0.45 × energy)
+  × patience_factor
+  × security_factor,
+  probability_floor,
+  probability_ceiling
+)
+p = p0 + (0.98 - p0) × (1 - exp(-debt_lambda × reply_debt))
 ```
 
-沉默是合法结果，不是失败。规则分和门卫结果写入 `proactive_log`/`decision_log` 便于调参。
+默认 `reply_base=0.95`、`probability_floor=0.02`、`probability_ceiling=0.95`、`debt_increment=0.1`、`debt_half_life_hours=8`、`debt_lambda=1.5`、`patience_min=0.80`、`security_min=0.85`。所有参数进人设文件，不写死在代码里。耐心/安全感只做乘性下限，不会把概率压到 0；危机、命令和额度提示仍然绕过概率。
+
+- 每一轮私聊（防抖合并后）都先做模型评估，再掷骰子；回复和沉默都评估，不再只评估被忽略的回合。
+- `reply_bias` 只影响本轮 willingness；好感、心情、耐心、安全感的变化在掷骰子之后落账，影响下一轮。
+- 深夜不禁止回复，只通过 energy 曲线和人格的时段参数降低 p0；深夜连续发消息会累积 `reply_debt`，仍然可能建立来回对话。
+- 精力按 4.6 的本地时钟计算；白天的聊天量不会拖累深夜，只有最近一小时的连续聊天会叠加短期疲劳。
+- 被概率忽略的消息仍然写时间线、加 `reply_debt`，并照常落账模型评估出的好感/心情变化；只是这一条不回。
+- 评估调用不扣用户额度，计入独立的评估预算，避免刷屏时无限调用模型。
+- 提问给较高的 willingness 基础分，但低好感对象不承诺必回。
+- 未回复的内容会提高后续主动联系的候选分（第 6 节），不是“没回就结束”。
+- 不设“连续沉默 N 次必须回复”的硬上限；给梅林按心情多次不回的空间。
+- 危机词、斜杠命令、绑定引导、额度提示绕过概率，直接回复。
+- 每条决策写 `decision_log`：`p_rule`、`reply_bias`、willingness、valence、energy、affinity、debt、p0、p、随机数、结果、原因。
+
+### 5.4 私聊节奏：防抖、打断、多气泡
+
+- **防抖**：首条到达后等 1.5 秒，新消息重置计时，总等待上限 4 秒；同一人的连续消息合并成一轮理解/回复。群聊仍用较长的防抖（默认 6 秒），后续阶段再统一。
+- **打断**：生成中收到新消息就取消当前生成。第一条气泡尚未发出 → 取消并合并重答；已经发出部分 → 停止发送剩余气泡，半截回复留在上下文并标记 `interrupted`。取消不扣额度，已产生的 token 成本照常记录。
+- **气泡数**：先定气泡数（目标约 32 字/段，最多 4–6 条），再按标点权重无放回挑切点：段落 1.0、换行 0.9、句末 0.85、分号 0.45、逗号 0.15–0.2；每段至少 8–12 字，保护代码/URL/引号/列表。RNG 必须可注入种子，便于测试。
+- **节奏**：每字 70–120ms，句末加 200–400ms，单段间隔 0.6–2.5 秒，整轮总等待 ≤5–6 秒；固定文案（命令回复、错误提示）不延迟。
+- **待续话题**：只在她因困/忙/心情低而沉默时创建，存入 SQLite，白天时段发送，1 条/天、3 条/周；因低好感/讨厌话题而沉默时不追。属于阶段 4 主动消息，不另建调度器。
+
+### 5.5 群聊范围
+
+第一版概率回复、防抖、打断、多气泡只作用于私聊；群聊继续使用现有 `trigger` + `reply_policy` 规则，等私聊稳定后再把同一套概率模型接到群聊，群策略表保留。
 
 ## 6. 主动消息
 
@@ -205,6 +416,7 @@
 
 8 维评分：关系亲近度、思念、距上次互动时长、最近互动质量、未完成话题、当前时段、对方可观察活跃度、重复惩罚。
 
+- 被忽略的有内容消息会提高“未完成话题”和“关系亲近度”两项，推动下一次主动；但因低好感/讨厌话题而沉默的内容不做追问式跟进。
 - `think_threshold`（默认 0.35）：低于它连念头都不生成。
 - `speak_threshold`（默认 0.72）：达到才进入发送前检查。
 - 两个阈值都可在后台调。
@@ -240,51 +452,257 @@
 
 新增分区（沿用 WordPress 设置页 + `/api/admin/settings`）：
 
-- **QQ 策略**：每群 `trigger` / `reply_policy` / `proactive`；全局 `judge` 阈值、防抖秒数。
-- **关系**：`affection_unit`；例外/特殊名单增删；查看某个人的四维状态和最近关系事件。
+- **人设**：选择启用的人设/版本；编辑 `dynamics`（心情、精力、回复概率、`affection_unit`、角色成长、节奏、安全词），保存到该人设的 `dynamics.override.json`，不直接改版本文件；每个字段显示中文解释、建议范围和“恢复默认”；查看当前生效值与来源（版本/覆盖）及隔离 namespace。
+- **QQ 策略**：每群 `trigger` / `reply_policy` / `proactive`；私聊概率参数、防抖秒数。
+- **关系**：例外/特殊名单增删；查看某个人的 affection、missing、security、patience、valence、energy、reply_debt 和最近关系事件。
 - **主动消息**：总开关、tick 间隔、每日上限、最小间隔、免打扰时段、群间隔、两个阈值、全局主动上限。
 - **审计**：最近主动决策、最近关系变化、按人删除记忆（用于用户要求删除）。
 
-所有参数写入 `runtime_settings.json` 或 SQLite 策略表，立即生效，不改 `.env`、不重启。
+人设动态参数以版本文件为基线、由按人设的覆盖文件覆盖（第 10 节）；运营开关写入 `runtime_settings.json` 或 SQLite 策略表；两者都立即生效，不改 `.env`、不重启。
+
+后台每个参数都必须有中文说明、推荐区间和生效方式；高影响参数（`floor` / `ceiling`、`debt_lambda`、疲劳半衰期等）额外提示常见误配，例如“疲劳半衰期太长会让白天疲劳拖到深夜，建议 45–90 分钟”。
 
 ## 8. 数据表
 
 ```sql
-events(id, occurred_at, person_key, platform, channel_id, scope, audience,
+events(id, persona_key, occurred_at, person_key, platform, channel_id, scope, audience,
        sensitivity, source, content, meta, created_at)
-memories(id, person_key, type, text, scope, sensitivity, importance, confidence,
+memories(id, persona_key, person_key, type, text, scope, sensitivity, importance, confidence,
          valid_from, valid_until, source_event_ids, created_at, updated_at,
          last_accessed_at, access_count)
 memories_vec(embedding float[512])              -- rowid = memories.id
 persons(person_key PRIMARY KEY, role, display_name, wp_user_id, qq_uin,
         first_seen_at, last_seen_at, note)
-relationship_state(person_key PRIMARY KEY, affection, missing, security, patience,
+relationship_state(persona_key, person_key, affection, missing, security, patience,
+                   valence, energy, fatigue, reply_debt,
                    last_interaction_at, last_proactive_at, last_reply_at,
-                   attention_confidence, updated_at)
-relationship_events(id, person_key, kind, d_affection, d_missing, d_security,
-                    d_patience, confidence, source_event_id, note, created_at)
-activity_events(id, person_key, channel_id, kind, occurred_at, confidence, meta)
-proactive_log(id, target_key, channel_id, kind, thought, score, threshold,
+                   attention_confidence, updated_at,
+                   PRIMARY KEY (persona_key, person_key))
+relationship_events(id, persona_key, person_key, kind, d_affection, d_missing, d_security,
+                    d_patience, d_valence, d_energy, d_debt, confidence,
+                    source_event_id, note, created_at)
+activity_events(id, persona_key, person_key, channel_id, kind, occurred_at, confidence, meta)
+proactive_log(id, persona_key, target_key, channel_id, kind, thought, score, threshold,
               status, reason, event_id, created_at)
 qq_group_policies(group_id PRIMARY KEY, trigger, reply_policy, proactive, updated_at)
-decision_log(id, channel_id, person_key, message_id, rule_score, llm_verdict,
-             reason, created_at)
+decision_log(id, persona_key, channel_id, person_key, message_id, rule_score, p_rule,
+             reply_bias, willingness, valence, energy, affinity, reply_debt, p0, p,
+             roll, verdict, reason, created_at)
+appraisal_log(id, persona_key, person_key, message_id, event, intensity, confidence,
+              reply_bias, d_affection, d_valence, applied_affection, applied_valence,
+              latency_ms, status, reason, created_at)
+appraisal_usage(day, scope, used, updated_at, PRIMARY KEY(day, scope))
 admin_audit(id, actor_user_id, action, target, detail, created_at)
 ```
 
-`memories_vec` 的维度由配置 `embedding_dim=512` 决定；变更维度需要重建向量表并重新嵌入。
+`persona_key` 默认取人设的 `dynamics.namespace.state` / `memory`；`persons.role` 保持全局（同一个人在所有 persona 下角色一致），关系状态、心情、事件和记忆按 persona 隔离。`appraisal_usage.scope` 取 `global` 或 `person:<person_key>`，用于独立的模型评估预算；它不占用用户聊天额度，也不影响聊天全站额度。`appraisal_log` 记录模型原始输出和映射后的实际落账值，`decision_log` 同时保留规则算出的 `p_rule` 和模型给的 `reply_bias`，方便区分“规则导致不回”和“模型导致不回”。`memories_vec` 的维度由配置 `embedding_dim=512` 决定；变更维度需要重建向量表并重新嵌入。
 
-## 9. 分阶段实施
+## 9. 分阶段实施（2026-11-09 修订）
 
-按依赖顺序拆成 5 份计划，每份都能独立测试、独立上线：
+依赖顺序：
 
-1. **知识库向量检索**（本阶段）：`sqlite-vec` + `bge-small-zh-v1.5` + RRF 混合检索；嵌入不可用时纯 FTS 降级。计划：`docs/superpowers/plans/2026-11-06-01-kb-vector-retrieval.md`。
-2. **统一事件时间线与记忆**：`events` / `memories` / 提炼 / 分层检索 / 衰减整理。
-3. **关系状态与活动信号**：四维状态、注意力置信度、好感单位与固定上限、修复弧。
-4. **QQ 分层、judge 与主动消息**：每群策略、防抖与门卫、主动调度、决策日志。
-5. **后台与审计**：WordPress 设置页分区、名单管理、状态查看、记忆删除与审计。
+```text
+1 → 2 → 3a → 4a → 3a.1 → 3b → 3c → 4b → 5
+```
 
-## 10. 假设与风险
+3a、4a、3a.1、3b、3c、3c.1 已在本地实现（未提交、未部署）；下一步是 4b。每份计划都能独立测试、独立上线。
+
+1. **知识库向量检索**（已完成并部署）：`sqlite-vec` + `bge-small-zh-v1.5` + RRF 混合检索；嵌入不可用时纯 FTS 降级。计划：`docs/superpowers/plans/2026-11-06-01-kb-vector-retrieval.md`。
+2. **统一事件时间线与记忆**（已完成并部署）：`events` / `memories` / 提炼 / 分层检索 / 衰减整理。计划：`docs/superpowers/plans/2026-11-06-02-memory-timeline.md`。
+3. **关系状态与活动信号**：
+   - **3a**（本地完成，未提交）：按 `(persona_key, person_key)` 建立 `relationship_state`，落地 affection、valence、energy、reply_debt、affinity 派生、角色初始/上限/成长、人设 `dynamics` 加载；计划：`docs/superpowers/plans/2026-11-08-03a-relationship-state-core.md`。
+   - **3a.1 精力时钟化补丁**（本地完成，未提交）：
+     - `energy = clamp(本地小时曲线 - fatigue, 0, 1)`，按 `QUOTA_TIMEZONE` 取本地小时，修复 UTC 小时导致的 8 小时偏移；
+     - `fatigue` 由正常回复累积，半衰期默认 **60 分钟**（人设参数 `fatigue_half_life_minutes`），白天聊天量不拖累深夜；
+     - `relationship_state` 增加 `fatigue` 字段及迁移；`energy_delta_cap` 限制单次变化；
+     - 测试：白天多聊不影响深夜、凌晨精力低、疲劳按半衰期衰减、时区正确。
+   - **3b 关系完整化与状态注入**（本地完成，未提交）：
+     - missing、security、patience、attention_confidence 的字段与按天衰减/恢复；
+     - 好感改 -100~100，非管理员初始 0，正面增长递减，affinity 改 tanh 曲线；增加 `patience` / `security` 对回复概率的影响；
+     - 把定性精力/心情/关系注入私聊提示词（`state_context`）：低精力时更短、更想收尾，危机词优先；模型只读，不能改精力；
+     - 人设 `dynamics.override.json` 加载与缓存失效（后台编辑界面留到阶段 5）。
+     - 受伤/修复弧与关系事件提炼依赖模型对事件类别的判断，随 3c.1 的冲突弧实现；3c 先把评估事件铺好。
+   - **3c 每轮私聊的模型评估（L2）**（本地完成，未提交）：
+     - 同步 `Appraiser`，每个防抖合并回合调用一次，1.2 秒超时；回复和沉默都评估；
+     - 输出事件类型、强度、`reply_bias`、confidence、reason；不写绝对值和概率；
+     - 规则 willingness 与 `reply_bias` 用 logit 合成；好感/心情/耐心/安全感的慢变化在掷骰子后落账；
+     - 代码按事件类别夹紧、置信度门槛、每人每日 ±3、角色上限；`tease` 随好感从负面翻到正面，`betrayal` / `hostility` 在高好感时伤害更大；
+     - 独立评估预算（全站 + 每人），不扣用户额度；失败、超时或超预算 fail-open。
+   - **3c.1 冲突弧**（本地完成，未提交）：计划 `docs/superpowers/plans/2026-11-09-03c1-conflict-arc.md`。
+     - `dynamics.conflict` 参数块；`relationship_state` 增加 `conflict_stage` / `stage_since` / `scar_level` 并自动迁移旧库；
+     - `app/relationship/conflict.py` 的确定性转移：事件驱动（严重事件、越界窗口）+ 时间驱动（惰性恶化、疤痕淡化）；最短停留与修复门槛见 4.4；
+     - 阶段乘数进入 `reply_probability` / `decide`，`decision_log` 记录 `conflict_stage`；
+     - 提示词增加定性阶段行；阶段变化当轮即用于语气，数值变化下一轮生效；
+     - 伤疤记忆因 `memories` 缺 `persona_key` 推迟，当前用关系状态与 `appraisal_log` 承载。
+4. **QQ 分层、概率回复与主动消息**：
+   - **4a**（本地完成，未提交）：私聊概率回复、防抖、打断、多气泡、`decision_log`；计划：`docs/superpowers/plans/2026-11-08-04a-private-interaction-layer.md`。
+   - **4b**：群策略、待续话题、主动调度、`proactive_log`；群聊概率回复等私聊稳定后再接（如需要可另拆 4c）。
+5. **后台与审计**：WordPress 设置页分区；人设 `dynamics` 编辑器（写入按人设的覆盖文件，带字段解释、建议范围、恢复默认、当前生效值与来源）；名单管理、关系状态查看、记忆删除与审计。
+
+## 10. 人设配置与状态隔离
+
+### 10.1 人设文件
+
+沿用 `backend/data/personas/<id>/<version>.json` 和 `active.json`。在 `PersonaVersion` 中增加可选的 `dynamics` 块（旧文件不写则用默认值），所有影响心情、回复概率、关系成长、节奏和安全行为的参数都放在这里：
+
+```json
+{
+  "dynamics": {
+    "mood": {
+      "baseline_valence": 0.1,
+      "valence_half_life_minutes": 90,
+      "valence_delta_cap": 0.1,
+      "event_delta_cap": 0.3
+    },
+    "energy": {
+      "hourly_curve": ["24 个 0–1 的数"],
+      "fatigue_half_life_minutes": 60,
+      "fatigue_per_turn": 0.03,
+      "energy_delta_cap": 0.2
+    },
+    "reply": {
+      "base": 0.95,
+      "floor": 0.02,
+      "ceiling": 0.95,
+      "debt_increment": 0.1,
+      "debt_half_life_hours": 8,
+      "debt_lambda": 1.5,
+      "affinity_mid": 0.70,
+      "affinity_amp": 0.60,
+      "affinity_scale": 60,
+      "affinity_min": 0.10,
+      "affinity_max": 1.20,
+      "patience_multiplier_min": 0.80,
+      "security_multiplier_min": 0.85,
+      "reply_bias_weight": 1.0
+    },
+    "relationship": {
+      "affection_unit": 1.0,
+      "chat_affection_units": 0.5,
+      "chat_valence": 0.03,
+      "growth_curve": 0.8,
+      "initial_missing": 50,
+      "initial_security": 70,
+      "initial_patience": 70,
+      "missing_gain_per_day": 6,
+      "security_loss_per_day": 1,
+      "patience_recovery_per_day": 2,
+      "attention_half_life_hours": 24,
+      "roles": {
+        "owner":     { "initial": 60, "cap": 100, "growth": 1.0 },
+        "exception": { "initial": 0,  "cap": 85,  "growth": 0.9 },
+        "special":   { "initial": 0,  "cap": 75,  "growth": 0.8 },
+        "normal":    { "initial": 0,  "cap": 60,  "growth": 0.6 }
+      }
+    },
+    "appraisal": {
+      "confidence_min": 0.5,
+      "daily_affection_cap": 3.0,
+      "event_caps":             { "apology": 1.2, "care": 1.0, "flirt": 0.8, "shared_interest": 0.6,
+                                  "smalltalk": 0.15, "neutral": 0.0, "boundary": -1.0,
+                                  "betrayal": -3.0, "hostility": -2.0, "spam": -0.3 },
+      "event_valence_caps":     { "apology": 0.04, "care": 0.05, "flirt": 0.06, "shared_interest": 0.04,
+                                  "smalltalk": 0.01, "neutral": 0.0, "boundary": -0.06,
+                                  "betrayal": -0.15, "hostility": -0.12, "spam": -0.03 },
+      "event_security_caps":    { "apology": 4.0, "care": 2.0, "flirt": 1.0, "shared_interest": 1.0,
+                                  "smalltalk": 0.0, "neutral": 0.0, "boundary": -3.0,
+                                  "betrayal": -8.0, "hostility": -5.0, "spam": -1.0 },
+      "event_patience_caps":    { "apology": 3.0, "care": 2.0, "flirt": 0.0, "shared_interest": 0.0,
+                                  "smalltalk": 0.0, "neutral": 0.0, "boundary": -4.0,
+                                  "betrayal": -10.0, "hostility": -6.0, "spam": -2.0 },
+      "tease_negative_until": 0,
+      "tease_positive_from": 60,
+      "tease_affection_low": -0.8,
+      "tease_affection_high": 0.6,
+      "tease_valence_low": -0.04,
+      "tease_valence_high": 0.03
+    },
+    "conflict": {
+      "stage_multipliers": { "normal": 1.0, "normal_with_scar": 0.98, "hurt": 0.85,
+                             "cold": 0.70, "withdrawing": 0.50, "repairing": 0.90 },
+      "min_dwell_minutes": { "hurt": 30, "cold": 360, "withdrawing": 1440,
+                             "repairing": 1440, "normal_with_scar": 0 },
+      "severe_confidence_min": 0.6,
+      "severe_intensity_min": 0.5,
+      "boundary_count_1h": 3,
+      "boundary_count_24h": 5,
+      "hurt_to_cold_hours": 24.0,
+      "hurt_to_cold_low_patience_hours": 12.0,
+      "cold_low_patience": 50.0,
+      "cold_to_withdrawing_hours": 48.0,
+      "withdraw_low_security": 40.0,
+      "withdrawing_hours_to_scar": 336.0,
+      "repairing_to_cold_hours": 72.0,
+      "repair_confidence_min": 0.5,
+      "repair_intensity_min": 0.5,
+      "withdraw_apology_intensity_min": 0.7,
+      "repair_security_normal": 60.0,
+      "repair_security_from_cold": 40.0,
+      "repair_points_high_affection": 1,
+      "repair_points_mid_affection": 2,
+      "repair_points_low_affection": 3,
+      "repair_high_affection": 60.0,
+      "repair_low_affection": 0.0,
+      "scar_on_severe": 0.3,
+      "scar_on_relapse": 0.2,
+      "scar_halflife_days": 14.0,
+      "scar_fade_below": 0.1,
+      "scar_fade_min_days": 7.0,
+      "scar_damage_bonus": 1.0
+    },
+    "pacing": {
+      "debounce_seconds": 1.5,
+      "debounce_max_seconds": 4.0,
+      "target_chars_per_bubble": 32,
+      "max_bubbles": 5,
+      "min_bubble_chars": 10,
+      "chars_per_second": 7,
+      "min_gap_ms": 600,
+      "max_gap_ms": 2500
+    },
+    "safety": {
+      "quiet_hours": ["00:00-07:00"],
+      "crisis_keywords": ["自杀", "自残", "救命", "出事了"]
+    },
+    "namespace": {
+      "state": "merlin",
+      "memory": "merlin"
+    }
+  }
+}
+```
+
+- 人设版本文件是不可变基线；每个 `persona_id` 可有一个可选的 `dynamics.override.json`，加载时深合并到启用版本的 `dynamics` 上，再用 Pydantic 统一校验。
+- WordPress 后台编辑 `dynamics` 时写覆盖文件，不直接改版本文件；覆盖文件按 `persona_id` 隔离，升级版本后仍然生效，“恢复默认”就是删除覆盖文件。
+- 覆盖文件损坏或校验失败时记录告警并回退到版本基线，不能让聊天整体起不来；后台保存时先校验，再原子写入。
+- 旧版 `l2d.persona/v1` 文件不带 `dynamics` 时使用代码默认值；新增字段不破坏已有文件。
+- 角色“名单”属于用户数据，放 SQLite/后台；角色“初始值/上限/成长倍率”属于人设规则，放版本文件或覆盖文件。
+- 概率引擎接收一个 `Dynamics` 对象，不直接读全局 settings；不能在 adapter 里写死 1.5 秒、0.6 秒。
+- 适配器不缓存人设：每轮私聊重新加载（文件很小），覆盖文件保存后下一轮立即生效，避免“后台改了必须重启”。
+- 评估成功时，以模型评估的事件为准，`chat_affection_units` / `chat_valence` 只作为评估失败或关闭时的回退值，避免同一轮同时拿“基础加成”和“事件加成”两份好感。
+- `dynamics.appraisal` 只描述“事件名 → 增量”的映射规则：`confidence_min` 是落账门槛，`daily_affection_cap` 是每人每日模型好感总上限，四张 `event_*_caps` 表按事件名给出好感 / 心情 / 安全感 / 耐心的单次封顶。四张表的键必须与代码里的 `APPRAISAL_CAP_EVENTS` 完全一致（漏写或多写直接校验失败），这样拼错事件名不会静默失效。`tease` 不进上限表，改用 `tease_*` 容忍曲线：好感 `tease_negative_until` 以下按低档扣分，`tease_positive_from` 以上按高档加分，中间线性过渡。
+- 模型输出的 `intensity` 与 `confidence` 都夹紧到 0–1，`reply_bias` 夹紧到 -1–1；`betrayal` / `hostility` 再由 `severity = 0.5 + 0.5 × max(affection, 0) / 100` 同时放大四类伤害，高好感更疼、低好感也不免费。
+- 评估的**开关、超时、全站/每人每日预算**属于运营参数，不放人设文件，改由运行时设置（WordPress 后台）管理：`appraisal_enabled`、`appraisal_timeout_seconds`（0.2–5 秒）、`appraisal_global_daily_budget`、`appraisal_per_user_daily_budget`，预算 `0` 表示不限。评估预算独立于用户聊天额度；超预算、超时、解析失败或开关关闭时一律回退到规则，不阻塞聊天。
+- `quiet_hours` 只用于主动消息调度，不拦截用户主动发起的私聊；它不参与 `p0`，深夜回复仍由 4.6 的精力和概率控制。
+
+### 10.2 隔离
+
+- 关系状态、心情、回复债、事件、记忆都按 `persona_key` 隔离；`persona_key` 默认取 `dynamics.namespace.state` / `memory`。
+- 同一人设的不同版本共用一个 namespace：升级版本不丢关系和记忆；不同人设默认不同 namespace。
+- 如果两个“人设”只是同一角色的不同语气皮肤，可在文件里写同一个 namespace，显式共享。
+- 切换人设只改 `active.json`；旧人设的状态原样保留，切回来还在。进行中的回复按旧人设结束，新消息用新人设。
+
+### 10.3 后台
+
+- 选择启用的人设/版本；
+- 编辑 `dynamics`，写入该人设的覆盖文件，支持“恢复默认”、字段解释和建议范围；不直接改版本文件；
+- 调整好感范围、各角色初始/上限/成长倍率、`growth_curve`、`affinity_mid/amp/scale`、`reply_bias_weight`；
+- 调整评估超时、全站/每人每日预算、每人每日模型好感上限；
+- 维护 owner/exception/special 名单；
+- 查看/重置某人的 affection、valence、energy、fatigue、reply_debt；
+- 查看最近决策日志、关系事件和模型评估记录，包括模型原始输出、映射后增量和实际落账值。
+
+## 11. 假设与风险
 
 - 服务器 2 vCPU / 4 GiB：嵌入模型走 CPU，`bge-small` 约 100 MB 权重，推理时内存可控；若与现有服务叠加后紧张，可改用 ONNX Runtime，接口保持不变。
 - `get_user_status` 只作为弱信号，绝不单独据此扣好感。
@@ -292,3 +710,35 @@ admin_audit(id, actor_user_id, action, target, detail, created_at)
 - LLM 记忆提炼会增加 token 成本；采用异步、批量、低优先级模型，且只提炼有价值的内容。
 - 主动消息可能打扰用户：用免打扰时段、最小间隔、每日上限和重复惩罚兜底；但站长明确要求保留“没人回也继续”的自主性，因此不做“一次不回就永久停止”。
 - 所有阈值、上限、名单都必须可在后台调整；不把运营参数写死在代码里。
+- 概率沉默可能显得随机：用 valence 惯性、reply_debt 和决策日志调参，不靠硬上限。
+- 人设 `dynamics` 以版本文件为基线、由后台覆盖文件覆盖；两者都要校验，覆盖文件损坏时回退到版本值并告警；后台并发保存需要串行化。
+- 模型评估可能受讨好、话术或提示注入影响：用事件类别夹紧、置信度门槛、每人每日预算和审计日志兜底；模型只给有界增量，不给绝对值，也不能写精力。
+- 小冒犯可能在好感高时被模型误判成“可以接受”：用 `tease` / `boundary` 分类、重复追问规则和置信度门槛兜底；被拒绝后继续、胁迫或性骚扰永远按 `boundary` 处理。
+- 高好感放大背叛和辱骂的伤害，但低好感也不能让辱骂“免费”：`severity` 曲线保留最低伤害，且仍然扣 `security` / `patience`。
+- 每轮同步评估会增加约 1.2 秒上限的延迟；超时、失败或超预算必须回退到规则，不能拖住聊天。
+- 精力曲线必须按本地时区取小时；用 UTC 会让深夜参数整体偏移 8 小时。
+- 评估调用是额外成本：独立预算 + 每人上限 + 失败跳过，不允许因为评估把聊天拖垮或耗尽用户额度。
+- 按人设隔离会让同一用户在不同人设下各有一份状态和记忆；存储与向量成本随启用人设数增长，这是降低耦合的代价。
+- 私聊先上线，群聊沿用现有规则；不要让两套概率逻辑同时改动。
+
+## 12. 2026-11-09 追加决策
+
+本轮讨论后新增或修改的内容：
+
+- **精力改为时钟化**：`energy = 本地小时曲线 − 短期疲劳`；疲劳半衰期默认 **60 分钟**，作为人设参数（`dynamics.energy.fatigue_half_life_minutes`）写入角色文件，可由后台覆盖文件调整；白天聊天量不拖累深夜。
+- **每一轮私聊都进入模型评估（L2）**：不再只评估被忽略的回合；防抖合并后同步评估一次，输出事件类型、强度、`reply_bias`、confidence 和 reason。规则 willingness 与 `reply_bias` 用 logit 合成，好感/心情/耐心/安全感的慢变化在掷骰子后落账。
+- **好感范围改为 -100~100**：除管理员外所有角色初始 0，普通上限 60；取消“最低 20”；正面增长随好感递减（`growth_curve`），负值区间正面增长不打折。
+- **affinity 改 tanh 曲线**：`mid=0.70`、`amp=0.60`、`scale=60`，0 分约 0.70，负值最低约 0.14；避免陌生人因初始 0 而几乎不回。
+- **高好感下的容忍与反噬**：`tease`（小冒犯/调侃）在低好感略扣分，高好感可转为娇羞等正面事件；`boundary` / `betrayal` / `hostility` 按 `severity = 0.5 + 0.5 × max(affection,0)/100` 放大伤害。重复追问、被拒绝后继续、胁迫或性骚扰永远按 `boundary` 处理。
+- **模型参与表达**：把定性精力/心情/关系注入私聊提示词；低精力时会变短、更想收尾，但不允许用“我累了”回避危机求助；模型只能读精力，不能改精力。
+- **独立评估预算**：评估调用不扣用户额度，也不共用聊天全站额度；默认全站 **1000 次/天**、单人 **60 次/天**，后台可调；超预算跳过评估。
+- **人设覆盖文件**：版本文件保持不可变；后台编辑 `dynamics` 写入 `dynamics.override.json`，带字段解释、建议范围和恢复默认；阶段 5 做编辑界面，当前先做加载与缓存失效。
+- **后台说明**：所有动态参数都要有中文解释和建议区间，高影响参数额外提示常见误配。
+- **`quiet_hours` 语义确定**：只用于主动消息免打扰，不拦截用户主动私聊；不参与回复概率。危机词永远绕过。
+
+已确认的默认值（写入计划）：
+
+- 模型评估带来的好感变化：每人每天正向最多 +3、负向最多 -3，分开计算；
+- 评估预算：全站 1000 次/天、单人 60 次/天；
+- 评估超时：1.2 秒；超时、失败或超预算均 fail-open；
+- 非管理员角色初始好感均为 0。

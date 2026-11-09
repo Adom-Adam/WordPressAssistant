@@ -23,20 +23,42 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from app.agent.core import stream_reply
 from app.channels.qq import commands
 from app.channels.qq.client import OneBotError, OneBotTransport
 from app.channels.qq.commands import CommandContext, dispatch, parse_command
+from app.channels.qq.conversation import ConversationCoordinator
+from app.channels.qq.pacing import bubble_delay, segment_bubbles
 from app.config import Settings
 from app.credits import CreditStore, get_credit_store
+from app.memory import db as memory_db
 from app.memory import pipeline
+from app.persona.models import PersonaVersion
+from app.persona.store import get_persona_store
 from app.qq_quota import QQQuotaGate, QQUsage, get_qq_quota_gate
+from app.relationship.appraisal import (
+    AppraisalCall,
+    apply_appraisal,
+    record_appraisal_log,
+)
+from app.relationship.appraisal_budget import local_day, reserve_budget
+from app.relationship.context import render_state_context
+from app.relationship.decision import Decision, decide, record_decision
+from app.relationship.state import _zone, now_iso, parse_iso
+from app.relationship.turn import (
+    load_signals,
+    record_reply,
+    record_silence,
+    relationship_subject,
+)
+from app.runtime_settings import get_runtime_store
 from app.schemas import ChatMessage
 
 logger = logging.getLogger(__name__)
@@ -73,6 +95,10 @@ class QQAdapter:
         stream: Callable[..., AsyncIterator[dict[str, Any]]] = stream_reply,
         credits: CreditStore | None = None,
         gate: QQQuotaGate | None = None,
+        persona: PersonaVersion | None = None,
+        rng: random.Random | None = None,
+        coordinator: ConversationCoordinator | None = None,
+        appraiser: Any | None = None,
     ) -> None:
         self.settings = settings
         self.sender = sender
@@ -82,6 +108,20 @@ class QQAdapter:
         self.credits = credits
         # 额度门面同理：测试注入固定参数的门面，生产惰性取全局实例。
         self.gate = gate
+
+        # 人设由 agent 自己加载；适配器也需要同一份 dynamics 做概率和节奏。
+        # 注入是为了测试可以直接给一份零防抖、固定概率的人设。
+        self._injected_persona = persona
+
+        # 概率采样和气泡切分的随机源。固定种子能让测试复现同一次掷骰子。
+        self._rng = rng or random.Random()
+
+        # 私聊防抖/打断状态。群聊仍走原来的同步路径。
+        self._coordinator = coordinator or ConversationCoordinator()
+
+        # 每轮私聊的同步模型评估。默认 None：不评估、不花钱，
+        # 现有测试和离线运行都不会误调真实模型；生产入口显式注入 Appraiser。
+        self._appraiser = appraiser
 
         # (群号, QQ 号) -> 最近几轮消息。只在内存里，进程重启就清空。
         # 这是有意的：在账号绑定/关系记忆做好之前，不假装自己有长期记忆。
@@ -167,23 +207,517 @@ class QQAdapter:
                 )
                 return await self._send(incoming, guide, reason="guide_unbound")
 
-            # 3. 额度：管理员不计数；用尽时回固定文案，不调模型。
-            status, usage = self._reserve(
-                qq_uin=str(incoming.user_id),
-                user_id=binding.user_id if binding else None,
-                tier=binding.tier if binding else "user",
-                is_admin=is_admin,
-            )
-            if status == "user_exhausted":
-                return await self._send(
-                    incoming, commands.QUOTA_USER, reason="quota_exhausted"
-                )
-            if status == "global_exhausted":
-                return await self._send(
-                    incoming, commands.QUOTA_GLOBAL, reason="quota_exhausted"
+            # 3. 群聊：4a 保持原来的同步路径，概率/防抖/多气泡只作用于私聊。
+            if not is_private:
+                return await self._run_chat_turn(
+                    incoming,
+                    content,
+                    binding=binding,
+                    is_admin=is_admin,
+                    is_private=False,
                 )
 
-            # 3.5 取这一轮要注入的记忆。失败时为空字符串，回复照常。
+        # 4. 私聊：进入防抖协调器。命令和引导已经在上面即时处理；
+        # 正文会等一小段时间，把连发的几条合并成一轮再决策。
+        persona = self._persona()
+        pacing = persona.dynamics.pacing
+        return await self._coordinator.submit(
+            key,
+            content,
+            handler=lambda texts: self._private_round(
+                incoming,
+                key,
+                texts,
+                store=store,
+                binding=binding,
+                is_admin=is_admin,
+                persona=persona,
+            ),
+            debounce=pacing.debounce_seconds,
+            max_debounce=pacing.debounce_max_seconds,
+        )
+
+    # ------------------------------------------------------------------
+    # 私聊回合
+    # ------------------------------------------------------------------
+    def _persona(self) -> PersonaVersion:
+        """当前人设；每轮重新加载，改了覆盖层不必重启。
+
+        人设文件很小，一次私聊回合加载一次的成本可以忽略；换来的是
+        管理员调整 `dynamics.override.json` 后下一轮立刻生效。加载失败时
+        退化成纯默认 dynamics，不阻塞聊天。
+        """
+        if self._injected_persona is not None:
+            return self._injected_persona
+        try:
+            return get_persona_store().load_active()
+        except Exception:  # noqa: BLE001 - 人设坏了 agent 也会报错，这里只保证决策能跑
+            logger.warning("QQ 适配器加载人设失败，使用默认 dynamics", exc_info=True)
+            return PersonaVersion(
+                schema="l2d.persona/v1",
+                id=self.settings.persona_id,
+                version=1,
+                name=self.settings.persona_id,
+                core="（人设文件不可用，仅使用默认参数）",
+            )
+
+    async def _private_round(
+        self,
+        incoming: Incoming,
+        key: tuple[int, int],
+        texts: list[str],
+        *,
+        store: CreditStore,
+        binding: object | None,
+        is_admin: bool,
+        persona: PersonaVersion,
+    ) -> dict[str, Any]:
+        """处理一轮合并后的私聊：读状态 → 评估 → 掷骰子 → 决定是否回复。"""
+        content = "\n".join(texts)
+        dynamics = persona.dynamics
+        crisis = any(
+            word and word in content for word in dynamics.safety.crisis_keywords
+        )
+
+        loaded = await asyncio.to_thread(
+            self._load_private_signals, incoming, binding, persona
+        )
+        if loaded is None:
+            # 关系库不可用：fail-open，直接回复，不写关系。
+            return await self._run_chat_turn(
+                incoming,
+                content,
+                binding=binding,
+                is_admin=is_admin,
+                is_private=True,
+            )
+        person_key, role, signals = loaded
+
+        runtime = get_runtime_store().load()
+        policy = self.settings.qq_private_policy
+        call: AppraisalCall | None = None
+        if (
+            runtime.appraisal_enabled
+            and self._appraiser is not None
+            and policy != "silent"
+            and not crisis
+        ):
+            if await asyncio.to_thread(self._reserve_appraisal, person_key):
+                call = await self._appraise_private(
+                    incoming,
+                    texts,
+                    person_key=person_key,
+                    signals=signals,
+                    persona=persona,
+                )
+            else:
+                await asyncio.to_thread(
+                    self._log_appraisal_skip, incoming, person_key, runtime
+                )
+
+        decided = await asyncio.to_thread(
+            self._decide_and_record,
+            incoming,
+            texts,
+            binding=binding,
+            persona=persona,
+            person_key=person_key,
+            role=role,
+            signals=signals,
+            call=call,
+        )
+        decision, state = decided
+
+        if decision is not None and not decision.reply:
+            # 沉默是合法结果：不占额度、不调模型，但用户这条仍进时间线。
+            await asyncio.to_thread(
+                pipeline.record_qq_ignored,
+                incoming.user_id,
+                None,
+                binding,
+                content,
+            )
+            return {"handled": True, "reason": "silent", "reply": ""}
+
+        # 决策层出错时 decision 为 None，按“照常回复”处理（fail-open）。
+        relationship = (
+            (persona.state_key, person_key, role) if decision is not None else None
+        )
+        appraisal_ok = (
+            call is not None
+            and call.status == "ok"
+            and call.result is not None
+            and call.result.confidence >= dynamics.appraisal.confidence_min
+        )
+        return await self._run_chat_turn(
+            incoming,
+            content,
+            binding=binding,
+            is_admin=is_admin,
+            is_private=True,
+            relationship=relationship,
+            dynamics=dynamics,
+            state_context=render_state_context(state) if state is not None else None,
+            baseline_affection=not appraisal_ok,
+        )
+
+    def _load_private_signals(
+        self,
+        incoming: Incoming,
+        binding: object | None,
+        persona: PersonaVersion,
+    ) -> tuple[str, str, Any] | None:
+        """读取关系状态；失败返回 None，由调用方 fail-open。"""
+        conn = None
+        try:
+            conn = memory_db.connect()
+            memory_db.init_schema(conn)
+            bound_user_id = getattr(binding, "user_id", None) if binding else None
+            person_key, role = relationship_subject(
+                conn, incoming.user_id, bound_user_id
+            )
+            signals = load_signals(
+                conn,
+                persona.state_key,
+                person_key,
+                role=role,
+                dynamics=persona.dynamics,
+                timezone_name=self.settings.quota_timezone,
+            )
+            return person_key, role, signals
+        except Exception:  # noqa: BLE001 - 决策失败不能让私聊变哑
+            logger.warning(
+                "QQ 私聊读取关系状态失败 qq=%s", incoming.user_id, exc_info=True
+            )
+            return None
+        finally:
+            if conn is not None:
+                conn.close()
+
+    async def _appraise_private(
+        self,
+        incoming: Incoming,
+        texts: list[str],
+        *,
+        person_key: str,
+        signals: Any,
+        persona: PersonaVersion,
+    ) -> AppraisalCall | None:
+        """调用一次轻量评估。异常已经由 Appraiser 内部吞掉。"""
+        if self._appraiser is None:
+            return None
+        key = (incoming.group_id, incoming.user_id)
+        recent = [message.content for message in self._history.get(key, [])[-4:]]
+        local_time = parse_iso(now_iso()).astimezone(
+            _zone(self.settings.quota_timezone)
+        ).strftime("%Y-%m-%d %H:%M")
+        recent_events = await asyncio.to_thread(
+            self._recent_appraisal_reasons, persona.state_key, person_key
+        )
+        runtime = get_runtime_store().load()
+        try:
+            return await self._appraiser.appraise(
+                persona_name=persona.name,
+                user_text="\n".join(texts),
+                recent=recent,
+                state_context=render_state_context(signals.state),
+                timeout=runtime.appraisal_timeout_seconds,
+                local_time=local_time,
+                recent_events=recent_events,
+            )
+        except Exception:  # noqa: BLE001 - 评估是增强，不能阻断回复
+            logger.warning(
+                "QQ 关系评估失败 qq=%s", incoming.user_id, exc_info=True
+            )
+            return None
+
+    def _recent_appraisal_reasons(
+        self, persona_key: str, person_key: str
+    ) -> list[str]:
+        """取最近几条评估理由，给本轮评估一点“刚才发生过什么”的上下文。"""
+        conn = None
+        try:
+            conn = memory_db.connect()
+            memory_db.init_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT reason FROM appraisal_log
+                 WHERE persona_key = ? AND person_key = ?
+                   AND reason IS NOT NULL AND reason != ''
+                 ORDER BY id DESC LIMIT 3
+                """,
+                (persona_key, person_key),
+            ).fetchall()
+            return [str(row["reason"]) for row in reversed(rows)]
+        except Exception:  # noqa: BLE001
+            return []
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def _reserve_appraisal(self, person_key: str) -> bool:
+        """占一次评估预算；出错时放行（评估是增强，不是可用性前提）。"""
+        conn = None
+        try:
+            runtime = get_runtime_store().load()
+            conn = memory_db.connect()
+            memory_db.init_schema(conn)
+            day = local_day(None, self.settings.quota_timezone)
+            return reserve_budget(
+                conn,
+                person_key=person_key,
+                day=day,
+                global_limit=runtime.appraisal_global_daily_budget,
+                user_limit=runtime.appraisal_per_user_daily_budget,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("评估预算占位失败，本次放行", exc_info=True)
+            return True
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def _log_appraisal_skip(
+        self, incoming: Incoming, person_key: str, runtime: Any
+    ) -> None:
+        """预算用尽时留一行日志，不发模型调用。"""
+        conn = None
+        try:
+            conn = memory_db.connect()
+            memory_db.init_schema(conn)
+            record_appraisal_log(
+                conn,
+                persona_key=self._persona().state_key,
+                person_key=person_key,
+                message_id=(
+                    None
+                    if incoming.message_id is None
+                    else str(incoming.message_id)
+                ),
+                result=None,
+                status="over_budget",
+                skipped_reason="over_budget",
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("记录评估预算日志失败", exc_info=True)
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def _decide_and_record(
+        self,
+        incoming: Incoming,
+        texts: list[str],
+        *,
+        binding: object | None,
+        persona: PersonaVersion,
+        person_key: str,
+        role: str,
+        signals: Any,
+        call: AppraisalCall | None,
+    ) -> tuple[Decision | None, Any]:
+        """掷骰子并落账；任何异常返回 `(None, None)` 让调用方 fail-open。
+
+        返回值里的状态是**掷骰子前**的快照：本轮语气用它，评估增量
+        只影响下一轮，避免模型在同一轮里又当裁判又当选手。
+        """
+        content = "\n".join(texts)
+        dynamics = persona.dynamics
+        policy = self.settings.qq_private_policy
+        crisis = any(
+            word and word in content for word in dynamics.safety.crisis_keywords
+        )
+
+        conn = None
+        try:
+            conn = memory_db.connect()
+            memory_db.init_schema(conn)
+
+            if policy == "silent" and not crisis:
+                decision = Decision(
+                    willingness=0.0,
+                    affinity=signals.affinity,
+                    valence=signals.state.valence,
+                    energy=signals.state.energy,
+                    reply_debt=signals.state.reply_debt,
+                    p0=0.0,
+                    p=0.0,
+                    roll=None,
+                    reply=False,
+                    reason="policy_silent",
+                    conflict_stage=signals.state.conflict_stage,
+                )
+            else:
+                appraisal = call.result if call and call.status == "ok" else None
+                decision = decide(
+                    text=content,
+                    recent=texts[:-1],
+                    affinity=signals.affinity,
+                    valence=signals.state.valence,
+                    energy=signals.state.energy,
+                    reply_debt=signals.state.reply_debt,
+                    patience=signals.state.patience,
+                    security=signals.state.security,
+                    dynamics=dynamics,
+                    rng=self._rng,
+                    force_reply=(policy == "always" or crisis),
+                    reason="crisis" if crisis else ("policy_always" if policy == "always" else ""),
+                    name=persona.name,
+                    reply_bias=appraisal.reply_bias if appraisal else 0.0,
+                    bias_confidence=appraisal.confidence if appraisal else 0.0,
+                    appraisal_event=appraisal.event if appraisal else None,
+                    stage=signals.state.conflict_stage,
+                )
+
+            record_decision(
+                conn,
+                persona_key=persona.state_key,
+                channel_id="qq_private",
+                person_key=person_key,
+                message_id=incoming.message_id,
+                decision=decision,
+                rule_score=decision.rule_willingness,
+            )
+            if not decision.reply:
+                record_silence(
+                    conn,
+                    persona.state_key,
+                    person_key,
+                    role=role,
+                    dynamics=dynamics,
+                    timezone_name=self.settings.quota_timezone,
+                )
+
+            delta = None
+            if call is not None:
+                delta = self._apply_appraisal_safe(
+                    conn,
+                    incoming,
+                    person_key=person_key,
+                    role=role,
+                    persona=persona,
+                    call=call,
+                )
+            # 数值改动下一轮才生效，但语气要立刻跟上：这一句里被伤害了，
+            # 回复就不能还像没事人。其它慢变量仍用掷骰子前的快照。
+            prompt_state = signals.state
+            if delta is not None and delta.stage_after:
+                prompt_state = replace(
+                    signals.state, conflict_stage=delta.stage_after
+                )
+            return decision, prompt_state
+        except Exception:  # noqa: BLE001 - 决策失败不能让私聊变哑
+            logger.warning(
+                "QQ 私聊决策失败，回退为直接回复 qq=%s",
+                incoming.user_id,
+                exc_info=True,
+            )
+            return None, None
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def _apply_appraisal_safe(
+        self,
+        conn: Any,
+        incoming: Incoming,
+        *,
+        person_key: str,
+        role: str,
+        persona: PersonaVersion,
+        call: AppraisalCall,
+    ) -> Any:
+        """评估映射与落账；失败只记日志，不影响已经做出的决策。
+
+        返回值是映射后的增量（含落账后的冲突阶段）；失败时返回 None。
+        """
+        try:
+            if call.status != "ok" or call.result is None:
+                record_appraisal_log(
+                    conn,
+                    persona_key=persona.state_key,
+                    person_key=person_key,
+                    message_id=(
+                        None
+                        if incoming.message_id is None
+                        else str(incoming.message_id)
+                    ),
+                    result=None,
+                    status=call.status,
+                    raw_output=call.raw_output,
+                    latency_ms=call.latency_ms,
+                )
+                return None
+
+            delta = apply_appraisal(
+                conn,
+                persona.state_key,
+                person_key,
+                role=role,
+                dynamics=persona.dynamics,
+                result=call.result,
+                timezone_name=self.settings.quota_timezone,
+            )
+            record_appraisal_log(
+                conn,
+                persona_key=persona.state_key,
+                person_key=person_key,
+                message_id=(
+                    None
+                    if incoming.message_id is None
+                    else str(incoming.message_id)
+                ),
+                result=call.result,
+                delta=delta,
+                status="ok",
+                raw_output=call.raw_output,
+                latency_ms=call.latency_ms,
+            )
+            return delta
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "应用关系评估失败 qq=%s", incoming.user_id, exc_info=True
+            )
+            return None
+
+    async def _run_chat_turn(
+        self,
+        incoming: Incoming,
+        content: str,
+        *,
+        binding: object | None,
+        is_admin: bool,
+        is_private: bool,
+        relationship: tuple[str, str, str] | None = None,
+        dynamics: Any = None,
+        state_context: str | None = None,
+        baseline_affection: bool = True,
+    ) -> dict[str, Any]:
+        """额度 → 记忆 → agent → 入库 → 发送；群聊和私聊共用。
+
+        `baseline_affection=False` 表示本轮已经由模型评估落过关系账，
+        回复本身不再叠加通用的“聊天好感/心情”加成，避免双重计数。
+        """
+        key = (incoming.group_id, incoming.user_id)
+
+        # 额度：管理员不计数；用尽时回固定文案，不调模型。
+        status, usage = self._reserve(
+            qq_uin=str(incoming.user_id),
+            user_id=getattr(binding, "user_id", None),
+            tier=getattr(binding, "tier", "user"),
+            is_admin=is_admin,
+        )
+        if status == "user_exhausted":
+            return await self._send(
+                incoming, commands.QUOTA_USER, reason="quota_exhausted"
+            )
+        if status == "global_exhausted":
+            return await self._send(
+                incoming, commands.QUOTA_GLOBAL, reason="quota_exhausted"
+            )
+
+        try:
+            # 取这一轮要注入的记忆。失败时为空字符串，回复照常。
             try:
                 memory_context = await asyncio.to_thread(
                     pipeline.qq_memory_context,
@@ -196,48 +730,128 @@ class QQAdapter:
                 logger.warning("QQ 记忆检索失败 qq=%s", incoming.user_id, exc_info=True)
                 memory_context = ""
 
-            # 4. 正常聊天。
             reply, messages_for_history, produced, ok = await self._reply(
                 key,
                 content,
                 is_admin=is_admin,
                 channel="qq_private" if is_private else "qq_group",
                 memory_context=memory_context or None,
+                state_context=state_context,
             )
-            if produced:
-                # 已经输出过正文就说明用户看到了内容，不退款；但报错（可能是
-                # 半截之后报错）的回合不能入库，否则残句会被当成完整回答提炼。
-                if ok:
-                    if messages_for_history:
-                        self._history[key] = messages_for_history
-                    # QQ 侧在回复产出后一次性写两条事件：这一轮整体入库。
-                    turn = await asyncio.to_thread(
-                        pipeline.record_qq_turn,
-                        incoming.user_id,
-                        incoming.group_id or None,
-                        binding,
-                        content,
-                        reply,
-                    )
-                    if turn is not None:
-                        pipeline.schedule_extraction(turn)
-            else:
-                # 没产出正文（模型报错/断流）：这次不算，退款，也别污染上下文。
-                self._refund(usage)
-                reply = commands.AGENT_ERROR
+        except asyncio.CancelledError:
+            # 被新消息打断的回合什么都没发出去（半截回复只留在上下文里），
+            # 额度要退回；否则用户多说两句就会白白烧掉当天的限额。
+            self._refund(usage)
+            raise
 
-            return await self._send(incoming, reply)
+        normal_reply = produced and ok
+        if produced:
+            # 已经输出过正文就说明用户看到了内容，不退款；但报错（可能是
+            # 半截之后报错）的回合不能入库，否则残句会被当成完整回答提炼。
+            if ok:
+                if messages_for_history:
+                    self._history[key] = messages_for_history
+                # QQ 侧在回复产出后一次性写两条事件：这一轮整体入库。
+                turn = await asyncio.to_thread(
+                    pipeline.record_qq_turn,
+                    incoming.user_id,
+                    incoming.group_id or None,
+                    binding,
+                    content,
+                    reply,
+                )
+                if turn is not None:
+                    pipeline.schedule_extraction(turn)
+                if relationship is not None and dynamics is not None:
+                    await asyncio.to_thread(
+                        self._record_reply_safe,
+                        relationship,
+                        dynamics,
+                        self.settings.quota_timezone,
+                        baseline_affection,
+                    )
+        else:
+            # 没产出正文（模型报错/断流）：这次不算，退款，也别污染上下文。
+            self._refund(usage)
+            reply = commands.AGENT_ERROR
+
+        return await self._send(
+            incoming, reply, reason=None if normal_reply else "agent_error"
+        )
+
+    @staticmethod
+    def _record_reply_safe(
+        relationship: tuple[str, str, str],
+        dynamics: Any,
+        timezone_name: str,
+        baseline: bool = True,
+    ) -> None:
+        """回复成功后的关系变化；失败只记日志，不影响已经发出的回复。"""
+        persona_key, person_key, role = relationship
+        conn = None
+        try:
+            conn = memory_db.connect()
+            memory_db.init_schema(conn)
+            record_reply(
+                conn,
+                persona_key,
+                person_key,
+                role=role,
+                dynamics=dynamics,
+                timezone_name=timezone_name,
+                baseline=baseline,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("记录 QQ 关系事件失败 person=%s", person_key, exc_info=True)
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def _remember_interrupted(
+        self, key: tuple[int, int], content: str, partial: str
+    ) -> None:
+        """被打断时把半截回复写进历史；没有正文就不写。"""
+        if not partial:
+            return
+        history = self._history.get(key, [])
+        new_history = [
+            *history,
+            ChatMessage(role="user", content=content[:8000]),
+            ChatMessage(role="assistant", content=partial[:8000]),
+        ]
+        max_messages = max(0, self.settings.qq_history_turns) * 2
+        self._history[key] = new_history[-max_messages:] if max_messages else []
 
     async def _send(
         self, incoming: Incoming, reply: str, *, reason: str | None = None
     ) -> dict[str, Any]:
-        """按来源把回复发回群/私聊；发送失败只记日志。"""
+        """按来源把回复发回群/私聊；发送失败只记日志。
+
+        私聊的正常回复会切成多条气泡并加打字间隔；命令、引导、额度、
+        错误这些固定文案不延迟——用户等的是一个确定的结果，不是表演。
+        """
         result: dict[str, Any] = {"handled": True, "reply": reply}
         if reason:
             result["reason"] = reason
 
+        paced = incoming.message_type == "private" and reason is None
+        dynamics = self._persona().dynamics if paced else None
+        if paced:
+            chunks = segment_bubbles(reply, dynamics, rng=self._rng)
+        else:
+            chunks = []
+        if not chunks:
+            chunks = self._split_text(reply)
+
+        delayed = 0.0
         try:
-            for chunk in self._split_text(reply):
+            for index, chunk in enumerate(chunks):
+                if index and dynamics is not None:
+                    delay = bubble_delay(chunks[index - 1], dynamics, rng=self._rng)
+                    # 整轮最多等 5.5 秒；超出的气泡仍然发送，只是不再等。
+                    if delayed + delay <= 5.5:
+                        delayed += delay
+                        await asyncio.sleep(delay)
                 if incoming.message_type == "private":
                     await self.sender.send_private_message(incoming.user_id, chunk)
                 else:
@@ -399,6 +1013,7 @@ class QQAdapter:
         is_admin: bool,
         channel: str,
         memory_context: str | None = None,
+        state_context: str | None = None,
     ) -> tuple[str, list[ChatMessage], bool, bool]:
         """调用 agent，返回 (要发送的文本, 更新后的历史, 是否产出过正文, 是否成功)。
 
@@ -422,12 +1037,18 @@ class QQAdapter:
                 is_admin=is_admin,
                 channel=channel,
                 memory_context=memory_context,
+                state_context=state_context,
             ):
                 event_type = event.get("type")
                 if event_type == "delta":
                     parts.append(str(event.get("content") or ""))
                 elif event_type == "error":
                     error_message = str(event.get("message") or "AI 服务暂时不可用。")
+        except asyncio.CancelledError:
+            # 生成中被新消息打断：已经产出的半截正文留在上下文里，
+            # 下一轮模型知道“刚才那句话没说完”。
+            self._remember_interrupted(key, content, "".join(parts).strip())
+            raise
         except Exception:  # noqa: BLE001 - agent 内部已经会捕获大部分异常
             logger.exception("QQ 通道调用 agent 失败")
             error_message = "AI 服务暂时不可用，请稍后再试。"

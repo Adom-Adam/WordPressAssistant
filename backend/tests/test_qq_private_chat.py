@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import random
 from typing import Any
 
 import pytest
@@ -18,6 +19,7 @@ from app.channels.qq import commands
 from app.channels.qq.adapter import QQAdapter
 from app.config import Settings, get_settings
 from app.credits import CreditStore, hash_bind_code
+from app.persona.models import PersonaVersion
 from app.qq_quota import QQUsage
 
 
@@ -99,8 +101,36 @@ class AllowAllGate:
         return None
 
 
+def make_persona(debounce: float = 0.0, max_debounce: float = 0.0) -> PersonaVersion:
+    """测试用的人设：零防抖、零间隔，避免每个用例真的等 1.5 秒。"""
+    return PersonaVersion.model_validate(
+        {
+            "schema": "l2d.persona/v1",
+            "id": "merlin",
+            "version": 1,
+            "name": "梅林",
+            "core": "C",
+            "dynamics": {
+                "namespace": {"state": "merlin"},
+                "pacing": {
+                    "debounce_seconds": debounce,
+                    "debounce_max_seconds": max_debounce,
+                    "max_gap_ms": 0,
+                    "min_gap_ms": 0,
+                    "chars_per_second": 50.0,
+                },
+            },
+        }
+    )
+
+
 def make_adapter(
-    tmp_path: Any, *, stream: Any = None, wp_site_url: str = ""
+    tmp_path: Any,
+    *,
+    stream: Any = None,
+    wp_site_url: str = "",
+    policy: str = "always",
+    persona: PersonaVersion | None = None,
 ) -> tuple[QQAdapter, FakeSender, CreditStore]:
     settings = Settings(
         qq_enabled=True,
@@ -108,6 +138,7 @@ def make_adapter(
         qq_admin_users="",
         qq_mock_mode=True,
         wp_site_url=wp_site_url,
+        qq_private_reply_policy=policy,
     )
     store = CreditStore(str(tmp_path / "quota.sqlite3"))
     sender = FakeSender()
@@ -117,6 +148,8 @@ def make_adapter(
         stream=stream or stream_ok(),
         credits=store,
         gate=AllowAllGate(),
+        persona=persona or make_persona(),
+        rng=random.Random(0),
     )
     return adapter, sender, store
 
@@ -179,6 +212,86 @@ async def test_unbound_group_points_to_private(tmp_path: Any) -> None:
     assert result["reason"] == "guide_unbound"
     assert sender.group == [(888, commands.GROUP_GUIDE)]
     assert sender.private == []
+
+
+@async_test
+async def test_persona_load_failure_falls_back_to_defaults(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """人设文件坏掉时，私聊仍然要能回话，不能整条链路崩掉。"""
+    from app.channels.qq import adapter as adapter_module
+
+    class BrokenStore:
+        def load_active(self) -> Any:
+            raise RuntimeError("人设目录不见了")
+
+    monkeypatch.setattr(adapter_module, "get_persona_store", lambda: BrokenStore())
+    settings = Settings(
+        qq_enabled=True,
+        qq_allowed_groups="888",
+        qq_mock_mode=True,
+        qq_private_reply_policy="always",
+        wp_site_url="",
+    )
+    store = CreditStore(str(tmp_path / "quota.sqlite3"))
+    bind(store)
+    sender = FakeSender()
+    adapter = QQAdapter(
+        settings,
+        sender,
+        stream=stream_ok(),
+        credits=store,
+        gate=AllowAllGate(),
+        rng=random.Random(0),
+    )
+
+    result = await adapter.handle_event(private_event(10001, "在吗"))
+
+    assert result["handled"] is True
+    assert sender.private == [(10001, "我在")]
+
+
+@async_test
+async def test_persona_is_reloaded_for_each_private_round(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """改 dynamics.override.json 后不用重启服务，下一轮就生效。"""
+    from app.channels.qq import adapter as adapter_module
+
+    loads: list[int] = []
+
+    class CountingStore:
+        def load_active(self) -> PersonaVersion:
+            loads.append(1)
+            return make_persona()
+
+    monkeypatch.setattr(adapter_module, "get_persona_store", lambda: CountingStore())
+
+    settings = Settings(
+        qq_enabled=True,
+        qq_allowed_groups="888",
+        qq_mock_mode=True,
+        qq_private_reply_policy="always",
+        wp_site_url="",
+    )
+    credits = CreditStore(str(tmp_path / "quota.sqlite3"))
+    bind(credits)
+    adapter = QQAdapter(
+        settings,
+        FakeSender(),
+        stream=stream_ok(),
+        credits=credits,
+        gate=AllowAllGate(),
+        rng=random.Random(0),
+    )
+
+    await adapter.handle_event(private_event(10001, "第一句", 1))
+    after_first = len(loads)
+    await adapter.handle_event(private_event(10001, "第二句", 2))
+
+    # 回合之间必须重新读盘；同一回合内读几次不重要。
+    assert after_first >= 1
+    assert len(loads) > after_first
 
 
 @async_test
@@ -353,3 +466,20 @@ async def test_qq_reply_receives_memory_context(tmp_path: Any, monkeypatch: Any)
 
     assert "memory_context" in captured
     get_settings.cache_clear()
+
+
+@async_test
+async def test_private_reply_receives_state_context(tmp_path: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    async def recording_stream(messages: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        yield {"type": "delta", "content": "我在"}
+
+    adapter, sender, store = make_adapter(tmp_path, stream=recording_stream)
+    bind(store)
+
+    await adapter.handle_event(private_event(10001, "在吗"))
+
+    assert "当前关系状态" in captured["state_context"]
+    assert "陌生人" in captured["state_context"]

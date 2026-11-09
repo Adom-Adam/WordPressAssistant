@@ -135,6 +135,18 @@ class Settings(BaseSettings):
     qq_unlimited: bool = False
 
     # ------------------------------------------------------------------
+    # 每轮私聊的模型评估（3c）
+    # ------------------------------------------------------------------
+    # 总开关。关掉后不调用评估模型，关系只按规则（聊天/沉默事件）变化。
+    appraisal_enabled: bool = True
+    # 单次评估的超时。评估在掷骰子前同步等待，必须足够短，
+    # 超时就 fail-open 按规则回复。
+    appraisal_timeout_seconds: float = 1.2
+    # 每日模型调用预算，和用户聊天额度相互独立；0 表示不限。
+    appraisal_global_daily_budget: int = 1000
+    appraisal_per_user_daily_budget: int = 60
+
+    # ------------------------------------------------------------------
     # 人设文件
     # ------------------------------------------------------------------
     # 人设正文属于“私密内容”，放在 data/ 下（整个 data/ 已被 .gitignore 忽略），
@@ -174,6 +186,13 @@ class Settings(BaseSettings):
 
     # 每个群+用户最多保留多少轮对话（1 轮 = 用户+助手两条）。
     qq_history_turns: int = 8
+
+    # 私聊回复策略：
+    # - probabilistic：按人设概率模型决定（默认，4a 起）；
+    # - always：回到“进入判断就回复”的旧行为；
+    # - silent：只记录不回复（危机词仍然回复）。
+    # 非法值回退 always：新功能出错时宁可多回，也不要让人以为梅林失联。
+    qq_private_reply_policy: str = "probabilistic"
 
     # 本地没有 NapCat 时，把出站消息写到 outbox，而不是发 HTTP 请求。
     # 这不是生产模式，只用于 Windows 本地联调和测试。
@@ -284,6 +303,12 @@ class Settings(BaseSettings):
     def qq_admin_user_ids(self) -> set[int]:
         """可以直接按管理员身份对话的 QQ 号。"""
         return _parse_int_csv(self.qq_admin_users)
+
+    @property
+    def qq_private_policy(self) -> str:
+        """校验后的私聊策略；写错时回退到 always。"""
+        value = self.qq_private_reply_policy.strip().lower()
+        return value if value in {"always", "probabilistic", "silent"} else "always"
 
 
 def _parse_int_csv(value: str) -> set[int]:

@@ -134,6 +134,44 @@ def test_qq_bool_fields_accept_bool_only(tmp_path) -> None:
         store.update({"qq_quota_shared": 1})
 
 
+def test_appraisal_defaults(tmp_path) -> None:
+    values = make_store(tmp_path).load()
+
+    assert values.appraisal_enabled is True
+    assert values.appraisal_timeout_seconds == 1.2
+    assert values.appraisal_global_daily_budget == 1000
+    assert values.appraisal_per_user_daily_budget == 60
+
+
+def test_appraisal_timeout_range(tmp_path) -> None:
+    store = make_store(tmp_path)
+
+    assert store.update({"appraisal_timeout_seconds": 2.0}).appraisal_timeout_seconds == 2.0
+    with pytest.raises(ValueError, match="appraisal_timeout_seconds"):
+        store.update({"appraisal_timeout_seconds": 30})
+    with pytest.raises(ValueError, match="appraisal_timeout_seconds"):
+        store.update({"appraisal_timeout_seconds": 0})
+
+
+def test_appraisal_budgets_allow_zero_as_unlimited(tmp_path) -> None:
+    store = make_store(tmp_path)
+
+    updated = store.update(
+        {"appraisal_global_daily_budget": 0, "appraisal_per_user_daily_budget": 0}
+    )
+
+    assert updated.appraisal_global_daily_budget == 0
+    assert updated.appraisal_per_user_daily_budget == 0
+
+
+def test_appraisal_enabled_is_bool_only(tmp_path) -> None:
+    store = make_store(tmp_path)
+
+    assert store.update({"appraisal_enabled": False}).appraisal_enabled is False
+    with pytest.raises(ValueError, match="appraisal_enabled"):
+        store.update({"appraisal_enabled": 1})
+
+
 def test_qq_int_ranges(tmp_path) -> None:
     store = make_store(tmp_path)
 

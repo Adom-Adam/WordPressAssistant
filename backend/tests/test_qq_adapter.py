@@ -84,6 +84,7 @@ def make_stream(calls: list[dict[str, Any]], reply: str = "你好呀"):
         is_admin: bool = False,
         channel: str = "web",
         memory_context: str | None = None,
+        state_context: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         calls.append(
             {
@@ -93,6 +94,7 @@ def make_stream(calls: list[dict[str, Any]], reply: str = "你好呀"):
                 "is_admin": is_admin,
                 "channel": channel,
                 "memory_context": memory_context,
+                "state_context": state_context,
             }
         )
         yield {"type": "delta", "content": reply}
@@ -310,6 +312,16 @@ def clear_config_caches() -> None:
     get_settings.cache_clear()
     get_qq_adapter.cache_clear()
     get_credit_store.cache_clear()
+
+
+def test_production_adapter_injects_appraiser(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("QQ_MOCK_MODE", "true")
+    get_settings.cache_clear()
+    get_qq_adapter.cache_clear()
+
+    adapter = get_qq_adapter()
+
+    assert adapter._appraiser is not None
 
 
 def test_event_endpoint_rejects_wrong_token(monkeypatch: pytest.MonkeyPatch) -> None:
