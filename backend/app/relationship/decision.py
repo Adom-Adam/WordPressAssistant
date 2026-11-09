@@ -188,8 +188,13 @@ def decide(
     bias_confidence: float = 0.0,
     appraisal_event: str | None = None,
     stage: str = "normal",
+    probability_floor: float | None = None,
 ) -> Decision:
-    """掷一次骰子。`force_reply=True` 时不消耗随机数。"""
+    """掷一次骰子。`force_reply=True` 时不消耗随机数。
+
+    `probability_floor` 给群聊用：被点名时把最终概率抬到一个下限，
+    但 `p0` 仍记录公式原值，事后能看出“规则给多少、下限抬到多少”。
+    """
     rule_willingness = willingness_for(text, recent, name=name)
     willingness = blend_willingness(
         rule_willingness,
@@ -208,6 +213,8 @@ def decide(
         security=security,
         stage_multiplier=stage_multiplier(stage, dynamics),
     )
+    if probability_floor is not None:
+        p = clamp(max(p, float(probability_floor)), 0.0, 0.98)
 
     if force_reply:
         return Decision(

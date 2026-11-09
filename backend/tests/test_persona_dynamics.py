@@ -129,3 +129,23 @@ def test_unknown_stage_is_rejected():
     multipliers = Dynamics().conflict.stage_multipliers
     with pytest.raises(Exception):
         ConflictDynamics(stage_multipliers={**multipliers, "angry": 0.1})
+
+
+# ---------------------------------------------------------------- 4b
+def test_proactive_and_group_defaults():
+    dynamics = make_persona().dynamics
+
+    assert dynamics.proactive.recent_active_minutes == 10.0
+    assert dynamics.proactive.repeat_similarity == 0.6
+    assert dynamics.proactive.ignore_grace_hours == 24.0
+    assert dynamics.proactive.ignore_affection_points == 0.2
+    assert dynamics.proactive.ignore_security_points == 0.5
+    assert dynamics.proactive.compose_timeout_seconds == 10.0
+    assert dynamics.group.reply_floor == 0.90
+
+
+def test_proactive_and_group_reject_bad_values():
+    with pytest.raises(ValidationError):
+        make_persona(dynamics={"proactive": {"repeat_similarity": 2}})
+    with pytest.raises(ValidationError):
+        make_persona(dynamics={"group": {"reply_floor": 1.5}})

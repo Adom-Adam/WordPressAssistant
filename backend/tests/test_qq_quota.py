@@ -122,6 +122,15 @@ def make_runtime(**overrides) -> RuntimeSettings:
         appraisal_timeout_seconds=1.2,
         appraisal_global_daily_budget=1000,
         appraisal_per_user_daily_budget=60,
+        proactive_enabled=False,
+        proactive_tick_minutes=30,
+        proactive_think_threshold=0.35,
+        proactive_speak_threshold=0.72,
+        proactive_min_interval_minutes=180,
+        proactive_per_user_daily_limit=3,
+        proactive_global_daily_limit=20,
+        proactive_group_interval_minutes=240,
+        proactive_group_daily_limit=6,
     )
     base.update(overrides)
     return RuntimeSettings(**base)

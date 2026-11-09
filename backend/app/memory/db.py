@@ -190,6 +190,50 @@ CREATE TABLE IF NOT EXISTS appraisal_usage (
     used INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (scope, day)
 );
+
+-- 每次主动决策的审计：念头、分数、阈值、结果。
+CREATE TABLE IF NOT EXISTS proactive_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    persona_key TEXT NOT NULL,
+    target_key TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    thought TEXT NOT NULL DEFAULT '',
+    score REAL NOT NULL DEFAULT 0,
+    threshold REAL NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    event_id INTEGER,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_proactive_log_target
+    ON proactive_log(persona_key, target_key, id);
+
+-- 因累/忙/心情低而没接的话。属于主动消息，不另建调度器。
+CREATE TABLE IF NOT EXISTS pending_topics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    persona_key TEXT NOT NULL,
+    person_key TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'open',
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    sent_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_topics_person
+    ON pending_topics(persona_key, person_key, status, id);
+
+-- 每个群的三个正交开关。缺行时回退到 QQ_TRIGGER。
+CREATE TABLE IF NOT EXISTS qq_group_policies (
+    group_id INTEGER PRIMARY KEY,
+    trigger TEXT NOT NULL,
+    reply_policy TEXT NOT NULL,
+    proactive INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
 """
 
 

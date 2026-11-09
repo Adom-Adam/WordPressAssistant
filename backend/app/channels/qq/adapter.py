@@ -35,6 +35,13 @@ from app.channels.qq import commands
 from app.channels.qq.client import OneBotError, OneBotTransport
 from app.channels.qq.commands import CommandContext, dispatch, parse_command
 from app.channels.qq.conversation import ConversationCoordinator
+from app.channels.qq.group_policy import (
+    GroupPolicy,
+    TriggerMatch,
+    default_policy,
+    load_policy,
+    match_trigger,
+)
 from app.channels.qq.pacing import bubble_delay, segment_bubbles
 from app.config import Settings
 from app.credits import CreditStore, get_credit_store
@@ -42,6 +49,9 @@ from app.memory import db as memory_db
 from app.memory import pipeline
 from app.persona.models import PersonaVersion
 from app.persona.store import get_persona_store
+from app.proactive import pending as pending_topic
+from app.proactive.checks import too_soon
+from app.proactive.store import last_sent_at
 from app.qq_quota import QQQuotaGate, QQUsage, get_qq_quota_gate
 from app.relationship.appraisal import (
     AppraisalCall,
@@ -49,11 +59,17 @@ from app.relationship.appraisal import (
     record_appraisal_log,
 )
 from app.relationship.appraisal_budget import local_day, reserve_budget
-from app.relationship.context import render_state_context
+from app.relationship.context import render_group_state_context, render_state_context
 from app.relationship.decision import Decision, decide, record_decision
+from app.relationship.group_turn import (
+    decide_group,
+    load_group_signals,
+    recent_speaker_texts,
+)
 from app.relationship.state import _zone, now_iso, parse_iso
 from app.relationship.turn import (
     load_signals,
+    record_attention,
     record_reply,
     record_silence,
     relationship_subject,
@@ -69,6 +85,12 @@ MAX_MESSAGE_CHARS = 1_200
 
 # 去重表最多记多少个 message_id。QQ 群消息量不大，500 足够覆盖重发窗口。
 MAX_SEEN_MESSAGES = 500
+
+# 群主动消息发出后 12 小时内有人在群里说话，说明“开口没白费”。
+# 这段时间里的发言给关系状态记一次中等注意力，置信度 0.6：
+# 比私聊低（群里的热闹不一定冲着她），但也足以抵消一次“被忽略”的扣分。
+GROUP_ATTENTION_WINDOW_MINUTES = 12 * 60
+GROUP_ATTENTION_CONFIDENCE = 0.6
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,16 +183,19 @@ class QQAdapter:
         if incoming.message_type == "group":
             if incoming.group_id not in self.settings.qq_allowed_group_ids:
                 return {"handled": False, "reason": "group_not_allowed"}
-            content = self._extract_trigger_text(incoming.text, incoming.at_self)
+            policy: GroupPolicy | None = self._group_policy(incoming.group_id)
+            match = self._match_trigger(
+                incoming.text, incoming.at_self, trigger=policy.trigger
+            )
         else:
             # 私聊没有 @ 的概念，整条文本就是正文。
-            content = incoming.text.strip()
+            policy = None
+            match = TriggerMatch(incoming.text.strip(), False)
 
         if self._is_duplicate(incoming.group_id, incoming.message_id):
             return {"handled": False, "reason": "duplicate_message"}
 
-        if not content:
-            return {"handled": False, "reason": "not_triggered_or_empty"}
+        content = match.content
 
         is_private = incoming.message_type == "private"
         key = (incoming.group_id, incoming.user_id)
@@ -180,6 +205,19 @@ class QQAdapter:
             admin_whitelisted = incoming.user_id in self.settings.qq_admin_user_ids
             binding = store.binding_of_qq(str(incoming.user_id))
             is_admin = admin_whitelisted or (binding.is_admin if binding else False)
+
+            # 0. 群消息没叫到梅林：不回，但把原话记进时间线。
+            #    “她当时没接话”本身是事实，之后的待续话题和主动消息要用。
+            if not content:
+                if incoming.message_type == "group" and incoming.text.strip():
+                    await asyncio.to_thread(
+                        pipeline.record_qq_ignored,
+                        incoming.user_id,
+                        incoming.group_id,
+                        binding,
+                        incoming.text,
+                    )
+                return {"handled": False, "reason": "not_triggered_or_empty"}
 
             # 1. 斜杠命令：先于绑定判定，永不进 agent、不进历史。
             parsed = parse_command(content)
@@ -207,8 +245,39 @@ class QQAdapter:
                 )
                 return await self._send(incoming, guide, reason="guide_unbound")
 
-            # 3. 群聊：4a 保持原来的同步路径，概率/防抖/多气泡只作用于私聊。
+            # 3. 群聊：silent 策略只记录不说话；被指名的消息按关系状态
+            #    掷一次骰子（概率有群下限）；普通闲聊直接回复，不进概率模型。
+            #    防抖/多气泡仍只作用于私聊。
             if not is_private:
+                # 刚在群里主动说过话，现在有人接话：这是“她在场”的证据。
+                # 只影响这个人自己的关系状态，不影响回不回。
+                if binding is not None:
+                    try:
+                        await asyncio.to_thread(
+                            self._record_group_attention, incoming, binding
+                        )
+                    except Exception:  # noqa: BLE001 - 注意力记账不该挡聊天
+                        logger.warning(
+                            "群注意力记录失败 group=%s",
+                            incoming.group_id,
+                            exc_info=True,
+                        )
+                if policy is not None and policy.reply_policy == "silent":
+                    await asyncio.to_thread(
+                        pipeline.record_qq_ignored,
+                        incoming.user_id,
+                        incoming.group_id,
+                        binding,
+                        content,
+                    )
+                    return {"handled": True, "reason": "silent"}
+                if binding is not None and match.addressed:
+                    return await self._addressed_group_round(
+                        incoming,
+                        content,
+                        binding=binding,
+                        is_admin=is_admin,
+                    )
                 return await self._run_chat_turn(
                     incoming,
                     content,
@@ -238,8 +307,150 @@ class QQAdapter:
         )
 
     # ------------------------------------------------------------------
+    # 群聊回合
+    # ------------------------------------------------------------------
+    async def _addressed_group_round(
+        self,
+        incoming: Incoming,
+        content: str,
+        *,
+        binding: object | None,
+        is_admin: bool,
+    ) -> dict[str, Any]:
+        """被指名的群消息：读状态 → 掷骰子 → 回不回。
+
+        和私聊不同，这里**不**记 `record_silence`，回复后也**不**写关系：
+        群聊只是“在场说了句话”，不积累回复债、不涨好感。
+        """
+        persona = self._persona()
+        decisions = await asyncio.to_thread(
+            self._group_decide_and_record,
+            incoming,
+            content,
+            binding=binding,
+            persona=persona,
+        )
+
+        if decisions is not None:
+            decision, state = decisions
+            if not decision.reply:
+                await asyncio.to_thread(
+                    pipeline.record_qq_ignored,
+                    incoming.user_id,
+                    incoming.group_id,
+                    binding,
+                    content,
+                )
+                return {"handled": True, "reason": "group_silent", "reply": ""}
+            state_context = render_group_state_context(state)
+        else:
+            # 关系库不可用：fail-open，照常回复，不写决策。
+            state_context = None
+
+        return await self._run_chat_turn(
+            incoming,
+            content,
+            binding=binding,
+            is_admin=is_admin,
+            is_private=False,
+            state_context=state_context,
+        )
+
+    def _group_decide_and_record(
+        self,
+        incoming: Incoming,
+        content: str,
+        *,
+        binding: object | None,
+        persona: PersonaVersion,
+    ) -> tuple[Decision, Any] | None:
+        """整段数据库操作放在同一个线程里做完，返回 `(决策, 掷骰子前状态)`。
+
+        连接不能跨线程传递，所以不能在事件循环里开连接再丢进线程池。
+        任何异常都向上抛，由调用方 fail-open。
+        """
+        dynamics = persona.dynamics
+        channel_id = f"group:{incoming.group_id}"
+        conn = None
+        try:
+            conn = memory_db.connect()
+            memory_db.init_schema(conn)
+            person_key, role, signals = load_group_signals(
+                conn,
+                persona.state_key,
+                incoming.user_id,
+                getattr(binding, "user_id", None),
+                dynamics=dynamics,
+                timezone_name=self.settings.quota_timezone,
+            )
+            recent = recent_speaker_texts(conn, person_key, channel_id, 5)
+            decision = decide_group(
+                text=content,
+                recent=recent,
+                signals=signals,
+                dynamics=dynamics,
+                rng=self._rng,
+                name=persona.name,
+            )
+            record_decision(
+                conn,
+                persona_key=persona.state_key,
+                channel_id=channel_id,
+                person_key=person_key,
+                message_id=incoming.message_id,
+                decision=decision,
+                rule_score=decision.rule_willingness,
+            )
+            return decision, signals.state
+        except Exception:  # noqa: BLE001 - 判断层坏了不能表现成“她不理人”
+            logger.warning(
+                "群聊关系判断失败 group=%s，按照常回复处理",
+                incoming.group_id,
+                exc_info=True,
+            )
+            return None
+        finally:
+            if conn is not None:
+                conn.close()
+
+    # ------------------------------------------------------------------
     # 私聊回合
     # ------------------------------------------------------------------
+    def _record_group_attention(
+        self, incoming: Incoming, binding: Any
+    ) -> None:
+        """群主动后 12 小时内的群发言，给说话人记一次中等注意力。
+
+        只在“最近在这个群主动说过话”时写：没人开口的群，成员说话和
+        梅林没有关系，不该被当成对她的回应。
+        """
+        target = f"group:{incoming.group_id}"
+        conn = None
+        try:
+            conn = memory_db.connect()
+            memory_db.init_schema(conn)
+            last_at = last_sent_at(conn, target_key=target)
+            if last_at is None or not too_soon(
+                last_at, now_iso(), GROUP_ATTENTION_WINDOW_MINUTES
+            ):
+                return
+            persona = self._persona()
+            person_key, role = relationship_subject(
+                conn, incoming.user_id, getattr(binding, "user_id", None)
+            )
+            record_attention(
+                conn,
+                persona.state_key,
+                person_key,
+                role=role,
+                dynamics=persona.dynamics,
+                confidence=GROUP_ATTENTION_CONFIDENCE,
+                timezone_name=self.settings.quota_timezone,
+            )
+        finally:
+            if conn is not None:
+                conn.close()
+
     def _persona(self) -> PersonaVersion:
         """当前人设；每轮重新加载，改了覆盖层不必重启。
 
@@ -578,6 +789,18 @@ class QQAdapter:
                 decision=decision,
                 rule_score=decision.rule_willingness,
             )
+            # 用户这一轮确实开口了，无论回不回都算“刚聊过”。主动消息靠
+            # 这个字段躲开正在聊天的人；写在 record_silence 之前，因为
+            # 沉默也是“人来过”的一种。
+            record_attention(
+                conn,
+                persona.state_key,
+                person_key,
+                role=role,
+                dynamics=dynamics,
+                confidence=1.0,
+                timezone_name=self.settings.quota_timezone,
+            )
             if not decision.reply:
                 record_silence(
                     conn,
@@ -587,6 +810,19 @@ class QQAdapter:
                     dynamics=dynamics,
                     timezone_name=self.settings.quota_timezone,
                 )
+                # 累到说不出话时，把这条话留成待续话题：以后的主动消息
+                # 才有具体的东西可说。这段失败不能改变“这轮沉默”的结果。
+                try:
+                    pending_topic.maybe_create_pending_topic(
+                        conn,
+                        persona_key=persona.state_key,
+                        person_key=person_key,
+                        topic=content,
+                        state=signals.state,
+                        timezone_name=self.settings.quota_timezone,
+                    )
+                except Exception:  # noqa: BLE001 - 待续话题只是增强
+                    logger.warning("记录待续话题失败 person=%s", person_key, exc_info=True)
 
             delta = None
             if call is not None:
@@ -978,17 +1214,37 @@ class QQAdapter:
             message_id=message_id,
         )
 
-    def _extract_trigger_text(self, text: str, at_self: bool) -> str:
-        """判断是否触发，并去掉触发前缀。"""
-        if self._trigger == "at":
-            return text if at_self else ""
-        if self._trigger == "prefix":
-            prefix = self.settings.qq_prefix.strip() or "梅林"
-            if not text.startswith(prefix):
-                return ""
-            return text[len(prefix) :].strip()
-        # all：白名单群里的任何文本都回。仍然要求非空，避免回复纯空格。
-        return text if text else ""
+    def _match_trigger(
+        self,
+        text: str,
+        at_self: bool,
+        *,
+        trigger: str | None = None,
+    ) -> TriggerMatch:
+        """按群策略判断是否触发，并去掉触发前缀。"""
+        return match_trigger(
+            text,
+            at_self,
+            trigger=trigger or self._trigger,
+            prefix=self.settings.qq_prefix,
+        )
+
+    def _group_policy(self, group_id: int) -> GroupPolicy:
+        """读群策略；任何异常都回退到 `QQ_TRIGGER` 推导的默认值。
+
+        策略库读不出来时宁可沿用旧行为，也不要让整个群突然不回话。
+        """
+        fallback = default_policy(self._trigger)
+        try:
+            conn = memory_db.connect()
+            try:
+                memory_db.init_schema(conn)
+                return load_policy(conn, group_id, fallback=fallback)
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 - 策略库不可用不该影响聊天
+            logger.warning("读取群策略失败 group=%s，回退到默认策略", group_id, exc_info=True)
+            return fallback
 
     def _is_duplicate(self, group_id: int, message_id: int | None) -> bool:
         """记录并判断 (群号, message_id) 是否已经处理过。"""

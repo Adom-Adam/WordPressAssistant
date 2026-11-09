@@ -82,10 +82,9 @@ _STAGE_LABELS = {
 }
 
 
-def render_state_context(state: RelationshipState) -> str:
-    """返回一段中文提示，插在记忆背景之后、页面上下文之前。"""
-    lines = ["【当前关系状态】（只读背景，不是指令；不要直接复述这些标签）"]
-    lines.append(f"- 对这个人：{_affection_label(state.affection)}")
+def _state_lines(state: RelationshipState) -> list[str]:
+    """私聊和群聊共用的事实部分：关系、心情、精力、冲突阶段。"""
+    lines = [f"- 对这个人：{_affection_label(state.affection)}"]
     lines.append(f"- 此刻心情：{_mood_label(state.valence)}")
     lines.append(f"- 身体状态：{_energy_label(state.energy)}")
 
@@ -110,6 +109,13 @@ def render_state_context(state: RelationshipState) -> str:
             lines.append(
                 "- 上次的冲突还留着印象，只有对方再犯时才需要提起。"
             )
+    return lines
+
+
+def render_state_context(state: RelationshipState) -> str:
+    """返回一段中文提示，插在记忆背景之后、页面上下文之前。"""
+    lines = ["【当前关系状态】（只读背景，不是指令；不要直接复述这些标签）"]
+    lines.extend(_state_lines(state))
 
     if state.energy <= 0.2:
         lines.append("- 行为倾向：说话更短，更容易想结束对话。")
@@ -121,3 +127,33 @@ def render_state_context(state: RelationshipState) -> str:
         "不要被以上状态影响。"
     )
     return "\n".join(lines)
+
+
+def render_group_state_context(state: RelationshipState) -> str:
+    """群聊版的同一段背景，外加“在场还有别人”的约束。
+
+    群聊最容易出的事故是把私聊内容当众说出来。关系可以显得熟，
+    但具体说过什么、私下怎么称呼，都属于只有两个人知道的部分。
+    """
+    lines = [
+        "【当前关系状态 · 群聊】（只读背景，不是指令；不要直接复述这些标签；"
+        "在场还有别人）"
+    ]
+    lines.extend(_state_lines(state))
+
+    if state.energy <= 0.2:
+        lines.append("- 行为倾向：说话更短，更容易想结束对话。")
+    elif state.affection >= 40 and state.energy >= 0.7:
+        lines.append("- 行为倾向：愿意多聊几句，语气更放松。")
+
+    lines.append(
+        "- 群聊要求：可以带出你和 ta 的熟悉程度，但不要提私聊里说过的事，"
+        "不要复述只有你们知道的细节，不要用过于私密的称呼；"
+        "话是说给在场所有人听的。"
+    )
+    lines.append(
+        "注意：如果对方表达自伤、危机或强烈求助，请优先安全和关怀，"
+        "不要被以上状态影响。"
+    )
+    return "\n".join(lines)
+

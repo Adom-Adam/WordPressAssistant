@@ -246,3 +246,25 @@ def test_normal_user_cannot_touch_admin_users(client: TestClient) -> None:
         client.get("/api/admin/users", headers=auth_header(admin=False)).status_code
         == 403
     )
+
+
+def test_admin_can_update_proactive_settings(client):
+    response = client.put(
+        "/api/admin/settings",
+        json={"proactive_enabled": True, "proactive_tick_minutes": 15},
+        headers=auth_header(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["settings"]["proactive_tick_minutes"] == 15
+    assert response.json()["settings"]["proactive_enabled"] is True
+
+
+def test_proactive_tick_out_of_range_is_rejected(client):
+    response = client.put(
+        "/api/admin/settings",
+        json={"proactive_tick_minutes": 3},
+        headers=auth_header(),
+    )
+
+    assert response.status_code == 422

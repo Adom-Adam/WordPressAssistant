@@ -14,11 +14,14 @@
 """
 
 import logging
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.admin import router as admin_router
+from app.api.admin_qq import router as admin_qq_router
 from app.api.admin_users import router as admin_users_router
 from app.api.chat import router as chat_router
 from app.api.me_account import router as me_account_router
@@ -48,10 +51,30 @@ if not settings.jwt_configured:
         "L2D_AI_JWT_SECRET 未配置或短于 32 字符：所有聊天请求都会返回 503"
     )
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
+    """进程级生命周期：QQ 通道开着时，后台跑主动消息循环。
+
+    循环读的是运行时设置，所以“总开关”关着时它空转也不发消息；
+    真正决定发不发的是 `run_once` 开头的那次检查。
+    """
+    from app.proactive.runner import create_runner
+
+    runner = create_runner(get_settings())
+    if runner is not None:
+        await runner.start()
+    try:
+        yield
+    finally:
+        if runner is not None:
+            await runner.stop()
+
+
 app = FastAPI(
     title="Live2D AI Assistant Backend",
     version="0.1.0",
     description="博客 Live2D 小助手的 AI 后端（LangChain + DeepSeek）",
+    lifespan=lifespan,
 )
 
 # CORS（跨域资源共享）中间件。
@@ -96,6 +119,8 @@ app.include_router(redeem_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
 # 用户档案、等级调整、额度发放、兑换码管理（同样要求 admin=true）。
 app.include_router(admin_users_router, prefix="/api")
+# 每个 QQ 群的触发/回复/主动策略（同样要求 admin=true）。
+app.include_router(admin_qq_router, prefix="/api")
 # NapCat 的 OneBot 事件回调。默认关闭，关闭时路由返回 404。
 app.include_router(qq_router, prefix="/api")
 

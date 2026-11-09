@@ -147,6 +147,26 @@ class Settings(BaseSettings):
     appraisal_per_user_daily_budget: int = 60
 
     # ------------------------------------------------------------------
+    # 主动消息（4b）
+    # ------------------------------------------------------------------
+    # 默认关闭。打开后调度器每 tick 评估一次候选，主动消息有独立预算，
+    # 不占用户聊天额度，也不调用 QQQuotaGate。
+    proactive_enabled: bool = False
+    # 调度器多久跑一次。改完下一轮生效，不需要重启。
+    proactive_tick_minutes: int = 30
+    # 低于这个分数连念头都不生成；达到 speak 阈值才进入发送前检查。
+    proactive_think_threshold: float = 0.35
+    proactive_speak_threshold: float = 0.72
+    # 对同一个人的两次主动之间至少隔多久；0 表示不限。
+    proactive_min_interval_minutes: int = 180
+    # 每人每天 / 全站每天最多发几条；0 表示不限。
+    proactive_per_user_daily_limit: int = 3
+    proactive_global_daily_limit: int = 20
+    # 同一个群两次主动之间至少隔多久；0 表示不限。
+    proactive_group_interval_minutes: int = 240
+    proactive_group_daily_limit: int = 6
+
+    # ------------------------------------------------------------------
     # 人设文件
     # ------------------------------------------------------------------
     # 人设正文属于“私密内容”，放在 data/ 下（整个 data/ 已被 .gitignore 忽略），

@@ -2797,3 +2797,19 @@ Expected: 全部通过（新增约 65 个测试；1 个既有 skip 保持不变�
 - **未覆盖且有意为之**：`activity_events` 表（4b 不建，注意力直接写 `relationship_state.attention_confidence`）；`get_user_status` 在线 0.1（无对应接口）；群聊全量概率回复（不规划）；群内主动开私聊（见上节“暂缓/待办”）；后台关系查看/审计 UI（阶段 5）；非指名群回复注入心情（每条群消息多一次状态读取，收益小，暂不采纳）。
 - **类型一致性**：`Candidate` 在 Task 9 定义时包含 `state: RelationshipState`，Task 14 直接使用；`SendResult.channel` 群值统一为 `f"group:{gid}"`，私聊为 `f"private:{uin}"`；`target_key` 私聊用 `person_key`，群用 `group:<gid>`；`TriggerMatch.addressed` 由 Task 2 定义、Task 3 传递、Task 7 消费。
 - **比例**：计划只钉接口、权重、阈值、状态值和测试断言；函数体留给实现者。
+
+### 实现期间的裁定（2026-11-09）
+
+执行 4b 时与计划文本有出入的地方，按“spec 优先、计划次之”处理：
+
+- **群下限 0.90 保留，计划的前提不成立**：Task 7 的测试草稿假设“温暖状态本来就能到 p0 上限”，但裸“你好”在 affection 60 时 p0 ≈ 0.557。按站长明确要求保留 `reply_floor=0.90`，把测试骰子改成 0.85，并断言 `p0 < 0.90`、`p=0.90`。
+- **`RuntimeSettings` 测试夹具补 9 个字段**：Task 5 新增 `proactive_*` 后，`tests/test_qq_quota.py` 与 `tests/test_qq_quota_flow.py` 的 `RuntimeSettings(**base)` 全部变成缺参。两处照配置默认值补齐。
+- **“今天”的计数窗口改为闭区间**：待续话题的每日上限原写成 `created_at >= day_start`，会把未来时间的行也算进今天；改成 `>= day_start AND < day_start + 1d`。
+- **安静时段测试改用 20:00Z**：计划里的 `04:00Z` 在 Asia/Shanghai 是中午，不可能命中 `00:00-07:00`。改成 `20:00Z`（北京 04:00），语义不变。
+- **提示词只保留最近四句**：Task 12 的草稿一边要求 `recent[-4:]`，一边断言“第 2 句不在”；实际应断言第 1 句不在、第 5 句在。
+- **Task 13 不再显式 `BEGIN IMMEDIATE`**：`apply_event` 内部自己提交，外层再开事务会报 “cannot start a transaction within a transaction”。结算靠 `status='sent'` 的行只处理一次来保证幂等。
+- **群话题按时间正序拼进提示词**：SQL 查询是新→旧，`group_topic` 用 `reversed(topics)`，读起来更像聊天记录；测试只断言包含关系。
+- **`_group_pass` 是 `async`**：计划第 3 步把它写成同步，但它要 `await writer.compose()` 与 `sender.send_group_message()`。检查类跳过用 `continue` 换下一个群；生成/重复/发送失败/成功用 `break`，满足“每个 tick 最多一个群”。
+- **lifespan 用 `get_settings()` 而不是模块级 `settings`**：`app.main` 的模块级 settings 在测试里可能是旧环境读到的；启动时现读一次与生产语义相同。
+- **`binding_changed` 的 `SendResult.kind` 用空串、不写日志**：这不是“想过没说”，而是身份错配；写日志会污染 `proactive_log` 的候选统计。
+- **Task 14 的测试夹具改用 `hash_bind_code`**：计划草稿的 `set_bind_code(7, "unused")` 与真实签名（`code_hash, is_admin`）不符，统一用 `hash_bind_code("1234-5678")` + `is_admin=False`。

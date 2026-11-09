@@ -364,6 +364,29 @@ QQ 有两种计法，由后台开关 `qq_quota_shared` 选择：
 - 管理员（JWT `admin`）不占任何计数；
 - agent 没产出正文（报错/断流）时自动退回这次占用，避免一次故障吃掉全天额度。
 
+### 关系与主动消息
+
+- `app/relationship/turn.py`：一轮对话的信号读取与关系落账（决策、回复、沉默、注意力）；
+- `app/relationship/decision.py`：回复概率公式与 `decision_log`；群聊额外传 `probability_floor`；
+- `app/relationship/group_turn.py`：群内被点名时装载状态、取同群最近发言、跑同一套 `decide`，
+  只是下限抬到 `dynamics.group.reply_floor`（默认 0.90）；不写关系；
+- `app/proactive/`：
+
+| 模块 | 职责 |
+| --- | --- |
+| `candidates.py` | 从关系状态里算出“这轮该想起谁”以及具体念头 |
+| `checks.py` | 安静时段、间隔、限额、最近活跃、重复检测（纯判断，无副作用） |
+| `message.py` | 把念头写成一条私聊或群消息 |
+| `pending.py` | 没聊完的话题（`pending_topics`），72 小时过期 |
+| `store.py` | 写 `proactive_log`、时间线事件与 `last_proactive_at` |
+| `settle.py` | 宽限期后给已发出的私聊主动消息下“回答/忽略”的结论 |
+| `scheduler.py` | 发送前检查与发送；私聊每轮最多一条、群每轮最多一个群 |
+| `runner.py` | FastAPI lifespan 里的常驻循环，按 `proactive_tick_minutes` 轮询 |
+
+主动消息只在 `QQ_ENABLED=true` 且运行时 `proactive_enabled=true` 时真正发出，循环
+本身可以在关闭时空转。发送假设**单进程单 worker**：多个后端进程会各自算一遍候选并
+各自发送，导致重复。
+
 ## 安全
 
 - DeepSeek Key 只在后端 `.env`，前端与 WordPress 数据库都不保存；

@@ -1101,6 +1101,12 @@ final class L2D_AI_Plugin {
 			'agent_max_seconds'     => array( 5, 300 ),
 			'appraisal_global_daily_budget' => array( 0, 1000000 ),
 			'appraisal_per_user_daily_budget' => array( 0, 1000 ),
+			'proactive_tick_minutes'        => array( 5, 120 ),
+			'proactive_min_interval_minutes' => array( 0, 10080 ),
+			'proactive_per_user_daily_limit' => array( 0, 100 ),
+			'proactive_global_daily_limit'  => array( 0, 100000 ),
+			'proactive_group_interval_minutes' => array( 0, 10080 ),
+			'proactive_group_daily_limit'   => array( 0, 100 ),
 		);
 
 		$patch = array();
@@ -1123,6 +1129,22 @@ final class L2D_AI_Plugin {
 		$patch['qq_quota_shared'] = ! empty( $_POST['qq_quota_shared'] );
 		$patch['qq_unlimited']    = ! empty( $_POST['qq_unlimited'] );
 		$patch['appraisal_enabled'] = ! empty( $_POST['appraisal_enabled'] );
+		$patch['proactive_enabled'] = ! empty( $_POST['proactive_enabled'] );
+
+		// 两个主动消息阈值是小数，校验方式同关系评估超时。
+		foreach ( array( 'proactive_think_threshold', 'proactive_speak_threshold' ) as $threshold_key ) {
+			$raw_threshold = isset( $_POST[ $threshold_key ] )
+				? trim( (string) wp_unslash( $_POST[ $threshold_key ] ) )
+				: '';
+			if ( '' === $raw_threshold || ! preg_match( '/^\d+(\.\d+)?$/', $raw_threshold ) ) {
+				self::redirect_with_error( '主动消息阈值必须是数字' );
+			}
+			$threshold = (float) $raw_threshold;
+			if ( $threshold < 0 || $threshold > 1 ) {
+				self::redirect_with_error( '主动消息阈值必须在 0 到 1 之间' );
+			}
+			$patch[ $threshold_key ] = $threshold;
+		}
 
 		// 评估超时是小数，单独校验；整数规则会把 1.2 直接判错。
 		$raw_timeout = isset( $_POST['appraisal_timeout_seconds'] )
@@ -1836,6 +1858,183 @@ final class L2D_AI_Plugin {
 								/>
 								次
 								<p class="description">0 = 不限。按本地日（QUOTA_TIMEZONE）重置。</p>
+							</td>
+						</tr>
+						<tr>
+							<th colspan="2">
+								<h2 style="margin:16px 0 4px;">QQ 主动消息</h2>
+								<p class="description" style="margin:0;">
+									梅林主动开口：私聊看关系值不值得想起，群聊看群策略允不允许。
+									主动消息不占用户聊天额度；免打扰来自人设的 <code>dynamics.safety.quiet_hours</code>。
+								</p>
+							</th>
+						</tr>
+						<tr>
+							<th scope="row">启用主动消息</th>
+							<td>
+								<label for="l2d-ai-proactive-enabled">
+									<input
+										type="checkbox"
+										id="l2d-ai-proactive-enabled"
+										name="proactive_enabled"
+										value="1"
+										<?php checked( '1', (string) $get( $settings, 'proactive_enabled', false ) ); ?>
+									/>
+									允许梅林在没有消息时主动开口
+								</label>
+								<p class="description">
+									关闭后后台循环仍会空转，但不会发出任何消息。群主动还需要在“QQ 群策略”里把对应群的 proactive 打开。
+								</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-proactive-tick">检查间隔</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-proactive-tick"
+									name="proactive_tick_minutes"
+									value="<?php echo esc_attr( $get( $settings, 'proactive_tick_minutes', 30 ) ); ?>"
+									min="5"
+									max="120"
+									step="1"
+									class="small-text"
+								/>
+								分钟
+								<p class="description">多久检查一次要不要主动说话。改完下一轮生效。</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-proactive-think">念头阈值</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-proactive-think"
+									name="proactive_think_threshold"
+									value="<?php echo esc_attr( $get( $settings, 'proactive_think_threshold', 0.35 ) ); ?>"
+									min="0"
+									max="1"
+									step="0.01"
+									class="small-text"
+								/>
+								<p class="description">低于它连念头都不生成。调低会更频繁地“想到”别人。</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-proactive-speak">开口阈值</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-proactive-speak"
+									name="proactive_speak_threshold"
+									value="<?php echo esc_attr( $get( $settings, 'proactive_speak_threshold', 0.72 ) ); ?>"
+									min="0"
+									max="1"
+									step="0.01"
+									class="small-text"
+								/>
+								<p class="description">达到才进入发送前检查。高于念头阈值，两者一起控制“想”和“说”。</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-proactive-interval">同一人最小间隔</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-proactive-interval"
+									name="proactive_min_interval_minutes"
+									value="<?php echo esc_attr( $get( $settings, 'proactive_min_interval_minutes', 180 ) ); ?>"
+									min="0"
+									max="10080"
+									step="1"
+									class="small-text"
+								/>
+								分钟
+								<p class="description">0 = 不限。</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-proactive-user-limit">每人每日上限</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-proactive-user-limit"
+									name="proactive_per_user_daily_limit"
+									value="<?php echo esc_attr( $get( $settings, 'proactive_per_user_daily_limit', 3 ) ); ?>"
+									min="0"
+									max="100"
+									step="1"
+									class="small-text"
+								/>
+								条
+								<p class="description">0 = 不限。按本地日（QUOTA_TIMEZONE）重置。</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-proactive-global-limit">全站每日上限</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-proactive-global-limit"
+									name="proactive_global_daily_limit"
+									value="<?php echo esc_attr( $get( $settings, 'proactive_global_daily_limit', 20 ) ); ?>"
+									min="0"
+									max="100000"
+									step="1"
+									class="regular-text"
+								/>
+								条
+								<p class="description">全体用户合计，0 = 不限。防止某一天突然给所有人发消息。</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-proactive-group-interval">同一群最小间隔</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-proactive-group-interval"
+									name="proactive_group_interval_minutes"
+									value="<?php echo esc_attr( $get( $settings, 'proactive_group_interval_minutes', 240 ) ); ?>"
+									min="0"
+									max="10080"
+									step="1"
+									class="small-text"
+								/>
+								分钟
+								<p class="description">0 = 不限。</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-proactive-group-limit">每群每日上限</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-proactive-group-limit"
+									name="proactive_group_daily_limit"
+									value="<?php echo esc_attr( $get( $settings, 'proactive_group_daily_limit', 6 ) ); ?>"
+									min="0"
+									max="100"
+									step="1"
+									class="small-text"
+								/>
+								条
+								<p class="description">0 = 不限。每个检查周期最多在一个群里开口。</p>
 							</td>
 						</tr>
 					</table>

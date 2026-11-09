@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from app.memory import identity
 from app.persona.models import Dynamics
@@ -24,6 +24,7 @@ from app.relationship.state import (
     RelationshipState,
     affinity_for,
     apply_event,
+    clamp,
     decay_state,
     get_or_create_state,
     now_iso,
@@ -140,6 +141,45 @@ def record_reply(
         now=now,
         timezone_name=timezone_name,
     )
+
+
+def record_attention(
+    conn: sqlite3.Connection,
+    persona_key: str,
+    person_key: str,
+    *,
+    role: str,
+    dynamics: Dynamics,
+    confidence: float,
+    now: str | None = None,
+    timezone_name: str = DEFAULT_TIMEZONE,
+) -> RelationshipState:
+    """记录“这个人此刻正在跟我说话”。
+
+    和好感、心情不同，注意力不累加：它回答的是“现在是不是在聊”，
+    答案只有是/否，之后按时间自然衰减。主动消息靠它跳过正在聊的人。
+
+    先衰减再写入：如果上次的注意力已经衰减到 0.2，这次直接置为 1.0，
+    而不是在旧值上叠加。
+    """
+    stamp = now or now_iso()
+    state = get_or_create_state(
+        conn,
+        persona_key,
+        person_key,
+        role=role,
+        dynamics=dynamics,
+        now=stamp,
+        timezone_name=timezone_name,
+    )
+    state = decay_state(state, dynamics, now=stamp, timezone_name=timezone_name)
+    state = replace(
+        state,
+        attention_confidence=clamp(confidence, 0.0, 1.0),
+        updated_at=stamp,
+    )
+    save_state(conn, state)
+    return state
 
 
 def record_silence(

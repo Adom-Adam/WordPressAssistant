@@ -448,6 +448,35 @@ class PacingDynamics(BaseModel):
         return self
 
 
+class ProactiveDynamics(BaseModel):
+    """主动消息的行为参数。4b 使用。"""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    # 用户刚在私聊里说过话时不要插主动消息：多少分钟内算“还在聊”。
+    recent_active_minutes: float = Field(default=10.0, ge=0.0, le=180.0)
+    # 与最近三条主动消息的相似度超过它就算重复，换个念头或不发。
+    repeat_similarity: float = Field(default=0.6, gt=0.0, le=1.0)
+    # 主动消息发出多久后还没有回应，就结算为“被忽略”。
+    ignore_grace_hours: float = Field(default=24.0, ge=1.0, le=168.0)
+    # 被忽略一次的扣分，还要乘以注意力置信度。
+    ignore_affection_points: float = Field(default=0.2, ge=0.0, le=5.0)
+    ignore_security_points: float = Field(default=0.5, ge=0.0, le=20.0)
+    # 生成一条主动消息的超时。失败就当这一轮没想过，不影响其它人。
+    compose_timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
+
+
+class GroupDynamics(BaseModel):
+    """群聊里被点名时的行为参数。"""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    # 被绑定成员 @ 或前缀点名时的最低回复概率。取得高，是因为群里
+    # 有别人看着，点名不回很难解释；只有冲突/低好感/低心情这类极端
+    # 状态才真的可能不回。
+    reply_floor: float = Field(default=0.90, ge=0.0, le=0.98)
+
+
 class SafetyDynamics(BaseModel):
     """免打扰时段和危机关键词。"""
 
@@ -496,6 +525,8 @@ class Dynamics(BaseModel):
     appraisal: AppraisalDynamics = Field(default_factory=AppraisalDynamics)
     conflict: ConflictDynamics = Field(default_factory=ConflictDynamics)
     pacing: PacingDynamics = Field(default_factory=PacingDynamics)
+    proactive: ProactiveDynamics = Field(default_factory=ProactiveDynamics)
+    group: GroupDynamics = Field(default_factory=GroupDynamics)
     safety: SafetyDynamics = Field(default_factory=SafetyDynamics)
     namespace: NamespaceDynamics = Field(default_factory=NamespaceDynamics)
 

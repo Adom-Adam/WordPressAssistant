@@ -183,3 +183,54 @@ def test_qq_int_ranges(tmp_path) -> None:
     assert updated.qq_global_daily_quota == 200
     with pytest.raises(ValueError, match="qq_daily_quota"):
         store.update({"qq_daily_quota": 1001})
+
+
+def test_proactive_defaults(tmp_path) -> None:
+    store = make_store(tmp_path)
+
+    runtime = store.load()
+
+    assert runtime.proactive_enabled is False
+    assert runtime.proactive_tick_minutes == 30
+    assert runtime.proactive_think_threshold == pytest.approx(0.35)
+    assert runtime.proactive_speak_threshold == pytest.approx(0.72)
+    assert runtime.proactive_min_interval_minutes == 180
+    assert runtime.proactive_group_interval_minutes == 240
+
+
+def test_proactive_update_persists(tmp_path) -> None:
+    store = make_store(tmp_path)
+
+    updated = store.update(
+        {
+            "proactive_enabled": True,
+            "proactive_tick_minutes": 10,
+            "proactive_speak_threshold": 0.8,
+        }
+    )
+
+    assert store.load() == updated
+    assert updated.proactive_tick_minutes == 10
+    assert updated.proactive_speak_threshold == pytest.approx(0.8)
+
+
+def test_proactive_ranges_reject_bad_values(tmp_path) -> None:
+    store = make_store(tmp_path)
+
+    with pytest.raises(ValueError, match="proactive_tick_minutes"):
+        store.update({"proactive_tick_minutes": 4})
+    with pytest.raises(ValueError, match="proactive_think_threshold"):
+        store.update({"proactive_think_threshold": 1.5})
+    with pytest.raises(ValueError, match="proactive_enabled"):
+        store.update({"proactive_enabled": 1})
+
+
+def test_proactive_zero_means_unlimited(tmp_path) -> None:
+    store = make_store(tmp_path)
+
+    updated = store.update(
+        {"proactive_per_user_daily_limit": 0, "proactive_global_daily_limit": 0}
+    )
+
+    assert updated.proactive_per_user_daily_limit == 0
+    assert updated.proactive_global_daily_limit == 0

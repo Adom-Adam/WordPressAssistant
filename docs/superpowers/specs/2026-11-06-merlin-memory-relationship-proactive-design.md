@@ -126,6 +126,7 @@
 - 因“没回”产生的负面变化（好感下降、安全感下降）乘以 `attention_confidence`；置信度为 0 时不扣好感。
 - 只有 `get_user_status=online` 不作为“看到了不回”的证据，最多让思念稍微慢一点。
 - 24 小时宽限期：刚发出去的消息在宽限期内不产生负面变化。
+- 4b 只实现 1.0 / 0.6 / 0.2 三种证据（当前会话回复、群主动后同群发言、别处活跃）；`get_user_status` 在线 0.1 暂未接入。
 
 ### 4.3 好感单位、范围与成长
 
@@ -393,7 +394,9 @@ p = p0 + (0.98 - p0) × (1 - exp(-debt_lambda × reply_debt))
 
 ### 5.5 群聊范围
 
-第一版概率回复、防抖、打断、多气泡只作用于私聊；群聊继续使用现有 `trigger` + `reply_policy` 规则，等私聊稳定后再把同一套概率模型接到群聊，群策略表保留。
+群聊默认仍用 `trigger` + `reply_policy` 决定“回不回”。**被绑定成员 @ 或前缀点名时**，用该成员的关系状态做一次概率判断，但下限抬到 `dynamics.group.reply_floor`（默认 0.90）——平时几乎必回，只有冲突 withdrawing、极低好感、心情差或对目标正赌气这类极端状态才可能不回。回复只带定性的关系标签，不带私聊原文或只有两个人知道的细节。
+
+群内其余消息不进入概率模型；防抖、打断、多气泡也只作用于私聊。**不规划**“全群概率回复”：群是多人环境，单人的 `affection` 不代表群。
 
 ## 6. 主动消息
 
@@ -484,6 +487,10 @@ relationship_events(id, persona_key, person_key, kind, d_affection, d_missing, d
 activity_events(id, persona_key, person_key, channel_id, kind, occurred_at, confidence, meta)
 proactive_log(id, persona_key, target_key, channel_id, kind, thought, score, threshold,
               status, reason, event_id, created_at)
+              -- status: sent / skipped / failed / answered / ignored
+pending_topics(id, persona_key, person_key, topic, reason, status, created_at,
+               expires_at, sent_at)
+               -- status: open / sent / dropped
 qq_group_policies(group_id PRIMARY KEY, trigger, reply_policy, proactive, updated_at)
 decision_log(id, persona_key, channel_id, person_key, message_id, rule_score, p_rule,
              reply_bias, willingness, valence, energy, affinity, reply_debt, p0, p,
@@ -536,7 +543,7 @@ admin_audit(id, actor_user_id, action, target, detail, created_at)
      - 伤疤记忆因 `memories` 缺 `persona_key` 推迟，当前用关系状态与 `appraisal_log` 承载。
 4. **QQ 分层、概率回复与主动消息**：
    - **4a**（本地完成，未提交）：私聊概率回复、防抖、打断、多气泡、`decision_log`；计划：`docs/superpowers/plans/2026-11-08-04a-private-interaction-layer.md`。
-   - **4b**：群策略、待续话题、主动调度、`proactive_log`；群聊概率回复等私聊稳定后再接（如需要可另拆 4c）。
+   - **4b**（本地完成，未提交）：群策略、判断被指名后的回复概率、待续话题、私聊/群主动调度、`proactive_log`、注意力结算；计划：`docs/superpowers/plans/2026-11-09-04b-group-pending-proactive.md`。候选待办：**群内主动开私聊（group opener）**——在群内被点名并回复后，是否借机给这个人发一条私聊；约束和开关留待真实群试用后再决定。
 5. **后台与审计**：WordPress 设置页分区；人设 `dynamics` 编辑器（写入按人设的覆盖文件，带字段解释、建议范围、恢复默认、当前生效值与来源）；名单管理、关系状态查看、记忆删除与审计。
 
 ## 10. 人设配置与状态隔离

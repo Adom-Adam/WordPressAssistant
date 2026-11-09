@@ -52,6 +52,17 @@ class AlwaysBound:
         return QQBinding(user_id=1, tier="user", is_admin=False)
 
 
+class FixedRandom:
+    """骰子恒为 0：这些用例关心“回什么”，不关心概率。
+
+    群聊被 @ 之后也会掷一次骰子（下限 0.90），不固定下来就会有
+    十分之一的用例莫名收到“她没说话”。
+    """
+
+    def random(self) -> float:
+        return 0.0
+
+
 class AllowAllGate:
     """额度永不拦人，也不计数；避免落到真实的额度库。"""
 
@@ -148,6 +159,7 @@ async def test_at_trigger_replies_in_allowed_group() -> None:
     adapter = QQAdapter(
         make_settings(), sender, stream=make_stream(calls, "你好呀"), credits=AlwaysBound(),
         gate=AllowAllGate(),
+        rng=FixedRandom(),
     )
 
     result = await adapter.handle_event(make_event("在吗"))
@@ -165,6 +177,7 @@ async def test_group_not_in_allowlist_is_ignored() -> None:
     adapter = QQAdapter(
         make_settings(), sender, stream=make_stream(calls), credits=AlwaysBound(),
         gate=AllowAllGate(),
+        rng=FixedRandom(),
     )
 
     result = await adapter.handle_event(make_event(group_id=999))
@@ -181,6 +194,7 @@ async def test_message_without_at_is_ignored_in_at_mode() -> None:
     adapter = QQAdapter(
         make_settings(), sender, stream=make_stream(calls), credits=AlwaysBound(),
         gate=AllowAllGate(),
+        rng=FixedRandom(),
     )
 
     result = await adapter.handle_event(make_event("在吗", at_bot=False))
@@ -196,6 +210,7 @@ async def test_duplicate_message_id_is_ignored() -> None:
     adapter = QQAdapter(
         make_settings(), sender, stream=make_stream(calls), credits=AlwaysBound(),
         gate=AllowAllGate(),
+        rng=FixedRandom(),
     )
     event = make_event("在吗")
 
@@ -217,6 +232,7 @@ async def test_prefix_trigger_strips_prefix() -> None:
         stream=make_stream(calls),
         credits=AlwaysBound(),
         gate=AllowAllGate(),
+        rng=FixedRandom(),
     )
 
     result = await adapter.handle_event(make_event("梅林 在吗", at_bot=False))
@@ -232,6 +248,7 @@ async def test_history_is_kept_per_group_and_user() -> None:
     adapter = QQAdapter(
         make_settings(qq_history_turns=2), sender, stream=make_stream(calls), credits=AlwaysBound(),
         gate=AllowAllGate(),
+        rng=FixedRandom(),
     )
 
     await adapter.handle_event(make_event("第一句", message_id=1))
@@ -253,6 +270,7 @@ async def test_admin_user_is_marked_for_prompt() -> None:
         stream=make_stream(calls),
         credits=AlwaysBound(),
         gate=AllowAllGate(),
+        rng=FixedRandom(),
     )
 
     await adapter.handle_event(make_event(user_id=456))
@@ -273,7 +291,14 @@ async def test_empty_reply_uses_agent_error_copy() -> None:
     ) -> AsyncIterator[dict[str, Any]]:
         yield {"type": "done"}
 
-    adapter = QQAdapter(make_settings(), sender, stream=empty_stream, credits=AlwaysBound(), gate=AllowAllGate())
+    adapter = QQAdapter(
+        make_settings(),
+        sender,
+        stream=empty_stream,
+        credits=AlwaysBound(),
+        gate=AllowAllGate(),
+        rng=FixedRandom(),
+    )
     result = await adapter.handle_event(make_event())
 
     assert result["handled"] is True

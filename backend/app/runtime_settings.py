@@ -70,6 +70,15 @@ class RuntimeSettings:
     appraisal_timeout_seconds: float
     appraisal_global_daily_budget: int
     appraisal_per_user_daily_budget: int
+    proactive_enabled: bool
+    proactive_tick_minutes: int
+    proactive_think_threshold: float
+    proactive_speak_threshold: float
+    proactive_min_interval_minutes: int
+    proactive_per_user_daily_limit: int
+    proactive_global_daily_limit: int
+    proactive_group_interval_minutes: int
+    proactive_group_daily_limit: int
 
 
 # 每个字段的合法范围。管理员接口和读取文件时都会用同一套规则，
@@ -86,13 +95,26 @@ _INT_RANGES: dict[str, tuple[int, int]] = {
     "agent_max_tool_calls": (1, 20),
     "appraisal_global_daily_budget": (0, 1_000_000),
     "appraisal_per_user_daily_budget": (0, 1000),
+    "proactive_tick_minutes": (5, 120),
+    "proactive_min_interval_minutes": (0, 10_080),
+    "proactive_per_user_daily_limit": (0, 100),
+    "proactive_global_daily_limit": (0, 100_000),
+    "proactive_group_interval_minutes": (0, 10_080),
+    "proactive_group_daily_limit": (0, 100),
 }
 # 布尔字段单独一套规则：bool 是 int 的子类，混进 _INT_RANGES 会被当成整数。
-_BOOL_FIELDS = {"qq_quota_shared", "qq_unlimited", "appraisal_enabled"}
+_BOOL_FIELDS = {
+    "qq_quota_shared",
+    "qq_unlimited",
+    "appraisal_enabled",
+    "proactive_enabled",
+}
 _SECONDS_RANGE = (5.0, 300.0)
 # 浮点字段各自的范围。评估超时故意比一轮对话短得多。
 _FLOAT_RANGES: dict[str, tuple[float, float]] = {
     "appraisal_timeout_seconds": (0.2, 5.0),
+    "proactive_think_threshold": (0.0, 1.0),
+    "proactive_speak_threshold": (0.0, 1.0),
 }
 # 模型名只允许常见字符，避免把换行/控制字符带进 HTTP 请求或日志。
 _MODEL_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,100}$")
@@ -117,6 +139,15 @@ def _defaults_from_settings(settings: Settings) -> RuntimeSettings:
         appraisal_timeout_seconds=settings.appraisal_timeout_seconds,
         appraisal_global_daily_budget=settings.appraisal_global_daily_budget,
         appraisal_per_user_daily_budget=settings.appraisal_per_user_daily_budget,
+        proactive_enabled=settings.proactive_enabled,
+        proactive_tick_minutes=settings.proactive_tick_minutes,
+        proactive_think_threshold=settings.proactive_think_threshold,
+        proactive_speak_threshold=settings.proactive_speak_threshold,
+        proactive_min_interval_minutes=settings.proactive_min_interval_minutes,
+        proactive_per_user_daily_limit=settings.proactive_per_user_daily_limit,
+        proactive_global_daily_limit=settings.proactive_global_daily_limit,
+        proactive_group_interval_minutes=settings.proactive_group_interval_minutes,
+        proactive_group_daily_limit=settings.proactive_group_daily_limit,
     )
 
 

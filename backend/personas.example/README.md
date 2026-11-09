@@ -55,6 +55,22 @@ data/personas/
 （心情变化，默认 0.03）。被忽略的一条有内容私聊不涨好感，只增加
 `dynamics.reply.debt_increment` 的回复债。
 
+主动消息和群内被指名的参数各有一个小节：
+
+| 字段 | 默认 | 建议范围 | 作用 |
+| --- | --- | --- | --- |
+| `proactive.recent_active_minutes` | 10 | 0–60 | 对方刚在这个频道说过话时，这轮不主动打扰 |
+| `proactive.repeat_similarity` | 0.6 | 0.4–0.8 | 越小越严格，和最近说过的话太像就这轮不发 |
+| `proactive.ignore_grace_hours` | 24 | 12–72 | 主动消息多久没回应才开始结算 |
+| `proactive.ignore_affection_points` | 0.2 | 0–1 | 确认被忽略时扣多少好感（会再乘注意力置信度） |
+| `proactive.ignore_security_points` | 0.5 | 0–2 | 确认被忽略时扣多少安全感 |
+| `proactive.compose_timeout_seconds` | 10 | 5–20 | 生成一条主动消息的超时，超时就这轮不发 |
+| `group.reply_floor` | 0.90 | 0.85–0.98 | 群内被 @ 或点名时回复概率的下限 |
+
+`ignore_grace_hours` 内的沉默**不扣分**：24 小时后如果对方一句话都没说，
+置信度是 0；只有在别处活跃或回到这个私聊才按证据扣。调低这个值会让
+梅林更“敏感”，不建议低于 12 小时。
+
 `background` 和 `rules` 会被**所有频道**读到，覆盖层只能往后追加、不能删除
 前面的段落。因此：
 

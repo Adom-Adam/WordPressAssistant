@@ -64,6 +64,19 @@ class RuntimeSettingsUpdate(BaseModel):
     appraisal_per_user_daily_budget: int | None = Field(
         default=None, ge=0, le=1000
     )
+    proactive_enabled: bool | None = None
+    proactive_tick_minutes: int | None = Field(default=None, ge=5, le=120)
+    proactive_think_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    proactive_speak_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    proactive_min_interval_minutes: int | None = Field(default=None, ge=0, le=10_080)
+    proactive_per_user_daily_limit: int | None = Field(default=None, ge=0, le=100)
+    proactive_global_daily_limit: int | None = Field(
+        default=None, ge=0, le=100_000
+    )
+    proactive_group_interval_minutes: int | None = Field(
+        default=None, ge=0, le=10_080
+    )
+    proactive_group_daily_limit: int | None = Field(default=None, ge=0, le=100)
     agent_max_model_calls: int | None = Field(default=None, ge=1, le=20)
     agent_max_tool_calls: int | None = Field(default=None, ge=1, le=20)
     agent_max_seconds: float | None = Field(default=None, ge=5, le=300)
@@ -87,6 +100,20 @@ class UserPatch(BaseModel):
     tier: Literal["user", "member"] | None = None
     duration_days: int | None = Field(default=None, ge=1, le=3650)
     note: str | None = Field(default=None, max_length=200)
+
+
+class QQGroupPolicyUpdate(BaseModel):
+    """管理员覆盖单个群的策略。
+
+    特意不给 `probabilistic`：群聊不走私聊的概率模型，全群概率回复
+    不在路线图上。群能配置的只有“怎么算被叫到”和“叫到了回不回”。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    trigger: Literal["mention", "keyword", "all"]
+    reply_policy: Literal["always", "silent"]
+    proactive: bool
 
 
 class BindCodeUpdate(BaseModel):
