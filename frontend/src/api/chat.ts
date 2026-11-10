@@ -10,6 +10,8 @@ export interface ChatPayload {
 export interface ChatOptions {
   /** WordPress 换来的 JWT；为空时不带 Authorization 头（本地开发）。 */
   token?: string | null;
+  /** 访客模式：走后端不需要登录的 /chat/anonymous。 */
+  anonymous?: boolean;
   signal?: AbortSignal;
 }
 
@@ -42,9 +44,13 @@ export async function streamChat(
   options: ChatOptions = {},
 ): Promise<ChatResult> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  if (options.token && !options.anonymous) {
+    headers.Authorization = `Bearer ${options.token}`;
+  }
 
-  const response = await fetch(`${apiBase}/chat`, {
+  // 访客走匿名接口：不要 Authorization（没有账号可带），也不要额度头。
+  const path = options.anonymous ? '/chat/anonymous' : '/chat';
+  const response = await fetch(`${apiBase}${path}`, {
     method: 'POST',
     headers,
     body: JSON.stringify(payload),

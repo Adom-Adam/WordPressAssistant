@@ -40,6 +40,13 @@ final class L2D_AI_Plugin {
 	const OPTION_SPINE     = 'l2d_ai_spine_model';
 	const OPTION_WIDTH     = 'l2d_ai_size_width';
 	const OPTION_HEIGHT    = 'l2d_ai_size_height';
+	/**
+	 * 匿名网页聊天的本地镜像（'1' / '0'）。
+	 *
+	 * 真正的开关在后端运行时设置里；这里存一份是为了让页面渲染时
+	 * 不必每次都去请求后端就知道“访客要不要先登录”。
+	 */
+	const OPTION_ANONYMOUS_WEB = 'l2d_ai_anonymous_web';
 	/** 没有单独设置时使用的人设名字。改人设时只需改这里或后台设置。 */
 	const DEFAULT_NAME     = '梅林';
 	const SETTINGS_GROUP   = 'l2d_ai_settings';
@@ -396,7 +403,12 @@ final class L2D_AI_Plugin {
 		}
 
 		return array(
-			'required'    => (bool) apply_filters( 'l2d_ai_auth_required', true ),
+			// 站长打开了匿名网页聊天，访客就不必先登录；后端仍然会按
+			// 自己的开关再判一次，两边任何一边关着都进不去。
+			'required'    => (bool) apply_filters(
+				'l2d_ai_auth_required',
+				'1' !== get_option( self::OPTION_ANONYMOUS_WEB, '0' )
+			),
 			'loggedIn'    => $logged_in,
 			'user'        => $user_data,
 			'loginUrl'    => wp_login_url( self::current_url() ),
@@ -1171,6 +1183,14 @@ final class L2D_AI_Plugin {
 		}
 
 		self::clear_backend_cache();
+
+		// 同步“访客能不能直接聊”：后端已经接受这次保存，本地镜像才更新。
+		// 放在 PUT 之后，保存失败时页面仍然显示旧的登录策略。
+		update_option(
+			self::OPTION_ANONYMOUS_WEB,
+			! empty( $_POST['anonymous_web_enabled'] ) ? '1' : '0'
+		);
+
 		wp_safe_redirect( self::settings_page_url( array( 'l2d-ai-saved' => '1' ) ) );
 		exit;
 	}

@@ -454,6 +454,13 @@ export class AssistantApp {
     // 等 token 的时间里，可能已经有一条消息在发送了。
     if (this.busy) return;
 
+    // 访客模式：没登录、也没被拦住（站长打开了匿名开关），走匿名接口。
+    // 判成“匿名”之后整条链路都不带凭证，后端也什么都不记。
+    const anonymous =
+      token === null &&
+      !this.config.auth.loggedIn &&
+      Boolean(this.config.auth.tokenUrl);
+
     this.input.value = '';
     this.autoGrowInput();
     this.appendMessage('user', text);
@@ -499,7 +506,7 @@ export class AssistantApp {
             this.scrollToBottom(true);
           },
         }),
-        { token, signal: this.abort.signal },
+        { token, anonymous, signal: this.abort.signal },
       );
       if (result.quota) {
         this.quota = result.quota;
@@ -515,15 +522,22 @@ export class AssistantApp {
       typing.remove();
       console.error('[l2d-ai] 对话失败', error);
       bubble.classList.add('is-error');
-      if (error instanceof ChatHttpError && (error.status === 401 || error.status === 403)) {
+      if (error instanceof ChatHttpError && error.status === 403 && anonymous) {
+        // 匿名开关刚被关掉：这不是登录过期，别让访客去刷新重试。
+        bubble.textContent = '访客聊天暂时关掉了，登录一下就能继续聊～';
+      } else if (
+        error instanceof ChatHttpError &&
+        (error.status === 401 || error.status === 403)
+      ) {
         resetAuthToken();
         bubble.textContent = '登录状态过期了，刷新一下页面再和我聊天吧～';
       } else if (error instanceof ChatHttpError && error.status === 429) {
         // 后端在流开始前就返回 429，说明今天这条额度已经用完。
         // detail 会区分“个人额度”和“全站额度”，直接展示更准确。
+        // 访客没有额度条可刷新，refreshQuota 对他们没有意义。
         bubble.textContent =
           error.detail || '今天的聊天额度已经用完啦，明天再来找我玩吧～';
-        void this.refreshQuota();
+        if (!anonymous) void this.refreshQuota();
       } else if (error instanceof ChatHttpError && error.status === 503) {
         // 服务端没配 JWT 密钥，用户自己解决不了，提示联系站长。
         bubble.textContent = `${this.config.assistantName}还没准备好登录凭证，先联系站长看看吧～`;
