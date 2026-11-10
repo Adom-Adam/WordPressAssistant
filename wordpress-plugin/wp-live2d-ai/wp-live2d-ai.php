@@ -35,7 +35,7 @@ require_once __DIR__ . '/includes/class-l2d-ai-groups.php';
 
 final class L2D_AI_Plugin {
 
-	const VERSION          = '0.4.0';
+	const VERSION          = '0.5.0';
 	const OPTION_API_BASE  = 'l2d_ai_api_base';
 	const OPTION_NAME      = 'l2d_ai_assistant_name';
 	const OPTION_SIZE      = 'l2d_ai_size_preset';
