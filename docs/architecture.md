@@ -387,6 +387,86 @@ QQ 有两种计法，由后台开关 `qq_quota_shared` 选择：
 本身可以在关闭时空转。发送假设**单进程单 worker**：多个后端进程会各自算一遍候选并
 各自发送，导致重复。
 
+## 身份与名单（阶段 5a）
+
+### person_key 与别名
+
+一个人的身份只有一个字符串：
+
+| 前缀 | 含义 | 有没有 WordPress 账号 |
+| --- | --- | --- |
+| `wp:<id>` | 博客用户 | 有 |
+| `qq:<uin>` | QQ 号 | 不一定——白名单里的号没有 |
+
+所有按人存的表（`persons`、`memories`、`events`、`relationship_state`、`decision_log` …）
+都用 `person_key` 作键。`person_aliases` 记下 `qq:<uin> → wp:<id>` 这类“同一个人”
+的映射：
+
+- `canonical_key(conn, key)`：顺着别名表走到最终身份（没别名就返回原值）；
+  所有**读**走它，所以一个先聊过 QQ、后来绑定的账号，历史记忆不会分裂成两份；
+- `merge_person(conn, source, target)`：把一个身份下的所有行物理搬到另一个身份下，
+  再写一条别名。这是通用入口，新通道（微信、Telegram）只需要一次适配 + 一次合并，
+  不必为每个通道写迁移；
+- 已经有主的 source（`canonical != raw`）拒绝合并，避免换绑时把旧账号的记忆拖进新账号；
+- 换绑时先删掉本组内旧的 `qq:`/`wp:` 别名，否则旧账号的 `linked_keys` 会指向新账号。
+
+### 新表与后台接口
+
+| 表 | 内容 |
+| --- | --- |
+| `person_aliases` | `raw_key`、`canonical_key`、来源、创建时间 |
+| `qq_whitelist` | 未绑定 QQ 的名单：`qq_uin`、角色、备注 |
+| `qq_allowed_groups` | 群白名单**运行时真值**（启动时从 `QQ_ALLOWED_GROUPS` 播种一次） |
+| `qq_group_policies` | 每群的 `trigger` / `reply_policy` / `proactive`，移出名单时保留 |
+| `anonymous_usage` / `anonymous_global_usage` | 匿名额度计数，**在额度库**（`QUOTA_DB_PATH`），不在记忆库 |
+
+后台接口（都需要管理员 JWT，由插件服务器端签发）：
+
+```
+GET    /admin/roles?query=       列出关系角色 + 当前四档上限
+PUT    /admin/roles              设置某人的角色
+DELETE /admin/roles/{wp_id}      恢复普通人
+
+GET    /admin/qq-whitelist       名单 + 每行的绑定状态
+POST   /admin/qq-whitelist       加号（已绑定的号返回 409）
+PUT    /admin/qq-whitelist/{qq}
+DELETE /admin/qq-whitelist/{qq}          移出名单，数据休眠
+DELETE /admin/qq-whitelist/{qq}/data     连同记忆、事件、关系一起删除
+
+GET    /admin/qq-groups
+POST   /admin/qq-groups
+PUT    /admin/qq-groups/{gid}
+DELETE /admin/qq-groups/{gid}    只关第一层，策略行保留
+```
+
+删除一个人的数据要覆盖：`persons`、`person_aliases`、`events`、`memories`、
+`memories_vec`、`relationship_state`、`relationship_events`、`decision_log`、
+`appraisal_log`、`appraisal_usage`、`pending_topics`、`proactive_log`。
+`relationship_state` 不在“按 person_key 直接删”的通用清单里（它按 persona 逐行合并），
+单独一条 DELETE——漏了它会让主动消息继续找一个已经被删掉的人。
+
+### 匿名路径的边界
+
+匿名是一次性对话，不是“没有名字的用户”。`POST /api/chat/anonymous` 复用同一条
+SSE 管线，但一个 `anonymous=True` 就把所有持久化关掉：
+
+| 行为 | 登录用户 | 匿名访客 |
+| --- | --- | --- |
+| 读记忆 / 注入关系状态 | 是 | 否 |
+| 写 `events` / `memories` | 是 | 否 |
+| 建关系、跑评估、写决策日志 | 是 | 否 |
+| 进群时间线、被主动找 | 是 | 否 |
+| 额度 | 登录额度 + 全站额度 | 匿名单人额度 + 匿名全站额度 |
+| 计数器 | `wp_user_id` | `web:sha256(ip:secret)[:32]` |
+
+- IP 只从 `X-Forwarded-For` 的**最后一个**地址取（Nginx 追加的那一段），
+  取不到就退回连接地址；存库前哈希，原文和内容都不落库；
+- 额度开关的语义是“0 = 这个入口关闭”，单人额度满了返回 429 并带 `Retry-After`，
+  全站满了用另一句提示；
+- 开关和提示文案都在 WP 后台，`auth_config()` 把 `anonymous_web_enabled` 同步成
+  访客可见的登录门（`l2d_ai_auth_required` 反过来取它的反值）。同步只在后端 PUT
+  成功之后做，保存失败时页面仍显示旧策略。
+
 ## 安全
 
 - DeepSeek Key 只在后端 `.env`，前端与 WordPress 数据库都不保存；
