@@ -201,3 +201,17 @@ class Citation(BaseModel):
     excerpt: str | None = None
     image_url: str | None = None
     kind: Literal["article", "image"] | None = None
+
+
+# 关系角色。只能在这四个里选：后台加角色必须同时在人设里写上限，
+# 否则 `role_config` 会静默回退 normal，后台看起来“改了没生效”。
+RoleName = Literal["owner", "exception", "special", "normal"]
+
+
+class RoleUpdate(BaseModel):
+    """后台把某个 WordPress 账号设成某个关系角色。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    wp_user_id: int = Field(ge=1)
+    role: RoleName

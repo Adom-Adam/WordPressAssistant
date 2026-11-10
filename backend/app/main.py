@@ -22,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.admin import router as admin_router
 from app.api.admin_qq import router as admin_qq_router
+from app.api.admin_roles import router as admin_roles_router
 from app.api.admin_users import router as admin_users_router
 from app.api.chat import router as chat_router
 from app.api.me_account import router as me_account_router
@@ -121,6 +122,8 @@ app.include_router(admin_router, prefix="/api")
 app.include_router(admin_users_router, prefix="/api")
 # 每个 QQ 群的触发/回复/主动策略（同样要求 admin=true）。
 app.include_router(admin_qq_router, prefix="/api")
+# 关系角色名单（owner/exception/special/normal），同样要求 admin=true。
+app.include_router(admin_roles_router, prefix="/api")
 # NapCat 的 OneBot 事件回调。默认关闭，关闭时路由返回 404。
 app.include_router(qq_router, prefix="/api")
 
