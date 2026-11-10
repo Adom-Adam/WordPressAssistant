@@ -36,6 +36,7 @@ from app.proactive.checks import (
 from app.proactive.message import ProactiveWriter
 from app.proactive.pending import mark_topic_sent, open_topic
 from app.proactive.settle import settle_ignores
+from app.qq_whitelist import is_whitelisted
 from app.proactive.store import (
     last_sent_at,
     record_proactive,
@@ -184,19 +185,33 @@ class ProactiveScheduler:
                     )
                 )
 
-            # QQ 可能已经换绑到另一个博客账号：绝不能把消息发给新主人。
+            # QQ 可能已经换绑：绝不能把消息发给新主人。
+            # `qq:` 身份本来就没有账号，一旦绑上就说明该按 wp: 走了。
             binding = self.credits.binding_of_qq(cand.qq_uin)
-            if binding is None or binding.user_id != cand.wp_user_id:
-                results.append(
-                    SendResult(
-                        cand.person_key,
-                        channel,
-                        "",
-                        "skipped",
-                        "binding_changed",
+            if cand.person_key.startswith("wp:"):
+                if binding is None or binding.user_id != cand.wp_user_id:
+                    results.append(
+                        SendResult(
+                            cand.person_key, channel, "", "skipped", "binding_changed"
+                        )
                     )
-                )
-                continue
+                    continue
+            else:
+                if binding is not None:
+                    results.append(
+                        SendResult(
+                            cand.person_key, channel, "", "skipped", "binding_changed"
+                        )
+                    )
+                    continue
+                # 名单可能在算出候选人之后被改掉，发送前再确认一次。
+                if not is_whitelisted(conn, cand.qq_uin):
+                    results.append(
+                        SendResult(
+                            cand.person_key, channel, "", "skipped", "not_whitelisted"
+                        )
+                    )
+                    continue
 
             thought = pick_thought(
                 cand.thoughts, runtime.proactive_speak_threshold

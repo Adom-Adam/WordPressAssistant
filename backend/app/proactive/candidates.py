@@ -83,7 +83,8 @@ class Candidate:
     persona_key: str
     person_key: str
     qq_uin: str
-    wp_user_id: int
+    # `wp:` 身份是博客账号；白名单里的 `qq:` 身份没有账号，这里就是 None。
+    wp_user_id: int | None
     state: RelationshipState
     base_score: float
     thoughts: tuple[Thought, ...]
@@ -227,7 +228,14 @@ def candidates(
              FROM relationship_state rs
              JOIN persons p ON p.person_key = rs.person_key
             WHERE rs.persona_key = ? AND rs.updated_at >= ?
-              AND p.wp_user_id IS NOT NULL
+              AND (
+                (p.wp_user_id IS NOT NULL AND rs.person_key LIKE 'wp:%')
+                OR (
+                  rs.person_key LIKE 'qq:%'
+                  AND rs.last_reply_at IS NOT NULL
+                  AND p.qq_uin IN (SELECT qq_uin FROM qq_whitelist)
+                )
+              )
             ORDER BY rs.updated_at DESC
             LIMIT ?""",
         (persona_key, since, limit),
@@ -237,8 +245,15 @@ def candidates(
     for row in rows:
         person_key = row["person_key"]
         qq_uin = str(row["qq_uin"] or "").strip()
-        # 没绑定 QQ 的人收不到消息；qq: 开头的是没绑定的临时身份。
-        if not qq_uin or not person_key.startswith("wp:"):
+        # 没有 QQ 号就发不出去。
+        if not qq_uin:
+            continue
+        # `wp:` 是博客账号；`qq:` 只可能是白名单里的号（SQL 已经筛过）。
+        if person_key.startswith("wp:"):
+            wp_user_id: int | None = int(row["wp_user_id"])
+        elif person_key.startswith("qq:"):
+            wp_user_id = None
+        else:
             continue
 
         state = decay_state(
@@ -284,7 +299,7 @@ def candidates(
                 persona_key=persona_key,
                 person_key=person_key,
                 qq_uin=qq_uin,
-                wp_user_id=int(row["wp_user_id"]),
+                wp_user_id=wp_user_id,
                 state=state,
                 base_score=base,
                 thoughts=thoughts,
