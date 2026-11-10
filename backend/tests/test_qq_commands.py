@@ -120,3 +120,30 @@ def test_private_only_command_in_group(store: CreditStore) -> None:
 
     assert reply == commands.PRIVATE_ONLY
     assert store.binding_of_qq("10001") is None
+
+
+# ----------------------------------------------------------------------
+# 引导文案：梅林的人设 + 不含“额度”这类系统词
+# ----------------------------------------------------------------------
+def test_guide_copy_uses_library_metaphor_and_never_says_quota():
+    texts = [
+        commands.private_guide("https://blog.example"),
+        commands.anon_first_hint("https://blog.example"),
+        commands.anon_memory_hint("https://blog.example"),
+        commands.GROUP_GUIDE,
+        commands.ANON_QUOTA_USER,
+        commands.ANON_QUOTA_GLOBAL,
+        commands.ANON_GROUP_ASK,
+    ]
+    for text in texts:
+        assert "额度" not in text
+    assert "图书馆" in commands.private_guide("https://blog.example")
+    assert "登记" in commands.private_guide("https://blog.example")
+    assert "记住" in commands.anon_first_hint("https://blog.example")
+
+
+def test_guide_texts_covers_every_user_facing_guide():
+    # GUIDE_TEXTS 存的是不带站点地址的默认渲染结果
+    assert commands.PRIVATE_GUIDE in commands.GUIDE_TEXTS
+    assert commands.GROUP_GUIDE in commands.GUIDE_TEXTS
+    assert commands.ANON_QUOTA_USER in commands.GUIDE_TEXTS

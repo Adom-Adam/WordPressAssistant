@@ -109,7 +109,11 @@ async def test_private_message_sets_attention_one(tmp_path: Any) -> None:
 @async_test
 async def test_tired_silence_leaves_a_pending_topic(tmp_path: Any) -> None:
     """累到没接话时，把这句话留成待续话题——以后的主动消息才有话说。"""
-    from app.relationship.state import RelationshipState, save_state
+    from app.relationship.state import RelationshipState, now_iso, save_state
+
+    # 时间戳必须取“现在”：疲劳按小时半衰，写死一个过去的时间点，
+    # 隔一天再跑疲劳就已经衰减光了，测试会随日期变红。
+    stamp = now_iso()
 
     conn = memory_db.connect()
     try:
@@ -132,9 +136,9 @@ async def test_tired_silence_leaves_a_pending_topic(tmp_path: Any) -> None:
                 last_proactive_at=None,
                 last_reply_at=None,
                 attention_confidence=0.0,
-                updated_at="2026-11-09T12:00:00+00:00",
+                updated_at=stamp,
                 conflict_stage="normal",
-                stage_since="2026-11-09T12:00:00+00:00",
+                stage_since=stamp,
                 scar_level=0.0,
             ),
         )

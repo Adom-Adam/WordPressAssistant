@@ -43,15 +43,27 @@ COMMAND_PATTERN = re.compile(r"^\s*[\\/]\s*(?P<cmd>[A-Za-z一-龥]+)\s*(?P<args>
 # 站点地址不写死在代码里：仓库按公开处理，域名属于部署信息。
 # 后端 `.env` 的 WP_SITE_URL 本来就要填（知识库同步、站内跳转都用它），
 # 引导文案直接复用它；没配就退化成不带链接的版本，流程照样说得清。
+#
+# 这些常量是**默认值**：后台可以逐条覆盖（见 channels/qq/copy.py）。
+# 替换占位符用 str.replace 而不是 str.format —— 管理员输入的花括号
+# 不该让一条回复变成 500。
 _PRIVATE_GUIDE = (
-    "诶，我还不太认识你呢。想和我聊天的话，先回图书馆一趟{place}"
+    "唔……我还不太认识你呢。想让我记住你的话，回图书馆里登记一下吧{place}"
     "——登录之后打开「个人资料」，"
-    "那里有张写着「Live2D 小助手 · QQ 绑定」的小卡片，里面会有一串绑定码。"
-    "拿到以后回来跟我说一句「/绑定 1234-5678」，我就记住你啦。"
+    "那张写着「Live2D 小助手 · QQ 绑定」的小卡片里有一串咒文。"
+    "拿到以后回来对我说「/绑定 1234-5678」，我就把你记在心里啦。"
 )
 
+
+def _render(template: str, site_url: str = "") -> str:
+    """把 `{place}` 换成“，地方在这里：<站点>/”，没有站点就换成空串。"""
+    site = (site_url or "").strip().rstrip("/")
+    place = f"，地方在这里：{site}/" if site else ""
+    return str(template or "").replace("{place}", place)
+
+
 # 没传站点地址时的默认文案，也是测试里比对的基准。
-PRIVATE_GUIDE = _PRIVATE_GUIDE.format(place="")
+PRIVATE_GUIDE = _render(_PRIVATE_GUIDE)
 
 
 def private_guide(site_url: str = "") -> str:
@@ -60,12 +72,10 @@ def private_guide(site_url: str = "") -> str:
     `site_url` 来自配置（`WP_SITE_URL`），末尾的 `/` 会被规整掉，
     避免出现 `https://example.com//`。
     """
-    site = (site_url or "").strip().rstrip("/")
-    place = f"，地方在这里：{site}/" if site else ""
-    return _PRIVATE_GUIDE.format(place=place)
+    return _render(_PRIVATE_GUIDE, site_url)
 
 
-GROUP_GUIDE ="这位朋友，我们好像还没正式认识呢。悄悄来私聊我一下，我告诉你怎么打招呼。"
+GROUP_GUIDE = "这位朋友，我们好像还没正式认识呢。悄悄来私聊我一下，我告诉你怎么在图书馆里留个名字。"
 BIND_OK = "记住你啦，以后随时都可以来找我说话。群聊里记得 @ 我一声。"
 BIND_ALREADY = "我早就记住你啦。要是想换绑，得先回博客那边解绑一下哦。"
 BIND_INVALID = "这串咒文对不上呢……回博客的个人资料页看看最新的绑定码吧。"
@@ -75,6 +85,45 @@ PRIVATE_ONLY = "私聊我一下，我把流程告诉你。"
 QUOTA_USER = "今天的魔力用完了，明天再来找我吧。"
 QUOTA_GLOBAL = "今天大家聊得太热闹，我的魔力见底了，明天再来吧。"
 AGENT_ERROR = "抱歉，我这边好像出了点岔子，稍后再来找我看看吧。"
+
+# ----------------------------------------------------------------------
+# 匿名模式：不登记也能聊，但记性只到今晚
+# ----------------------------------------------------------------------
+# 这里刻意不提“额度”“上限”这类词。用户看到的是一个愿意陪聊、
+# 但确实会忘记的人，而不是一个被系统拒绝的游客。
+ANON_QUOTA_USER = "今天的悄悄话说到这里吧，明天再来找我。"
+ANON_QUOTA_GLOBAL = "今天来找我的人太多啦，我有点累了，明天再聊吧。"
+ANON_GROUP_ASK = "想让我记住你的话，私下来图书馆里登记一下吧。"
+
+
+def anon_first_hint(site_url: str = "") -> str:
+    """匿名私聊的第一次（每 7 天一次）提醒：我不会记得你。"""
+    return _render(
+        "对了，我今晚记不住太多事。想让我以后都记住你，"
+        "去图书馆里登记一下吧{place}。",
+        site_url,
+    )
+
+
+def anon_memory_hint(site_url: str = "") -> str:
+    """用户主动问起“你还记得吗”时的回答补充。"""
+    return _render(
+        "这件事我今晚记得，明天就忘啦。想让我一直记住，"
+        "去图书馆里登记一下吧{place}。",
+        site_url,
+    )
+
+
+# 测试用：所有会被用户看到的引导/匿名文案都要过一遍“不含额度”的检查。
+GUIDE_TEXTS: tuple[str, ...] = (
+    PRIVATE_GUIDE,
+    GROUP_GUIDE,
+    ANON_QUOTA_USER,
+    ANON_QUOTA_GLOBAL,
+    ANON_GROUP_ASK,
+    anon_first_hint(""),
+    anon_memory_hint(""),
+)
 
 
 @dataclass(frozen=True, slots=True)

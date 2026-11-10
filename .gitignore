@@ -258,3 +258,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Superpowers 执行计划的临时工作区（ledger 等）
+.superpowers/
