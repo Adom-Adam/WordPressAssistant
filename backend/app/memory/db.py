@@ -255,6 +255,13 @@ CREATE TABLE IF NOT EXISTS qq_whitelist (
     added_by TEXT,
     added_at TEXT NOT NULL
 );
+
+-- 允许梅林出现的群。首次启动从 `QQ_ALLOWED_GROUPS` 播种一次，
+-- 之后只在后台增删，重启不会被环境变量覆盖。
+CREATE TABLE IF NOT EXISTS qq_allowed_groups (
+    group_id INTEGER PRIMARY KEY,
+    added_at TEXT NOT NULL
+);
 """
 
 

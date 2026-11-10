@@ -31,7 +31,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from app.agent.core import stream_reply
-from app.channels.qq import commands
+from app.channels.qq import commands, group_allowlist
 from app.channels.qq.client import OneBotError, OneBotTransport
 from app.channels.qq.commands import CommandContext, dispatch, parse_command
 from app.channels.qq.conversation import ConversationCoordinator
@@ -181,7 +181,7 @@ class QQAdapter:
             return {"handled": False, "reason": "self_message"}
 
         if incoming.message_type == "group":
-            if incoming.group_id not in self.settings.qq_allowed_group_ids:
+            if incoming.group_id not in await self._allowed_group_ids():
                 return {"handled": False, "reason": "group_not_allowed"}
             policy: GroupPolicy | None = self._group_policy(incoming.group_id)
             match = self._match_trigger(
@@ -1245,6 +1245,27 @@ class QQAdapter:
         except Exception:  # noqa: BLE001 - 策略库不可用不该影响聊天
             logger.warning("读取群策略失败 group=%s，回退到默认策略", group_id, exc_info=True)
             return fallback
+
+    async def _allowed_group_ids(self) -> set[int]:
+        """群白名单以运行时表为准；环境变量只在首次播种时起作用。
+
+        读不出来时返回空集合（哪个群都不去）：默认拒绝比误回陌生群安全。
+        """
+        try:
+            return await asyncio.to_thread(self._read_allowed_group_ids)
+        except Exception:  # noqa: BLE001 - 白名单库故障不该让进程崩
+            logger.warning("读取群白名单失败，本轮不处理群消息", exc_info=True)
+            return set()
+
+    def _read_allowed_group_ids(self) -> set[int]:
+        conn = memory_db.connect()
+        try:
+            memory_db.init_schema(conn)
+            return group_allowlist.allowed_group_ids(
+                conn, env_groups=self.settings.qq_allowed_group_ids
+            )
+        finally:
+            conn.close()
 
     def _is_duplicate(self, group_id: int, message_id: int | None) -> bool:
         """记录并判断 (群号, message_id) 是否已经处理过。"""

@@ -217,6 +217,14 @@ class RoleUpdate(BaseModel):
     role: RoleName
 
 
+class QQGroupAdd(BaseModel):
+    """把一个群加进运行时白名单。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    group_id: int = Field(gt=0)
+
+
 class QQWhitelistAdd(BaseModel):
     """把一个未绑定的 QQ 号加进后台白名单。
 

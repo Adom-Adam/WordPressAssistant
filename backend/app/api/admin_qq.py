@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.deps import require_admin
 from app.auth import AuthUser
+from app.channels.qq import group_allowlist
 from app.channels.qq.group_policy import (
     GroupPolicy,
     default_policy,
@@ -25,7 +26,7 @@ from app.channels.qq.group_policy import (
 )
 from app.config import get_settings
 from app.memory import db as memory_db
-from app.schemas import QQGroupPolicyUpdate
+from app.schemas import QQGroupAdd, QQGroupPolicyUpdate
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ def _read_all() -> list[dict[str, object]]:
                 load_policy(conn, group_id, fallback=fallback),
                 source="db" if group_id in stored else "default",
             )
-            for group_id in sorted(settings.qq_allowed_group_ids)
+            for group_id in sorted(group_allowlist.allowed_group_ids(conn))
         ]
     finally:
         conn.close()
@@ -73,7 +74,46 @@ def _write(group_id: int, policy: GroupPolicy) -> None:
     conn = memory_db.connect()
     try:
         memory_db.init_schema(conn)
+        # 名单以运行时表为准：后台刚加的群不用重启就能配策略。
+        if group_id not in group_allowlist.allowed_group_ids(conn):
+            raise HTTPException(status_code=422, detail="群不在白名单里")
         save_policy(conn, group_id, policy)
+    finally:
+        conn.close()
+
+
+def _one(group_id: int) -> dict[str, object]:
+    """读一个群当前生效的策略，带上它是不是后台写过的。"""
+    fallback = default_policy(get_settings().qq_trigger)
+    conn = memory_db.connect()
+    try:
+        memory_db.init_schema(conn)
+        row = conn.execute(
+            "SELECT 1 FROM qq_group_policies WHERE group_id = ?", (group_id,)
+        ).fetchone()
+        return _serialize(
+            group_id,
+            load_policy(conn, group_id, fallback=fallback),
+            source="db" if row is not None else "default",
+        )
+    finally:
+        conn.close()
+
+
+def _add(group_id: int) -> None:
+    conn = memory_db.connect()
+    try:
+        memory_db.init_schema(conn)
+        group_allowlist.add_group(conn, group_id)
+    finally:
+        conn.close()
+
+
+def _remove(group_id: int) -> None:
+    conn = memory_db.connect()
+    try:
+        memory_db.init_schema(conn)
+        group_allowlist.remove_group(conn, group_id)
     finally:
         conn.close()
 
@@ -98,10 +138,6 @@ async def update_group_policy(
     _admin: AuthUser = Depends(require_admin),
 ) -> dict[str, object]:
     """覆盖一个群的策略。群不在白名单里直接拒绝。"""
-    settings = get_settings()
-    if group_id not in settings.qq_allowed_group_ids:
-        raise HTTPException(status_code=422, detail="群不在白名单里")
-
     policy = GroupPolicy(
         trigger=payload.trigger,
         reply_policy=payload.reply_policy,
@@ -109,8 +145,39 @@ async def update_group_policy(
     )
     try:
         await asyncio.to_thread(_write, group_id, policy)
+    except HTTPException:
+        raise
     except Exception:  # noqa: BLE001 - 写不进去就别假装成功
         logger.exception("写入群策略失败 group=%s", group_id)
         raise HTTPException(status_code=503, detail="策略库暂不可用") from None
 
     return _serialize(group_id, policy, source="db")
+
+
+@router.post("/admin/qq-groups")
+async def add_group(
+    payload: QQGroupAdd,
+    _admin: AuthUser = Depends(require_admin),
+) -> dict[str, object]:
+    """把一个群加进白名单；已经在名单里也算成功（幂等）。"""
+    try:
+        await asyncio.to_thread(_add, payload.group_id)
+        return await asyncio.to_thread(_one, payload.group_id)
+    except HTTPException:
+        raise
+    except Exception:  # noqa: BLE001
+        logger.exception("添加群失败 group=%s", payload.group_id)
+        raise HTTPException(status_code=503, detail="策略库暂不可用") from None
+
+
+@router.delete("/admin/qq-groups/{group_id}", status_code=204)
+async def remove_group(
+    group_id: int,
+    _admin: AuthUser = Depends(require_admin),
+) -> None:
+    """移出白名单。这个群的策略行保留，重新加回来时配置还在。"""
+    try:
+        await asyncio.to_thread(_remove, group_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("移除群失败 group=%s", group_id)
+        raise HTTPException(status_code=503, detail="策略库暂不可用") from None

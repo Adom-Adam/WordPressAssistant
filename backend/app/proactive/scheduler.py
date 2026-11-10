@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
+from app.channels.qq import group_allowlist
 from app.channels.qq.group_policy import default_policy, load_policy
 from app.memory import db as memory_db
 from app.proactive.candidates import pick_thought
@@ -379,7 +380,11 @@ class ProactiveScheduler:
         fallback = default_policy(self.settings.qq_trigger)
         results: list[SendResult] = []
 
-        for gid in sorted(self.settings.qq_allowed_group_ids):
+        # 名单以运行时表为准（后台增删立刻生效），环境变量只在首次播种时用。
+        allowed = group_allowlist.allowed_group_ids(
+            conn, env_groups=self.settings.qq_allowed_group_ids
+        )
+        for gid in sorted(allowed):
             target = f"group:{gid}"
 
             def skip(reason: str, *, kind: str = "spontaneous") -> None:

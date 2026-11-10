@@ -110,3 +110,50 @@ def test_put_rejects_unknown_trigger(client):
 def test_non_admin_cannot_read(client):
     response = client.get("/api/admin/qq-groups", headers=auth_header(admin=False))
     assert response.status_code == 403
+
+
+def test_add_and_remove_group_from_admin(client):
+    response = client.post(
+        "/api/admin/qq-groups",
+        headers=auth_header(),
+        json={"group_id": 555},
+    )
+    assert response.status_code == 200
+
+    groups = client.get("/api/admin/qq-groups", headers=auth_header()).json()["groups"]
+    assert any(item["group_id"] == 555 for item in groups)
+
+    assert (
+        client.delete("/api/admin/qq-groups/555", headers=auth_header()).status_code
+        == 204
+    )
+    groups = client.get("/api/admin/qq-groups", headers=auth_header()).json()["groups"]
+    assert all(item["group_id"] != 555 for item in groups)
+
+
+def test_policy_check_follows_runtime_allowlist(client):
+    """策略接口的“在不在名单里”看运行时名单，不看环境变量。"""
+    body = {"trigger": "mention", "reply_policy": "always", "proactive": False}
+    assert (
+        client.put("/api/admin/qq-groups/777", json=body, headers=auth_header()).status_code
+        == 422
+    )
+
+    client.post("/api/admin/qq-groups", json={"group_id": 777}, headers=auth_header())
+    assert (
+        client.put("/api/admin/qq-groups/777", json=body, headers=auth_header()).status_code
+        == 200
+    )
+
+    client.delete("/api/admin/qq-groups/777", headers=auth_header())
+    assert (
+        client.put("/api/admin/qq-groups/777", json=body, headers=auth_header()).status_code
+        == 422
+    )
+
+
+def test_add_group_rejects_zero(client):
+    response = client.post(
+        "/api/admin/qq-groups", headers=auth_header(), json={"group_id": 0}
+    )
+    assert response.status_code == 422
