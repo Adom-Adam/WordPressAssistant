@@ -96,22 +96,30 @@ ANON_QUOTA_GLOBAL = "今天来找我的人太多啦，我有点累了，明天�
 ANON_GROUP_ASK = "想让我记住你的话，私下来图书馆里登记一下吧。"
 
 
+# 模板保留 `{place}`，后台覆盖与默认值走同一条渲染路径（copy.QQCopy）。
+_ANON_FIRST_HINT = (
+    "对了，我今晚记不住太多事。想让我以后都记住你，"
+    "去图书馆里登记一下吧{place}。"
+)
+_ANON_MEMORY_HINT = (
+    "这件事我今晚记得，明天就忘啦。想让我一直记住，"
+    "去图书馆里登记一下吧{place}。"
+)
+
+# 带 `{place}` 的原始模板：`channels/qq/copy.py` 的默认值从这里取。
+PRIVATE_GUIDE_TEMPLATE = _PRIVATE_GUIDE
+ANON_FIRST_HINT_TEMPLATE = _ANON_FIRST_HINT
+ANON_MEMORY_HINT_TEMPLATE = _ANON_MEMORY_HINT
+
+
 def anon_first_hint(site_url: str = "") -> str:
     """匿名私聊的第一次（每 7 天一次）提醒：我不会记得你。"""
-    return _render(
-        "对了，我今晚记不住太多事。想让我以后都记住你，"
-        "去图书馆里登记一下吧{place}。",
-        site_url,
-    )
+    return _render(_ANON_FIRST_HINT, site_url)
 
 
 def anon_memory_hint(site_url: str = "") -> str:
     """用户主动问起“你还记得吗”时的回答补充。"""
-    return _render(
-        "这件事我今晚记得，明天就忘啦。想让我一直记住，"
-        "去图书馆里登记一下吧{place}。",
-        site_url,
-    )
+    return _render(_ANON_MEMORY_HINT, site_url)
 
 
 # 测试用：所有会被用户看到的引导/匿名文案都要过一遍“不含额度”的检查。

@@ -85,6 +85,13 @@ class RuntimeSettingsUpdate(BaseModel):
     anonymous_global_daily_quota: int | None = Field(
         default=None, ge=0, le=1_000_000
     )
+    copy_private_guide: str | None = Field(default=None, max_length=500)
+    copy_group_guide: str | None = Field(default=None, max_length=500)
+    copy_anon_first_hint: str | None = Field(default=None, max_length=500)
+    copy_anon_memory_hint: str | None = Field(default=None, max_length=500)
+    copy_anon_quota_user: str | None = Field(default=None, max_length=500)
+    copy_anon_quota_global: str | None = Field(default=None, max_length=500)
+    copy_anon_group_ask: str | None = Field(default=None, max_length=500)
     agent_max_model_calls: int | None = Field(default=None, ge=1, le=20)
     agent_max_tool_calls: int | None = Field(default=None, ge=1, le=20)
     agent_max_seconds: float | None = Field(default=None, ge=5, le=300)

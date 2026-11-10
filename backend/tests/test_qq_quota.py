@@ -137,6 +137,13 @@ def make_runtime(**overrides) -> RuntimeSettings:
         anonymous_web_daily_quota=20,
         anonymous_qq_daily_quota=20,
         anonymous_global_daily_quota=300,
+        copy_private_guide="",
+        copy_group_guide="",
+        copy_anon_first_hint="",
+        copy_anon_memory_hint="",
+        copy_anon_quota_user="",
+        copy_anon_quota_global="",
+        copy_anon_group_ask="",
     )
     base.update(overrides)
     return RuntimeSettings(**base)

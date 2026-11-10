@@ -85,6 +85,13 @@ class RuntimeSettings:
     anonymous_web_daily_quota: int
     anonymous_qq_daily_quota: int
     anonymous_global_daily_quota: int
+    copy_private_guide: str
+    copy_group_guide: str
+    copy_anon_first_hint: str
+    copy_anon_memory_hint: str
+    copy_anon_quota_user: str
+    copy_anon_quota_global: str
+    copy_anon_group_ask: str
 
 
 # 每个字段的合法范围。管理员接口和读取文件时都会用同一套规则，
@@ -130,6 +137,17 @@ _FLOAT_RANGES: dict[str, tuple[float, float]] = {
 }
 # 模型名只允许常见字符，避免把换行/控制字符带进 HTTP 请求或日志。
 _MODEL_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,100}$")
+# 文案覆盖字段：只限长度，不做内容过滤（文案是站长自己写的）。
+_COPY_MAX_CHARS = 500
+_COPY_FIELDS = {
+    "copy_private_guide",
+    "copy_group_guide",
+    "copy_anon_first_hint",
+    "copy_anon_memory_hint",
+    "copy_anon_quota_user",
+    "copy_anon_quota_global",
+    "copy_anon_group_ask",
+}
 
 
 def _defaults_from_settings(settings: Settings) -> RuntimeSettings:
@@ -166,6 +184,13 @@ def _defaults_from_settings(settings: Settings) -> RuntimeSettings:
         anonymous_web_daily_quota=settings.anonymous_web_daily_quota,
         anonymous_qq_daily_quota=settings.anonymous_qq_daily_quota,
         anonymous_global_daily_quota=settings.anonymous_global_daily_quota,
+        copy_private_guide=settings.copy_private_guide,
+        copy_group_guide=settings.copy_group_guide,
+        copy_anon_first_hint=settings.copy_anon_first_hint,
+        copy_anon_memory_hint=settings.copy_anon_memory_hint,
+        copy_anon_quota_user=settings.copy_anon_quota_user,
+        copy_anon_quota_global=settings.copy_anon_quota_global,
+        copy_anon_group_ask=settings.copy_anon_group_ask,
     )
 
 
@@ -220,6 +245,14 @@ def _validate(field: str, value: Any) -> Any:
         if not _MODEL_PATTERN.fullmatch(text):
             raise ValueError("model 只能包含字母、数字、点、下划线、冒号或连字符")
         return text
+
+    if field in _COPY_FIELDS:
+        if not isinstance(value, str):
+            raise ValueError(f"{field} 必须是文本")
+        if len(value) > _COPY_MAX_CHARS:
+            raise ValueError(f"{field} 不能超过 {_COPY_MAX_CHARS} 个字")
+        # 原样保存，不 strip：留空表示“恢复默认”，前后空格由渲染时处理。
+        return value
 
     raise ValueError(f"未知设置项：{field}")
 

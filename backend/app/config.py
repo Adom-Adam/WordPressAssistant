@@ -148,6 +148,15 @@ class Settings(BaseSettings):
     anonymous_qq_daily_quota: int = 20
     # 全站匿名总量兜底；0 表示不限。
     anonymous_global_daily_quota: int = 300
+    # 文案覆盖：留空 = 使用 app/channels/qq/commands.py 里的默认文案。
+    # 站点地址占位符写作 {place}，由代码替换（不是 str.format）。
+    copy_private_guide: str = ""
+    copy_group_guide: str = ""
+    copy_anon_first_hint: str = ""
+    copy_anon_memory_hint: str = ""
+    copy_anon_quota_user: str = ""
+    copy_anon_quota_global: str = ""
+    copy_anon_group_ask: str = ""
 
     # ------------------------------------------------------------------
     # 每轮私聊的模型评估（3c）
