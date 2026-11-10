@@ -108,30 +108,74 @@ def link_identity(
             """,
             [*params, *keys],
         )
+        # 换绑同理：这个 QQ / 账号以前并入过别的身份，那条别名现在指向
+        # 别人的数据，必须作废——否则旧账号的 `linked_keys` 里还挂着一个
+        # 已经属于新账号的 key。
+        stale_aliases = [
+            person_key_qq(qq),
+            person_key_web(wp_user_id) if wp_user_id is not None else "",
+        ]
+        try:
+            conn.execute(
+                "DELETE FROM person_aliases WHERE alias_key IN (?, ?)",
+                stale_aliases,
+            )
+        except sqlite3.OperationalError:  # 旧库还没建表
+            pass
         conn.commit()
 
     for key in keys:
         touch_person(conn, key, wp_user_id=wp_user_id, qq_uin=qq)
 
 
+def _alias_group(conn: sqlite3.Connection, person_key: str) -> list[str]:
+    """合并过的身份：自身、最终身份、以及同组的所有别名。"""
+    try:
+        row = conn.execute(
+            "SELECT canonical_key FROM person_aliases WHERE alias_key = ?",
+            (person_key,),
+        ).fetchone()
+        canonical = str(row["canonical_key"]) if row is not None else person_key
+        aliased = conn.execute(
+            "SELECT alias_key FROM person_aliases WHERE canonical_key = ?",
+            (canonical,),
+        ).fetchall()
+    except sqlite3.OperationalError:  # 旧库还没建表：按未合并处理
+        return [person_key]
+
+    group = [person_key]
+    if canonical != person_key:
+        group.append(canonical)
+    for item in aliased:
+        key = str(item["alias_key"])
+        if key not in group:
+            group.append(key)
+    return group
+
+
 def linked_keys(conn: sqlite3.Connection, person_key: str) -> list[str]:
-    """返回与 `person_key` 同属一人的所有 key；自身永远排第一。"""
+    """返回与 `person_key` 同属一人的所有 key；自身永远排第一。
+
+    两种关联都算：`persons` 上的 wp/qq 关联（绑定但还没合并），
+    以及 `person_aliases` 上的合并记录（历史身份已物理搬走）。
+    """
+    keys = _alias_group(conn, person_key)
+
     rows = conn.execute(
         "SELECT person_key, wp_user_id, qq_uin FROM persons"
     ).fetchall()
 
     seed = next((row for row in rows if row["person_key"] == person_key), None)
     if seed is None:
-        return [person_key]
+        return keys
 
     wp_user_id = seed["wp_user_id"]
     qq_uin = seed["qq_uin"]
     if wp_user_id is None and qq_uin is None:
-        return [person_key]
+        return keys
 
-    keys = [person_key]
     for row in rows:
-        if row["person_key"] == person_key:
+        if row["person_key"] in keys:
             continue
         same_wp = wp_user_id is not None and row["wp_user_id"] == wp_user_id
         same_qq = (

@@ -171,3 +171,43 @@ def test_delete_failure_is_reported(client, monkeypatch) -> None:
     response = client.delete("/api/me/memory", headers=_headers())
 
     assert response.status_code == 503
+
+
+def test_delete_my_memory_clears_relationship_rows(client) -> None:
+    """关系状态、决策日志、待续话题也必须一起删。
+
+    它们是“她怎么看你”的另一半：只删记忆不删关系，账号注销后
+    主动消息还能按旧好感找上门。
+    """
+    _seed()
+    conn = memory_db.connect()
+    try:
+        conn.execute(
+            """INSERT INTO relationship_state (persona_key, person_key, updated_at)
+               VALUES ('merlin', 'wp:7', '2026-11-07T00:00:00+00:00')"""
+        )
+        conn.execute(
+            """INSERT INTO pending_topics (persona_key, person_key, topic,
+                   created_at, expires_at)
+               VALUES ('merlin', 'wp:7', '面试怎么样',
+                       '2026-11-07T00:00:00+00:00', '2026-11-10T00:00:00+00:00')"""
+        )
+        conn.execute(
+            """INSERT INTO decision_log (persona_key, channel_id, person_key,
+                   verdict, created_at)
+               VALUES ('merlin', 'qq_private', 'wp:7', 'reply',
+                       '2026-11-07T00:00:00+00:00')"""
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert client.delete("/api/me/memory", headers=_headers()).status_code == 204
+
+    conn = memory_db.connect()
+    try:
+        for table in ("relationship_state", "pending_topics", "decision_log"):
+            count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            assert count == 0, table
+    finally:
+        conn.close()

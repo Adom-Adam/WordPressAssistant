@@ -226,6 +226,18 @@ CREATE TABLE IF NOT EXISTS pending_topics (
 CREATE INDEX IF NOT EXISTS idx_pending_topics_person
     ON pending_topics(persona_key, person_key, status, id);
 
+-- 身份别名：`alias_key` 曾经是独立身份，现已并入 `canonical_key`。
+-- 合并是物理搬迁，这张表只用来解释“旧 key 去哪了”，以及让
+-- `canonical_key()` 能把链式合并（qq→wp:2→wp:3）一路追到底。
+CREATE TABLE IF NOT EXISTS person_aliases (
+    alias_key     TEXT PRIMARY KEY,
+    canonical_key TEXT NOT NULL,
+    created_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_person_aliases_canonical
+    ON person_aliases(canonical_key);
+
 -- 每个群的三个正交开关。缺行时回退到 QQ_TRIGGER。
 CREATE TABLE IF NOT EXISTS qq_group_policies (
     group_id INTEGER PRIMARY KEY,

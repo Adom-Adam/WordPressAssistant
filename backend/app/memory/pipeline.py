@@ -18,7 +18,7 @@ from types import SimpleNamespace
 from app.config import get_settings
 from app.embeddings import get_embedder
 
-from app.memory import db, events, identity, retrieval, store
+from app.memory import db, events, identity, merge, retrieval, store
 from app.memory.extract import Extractor, Turn
 from app.memory.vectors import MEMORIES_VEC
 from app.memory.visibility import Viewer
@@ -69,6 +69,14 @@ def qq_viewer(
             wp_user_id=bound_user_id,
             qq_uin=str(qq_uin),
         )
+        # 还没绑定时的 `qq:<uin>` 数据要搬到账号名下。合并是幂等的，
+        # 第一次之后就是空操作，所以放在读路径里也安全。
+        merge.merge_person(
+            conn,
+            source_keys=[identity.person_key_qq(qq_uin)],
+            target_key=identity.person_key_web(bound_user_id),
+        )
+        conn.commit()
         keys = identity.linked_keys(conn, person_key)
     else:
         # 没绑定时只认自己。`persons` 里可能还留着解绑前的旧关联，
@@ -368,29 +376,11 @@ def delete_user_memory(user_id: int) -> dict[str, int]:
     """
     conn = _connect()
     try:
-        key = identity.person_key_web(user_id)
-        keys = identity.linked_keys(conn, key)
-        placeholders = ",".join("?" for _ in keys)
-
-        ids = [
-            int(row[0])
-            for row in conn.execute(
-                f"SELECT id FROM memories WHERE person_key IN ({placeholders})", keys
-            ).fetchall()
-        ]
-        if ids:
-            MEMORIES_VEC.delete_ids(conn, ids)
-
-        conn.execute(
-            f"DELETE FROM memories WHERE person_key IN ({placeholders})", keys
+        deleted = merge.delete_person_data(
+            conn, identity.person_key_web(user_id)
         )
-        deleted_events = conn.execute(
-            f"DELETE FROM events WHERE person_key IN ({placeholders})", keys
-        ).rowcount
-        conn.execute(f"DELETE FROM persons WHERE person_key IN ({placeholders})", keys)
         conn.commit()
-
-        return {"memories": len(ids), "events": max(deleted_events, 0)}
+        return deleted
     finally:
         conn.close()
 
