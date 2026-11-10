@@ -234,3 +234,43 @@ def test_proactive_zero_means_unlimited(tmp_path) -> None:
 
     assert updated.proactive_per_user_daily_limit == 0
     assert updated.proactive_global_daily_limit == 0
+
+
+def test_anonymous_defaults(tmp_path) -> None:
+    store = make_store(tmp_path)
+
+    runtime = store.load()
+
+    assert runtime.anonymous_web_enabled is False
+    assert runtime.anonymous_qq_enabled is False
+    assert runtime.anonymous_guide_enabled is True
+    assert runtime.anonymous_web_daily_quota == 20
+    assert runtime.anonymous_qq_daily_quota == 20
+    assert runtime.anonymous_global_daily_quota == 300
+
+
+def test_anonymous_switches_roundtrip(tmp_path) -> None:
+    store = make_store(tmp_path)
+
+    updated = store.update(
+        {
+            "anonymous_web_enabled": True,
+            "anonymous_qq_enabled": True,
+            "anonymous_web_daily_quota": 5,
+            "anonymous_global_daily_quota": 0,
+        }
+    )
+
+    assert updated.anonymous_web_enabled is True
+    assert updated.anonymous_web_daily_quota == 5
+    assert updated.anonymous_global_daily_quota == 0
+    assert make_store(tmp_path).load() == updated
+
+
+def test_anonymous_quota_range_is_validated(tmp_path) -> None:
+    store = make_store(tmp_path)
+
+    with pytest.raises(ValueError, match="anonymous_web_daily_quota"):
+        store.update({"anonymous_web_daily_quota": 1001})
+    with pytest.raises(ValueError, match="anonymous_web_enabled"):
+        store.update({"anonymous_web_enabled": 1})

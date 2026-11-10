@@ -77,6 +77,14 @@ class RuntimeSettingsUpdate(BaseModel):
         default=None, ge=0, le=10_080
     )
     proactive_group_daily_limit: int | None = Field(default=None, ge=0, le=100)
+    anonymous_web_enabled: bool | None = None
+    anonymous_qq_enabled: bool | None = None
+    anonymous_guide_enabled: bool | None = None
+    anonymous_web_daily_quota: int | None = Field(default=None, ge=0, le=1000)
+    anonymous_qq_daily_quota: int | None = Field(default=None, ge=0, le=1000)
+    anonymous_global_daily_quota: int | None = Field(
+        default=None, ge=0, le=1_000_000
+    )
     agent_max_model_calls: int | None = Field(default=None, ge=1, le=20)
     agent_max_tool_calls: int | None = Field(default=None, ge=1, le=20)
     agent_max_seconds: float | None = Field(default=None, ge=5, le=300)

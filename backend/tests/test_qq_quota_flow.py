@@ -96,6 +96,12 @@ def runtime(**overrides: Any) -> RuntimeSettings:
         proactive_global_daily_limit=20,
         proactive_group_interval_minutes=240,
         proactive_group_daily_limit=6,
+        anonymous_web_enabled=False,
+        anonymous_qq_enabled=False,
+        anonymous_guide_enabled=True,
+        anonymous_web_daily_quota=20,
+        anonymous_qq_daily_quota=20,
+        anonymous_global_daily_quota=300,
     )
     base.update(overrides)
     return RuntimeSettings(**base)

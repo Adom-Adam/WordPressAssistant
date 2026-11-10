@@ -79,6 +79,12 @@ class RuntimeSettings:
     proactive_global_daily_limit: int
     proactive_group_interval_minutes: int
     proactive_group_daily_limit: int
+    anonymous_web_enabled: bool
+    anonymous_qq_enabled: bool
+    anonymous_guide_enabled: bool
+    anonymous_web_daily_quota: int
+    anonymous_qq_daily_quota: int
+    anonymous_global_daily_quota: int
 
 
 # 每个字段的合法范围。管理员接口和读取文件时都会用同一套规则，
@@ -101,6 +107,9 @@ _INT_RANGES: dict[str, tuple[int, int]] = {
     "proactive_global_daily_limit": (0, 100_000),
     "proactive_group_interval_minutes": (0, 10_080),
     "proactive_group_daily_limit": (0, 100),
+    "anonymous_web_daily_quota": (0, 1000),
+    "anonymous_qq_daily_quota": (0, 1000),
+    "anonymous_global_daily_quota": (0, 1_000_000),
 }
 # 布尔字段单独一套规则：bool 是 int 的子类，混进 _INT_RANGES 会被当成整数。
 _BOOL_FIELDS = {
@@ -108,6 +117,9 @@ _BOOL_FIELDS = {
     "qq_unlimited",
     "appraisal_enabled",
     "proactive_enabled",
+    "anonymous_web_enabled",
+    "anonymous_qq_enabled",
+    "anonymous_guide_enabled",
 }
 _SECONDS_RANGE = (5.0, 300.0)
 # 浮点字段各自的范围。评估超时故意比一轮对话短得多。
@@ -148,6 +160,12 @@ def _defaults_from_settings(settings: Settings) -> RuntimeSettings:
         proactive_global_daily_limit=settings.proactive_global_daily_limit,
         proactive_group_interval_minutes=settings.proactive_group_interval_minutes,
         proactive_group_daily_limit=settings.proactive_group_daily_limit,
+        anonymous_web_enabled=settings.anonymous_web_enabled,
+        anonymous_qq_enabled=settings.anonymous_qq_enabled,
+        anonymous_guide_enabled=settings.anonymous_guide_enabled,
+        anonymous_web_daily_quota=settings.anonymous_web_daily_quota,
+        anonymous_qq_daily_quota=settings.anonymous_qq_daily_quota,
+        anonymous_global_daily_quota=settings.anonymous_global_daily_quota,
     )
 
 
