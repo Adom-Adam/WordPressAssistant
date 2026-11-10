@@ -215,3 +215,26 @@ class RoleUpdate(BaseModel):
 
     wp_user_id: int = Field(ge=1)
     role: RoleName
+
+
+class QQWhitelistAdd(BaseModel):
+    """把一个未绑定的 QQ 号加进后台白名单。
+
+    `qq_uin` 只收纯数字：白名单是按号匹配的，允许字母或空格只会让
+    “明明加了却不生效”变成一场排查。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    qq_uin: str = Field(pattern=r"^\d{5,12}$")
+    role: RoleName = "special"
+    note: str | None = Field(default=None, max_length=200)
+
+
+class QQWhitelistUpdate(BaseModel):
+    """改白名单里某个号的角色 / 备注；`note` 不传表示保持不变。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    role: RoleName
+    note: str | None = Field(default=None, max_length=200)

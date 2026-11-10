@@ -246,6 +246,15 @@ CREATE TABLE IF NOT EXISTS qq_group_policies (
     proactive INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
 );
+
+-- 白名单里的 QQ 号。未绑定的号也能拿到完整功能；绑定过的号不该出现在这里
+-- （绑定本身就带着身份），但旧数据可能残留，读取时以绑定为准。
+CREATE TABLE IF NOT EXISTS qq_whitelist (
+    qq_uin   TEXT PRIMARY KEY,
+    note     TEXT,
+    added_by TEXT,
+    added_at TEXT NOT NULL
+);
 """
 
 
