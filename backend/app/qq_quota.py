@@ -263,7 +263,7 @@ class QQQuotaGate:
         self,
         *,
         qq_uin: str,
-        user_id: int,
+        user_id: int | None,
         tier: str,
         is_admin: bool,
     ) -> tuple[str, QQUsage]:
@@ -273,7 +273,9 @@ class QQQuotaGate:
 
         runtime = self._runtime()
 
-        if runtime.qq_quota_shared:
+        # 没有 WP 账号就没有网页额度可共享（白名单里的未绑定 QQ）。
+        # 这时必须退回 QQ 自己的按人计数，否则共享模式会拿 None 当用户 ID。
+        if runtime.qq_quota_shared and user_id is not None:
             limit = (
                 runtime.member_daily_quota if tier == "member" else runtime.daily_quota
             )

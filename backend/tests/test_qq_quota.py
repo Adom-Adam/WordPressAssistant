@@ -262,3 +262,27 @@ def test_refund_restores_both_modes(tmp_path) -> None:
     gate.refund(usage)
 
     assert gate.reserve(qq_uin="10001", user_id=7, tier="user", is_admin=False)[0] == "ok"
+
+
+def test_unbound_qq_falls_back_to_qq_quota_in_shared_mode(tmp_path) -> None:
+    """白名单里有未绑定的 QQ：没有网页账号可共享，必须走 QQ 自己的计数。
+
+    共享模式下 `user_id` 为 None 时如果照旧去占网页额度，等于把“没有身份
+    的人”记在同一条空行上——要么报错，要么几个白名单 QQ 共用一份额度。
+    """
+    gate, quota, _qq = make_gate(
+        tmp_path, make_runtime(qq_quota_shared=True, qq_daily_quota=1)
+    )
+
+    status, usage = gate.reserve(
+        qq_uin="12345", user_id=None, tier="user", is_admin=False
+    )
+
+    assert status == "ok"
+    assert usage.kind == "independent"
+    assert quota.usage_snapshot([7]) == {7: 0}
+
+    second, _ = gate.reserve(
+        qq_uin="12345", user_id=None, tier="user", is_admin=False
+    )
+    assert second == "user_exhausted"

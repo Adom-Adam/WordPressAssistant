@@ -31,10 +31,16 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from app.agent.core import stream_reply
-from app.channels.qq import commands, group_allowlist
+from app.anonymous_quota import (
+    AnonymousQuotaStore,
+    AnonymousReservation,
+    get_anonymous_quota_store,
+)
+from app.channels.qq import anonymous_guide, commands, group_allowlist
 from app.channels.qq.client import OneBotError, OneBotTransport
 from app.channels.qq.commands import CommandContext, dispatch, parse_command
 from app.channels.qq.conversation import ConversationCoordinator
+from app.channels.qq.copy import QQCopy
 from app.channels.qq.group_policy import (
     GroupPolicy,
     TriggerMatch,
@@ -53,6 +59,7 @@ from app.proactive import pending as pending_topic
 from app.proactive.checks import too_soon
 from app.proactive.store import last_sent_at
 from app.qq_quota import QQQuotaGate, QQUsage, get_qq_quota_gate
+from app.qq_whitelist import is_whitelisted_qq
 from app.relationship.appraisal import (
     AppraisalCall,
     apply_appraisal,
@@ -74,10 +81,13 @@ from app.relationship.turn import (
     record_silence,
     relationship_subject,
 )
-from app.runtime_settings import get_runtime_store
+from app.runtime_settings import RuntimeSettings, get_runtime_store
 from app.schemas import ChatMessage
 
 logger = logging.getLogger(__name__)
+
+# 匿名用户提到这些词，说明他在意“有没有被记住”，这时换一句更具体的提示。
+_ANON_MEMORY_WORDS = ("记得", "记住", "记忆", "忘")
 
 # 一条 QQ 文本消息最多发多少字符。太长会刷屏，也容易被平台限流。
 # 这里不是模型的输出上限，而是“单条群消息”的展示上限；超出的部分拆成多条。
@@ -121,6 +131,8 @@ class QQAdapter:
         rng: random.Random | None = None,
         coordinator: ConversationCoordinator | None = None,
         appraiser: Any | None = None,
+        anonymous_quota: AnonymousQuotaStore | None = None,
+        runtime: Callable[[], RuntimeSettings] | None = None,
     ) -> None:
         self.settings = settings
         self.sender = sender
@@ -144,6 +156,11 @@ class QQAdapter:
         # 每轮私聊的同步模型评估。默认 None：不评估、不花钱，
         # 现有测试和离线运行都不会误调真实模型；生产入口显式注入 Appraiser。
         self._appraiser = appraiser
+
+        # 匿名额度与运行时开关都可注入：测试要固定的开关组合，
+        # 生产不传时惰性取全局实例。
+        self.anonymous_quota = anonymous_quota
+        self._runtime_source = runtime
 
         # (群号, QQ 号) -> 最近几轮消息。只在内存里，进程重启就清空。
         # 这是有意的：在账号绑定/关系记忆做好之前，不假装自己有长期记忆。
@@ -206,10 +223,29 @@ class QQAdapter:
             binding = store.binding_of_qq(str(incoming.user_id))
             is_admin = admin_whitelisted or (binding.is_admin if binding else False)
 
+            runtime = self._runtime_settings()
+            copy = QQCopy.from_runtime(runtime, place=self.settings.wp_site_url)
+
+            # 身份有三种来源：绑定的账号、管理员自救白名单、后台 QQ 白名单。
+            # 白名单不是“绑到某个账号”，而是“这个号按有身份的人对待”，
+            # 所以它拿的是完整功能，身份仍然是 `qq:<uin>`。
+            whitelisted = False
+            if binding is None and not admin_whitelisted:
+                whitelisted = await asyncio.to_thread(
+                    is_whitelisted_qq, str(incoming.user_id)
+                )
+            trusted = binding is not None or admin_whitelisted or whitelisted
+            anonymous = runtime.anonymous_qq_enabled and not trusted
+
             # 0. 群消息没叫到梅林：不回，但把原话记进时间线。
             #    “她当时没接话”本身是事实，之后的待续话题和主动消息要用。
+            #    匿名的人什么都不记，这里整段跳过。
             if not content:
-                if incoming.message_type == "group" and incoming.text.strip():
+                if (
+                    trusted
+                    and incoming.message_type == "group"
+                    and incoming.text.strip()
+                ):
                     await asyncio.to_thread(
                         pipeline.record_qq_ignored,
                         incoming.user_id,
@@ -219,7 +255,8 @@ class QQAdapter:
                     )
                 return {"handled": False, "reason": "not_triggered_or_empty"}
 
-            # 1. 斜杠命令：先于绑定判定，永不进 agent、不进历史。
+            # 1. 斜杠命令：先于身份判定，永不进 agent、不进历史。
+            #    匿名的人也能用 `/绑定` 给自己登记，这是他们唯一的出口。
             parsed = parse_command(content)
             if parsed is not None:
                 reply = dispatch(
@@ -236,19 +273,27 @@ class QQAdapter:
                 )
                 return await self._send(incoming, reply, reason="command")
 
-            # 2. 未绑定：只回引导。管理员白名单是自救通道，不受绑定限制。
-            if binding is None and not admin_whitelisted:
-                guide = (
-                    commands.private_guide(self.settings.wp_site_url)
-                    if is_private
-                    else commands.GROUP_GUIDE
-                )
+            # 2. 既没身份、匿名也关着：只回引导（文案可在后台改）。
+            if not trusted and not anonymous:
+                guide = copy.private_guide if is_private else copy.group_guide
                 return await self._send(incoming, guide, reason="guide_unbound")
 
             # 3. 群聊：silent 策略只记录不说话；被指名的消息按关系状态
             #    掷一次骰子（概率有群下限）；普通闲聊直接回复，不进概率模型。
             #    防抖/多气泡仍只作用于私聊。
             if not is_private:
+                if anonymous:
+                    # 匿名群里不掷骰子、不记时间线；silent 策略仍然只沉默。
+                    if policy is not None and policy.reply_policy == "silent":
+                        return {"handled": True, "reason": "silent"}
+                    return await self._run_chat_turn(
+                        incoming,
+                        content,
+                        binding=None,
+                        is_admin=False,
+                        is_private=False,
+                        anonymous=True,
+                    )
                 # 刚在群里主动说过话，现在有人接话：这是“她在场”的证据。
                 # 只影响这个人自己的关系状态，不影响回不回。
                 if binding is not None:
@@ -301,6 +346,7 @@ class QQAdapter:
                 binding=binding,
                 is_admin=is_admin,
                 persona=persona,
+                anonymous=anonymous,
             ),
             debounce=pacing.debounce_seconds,
             max_debounce=pacing.debounce_max_seconds,
@@ -482,9 +528,23 @@ class QQAdapter:
         binding: object | None,
         is_admin: bool,
         persona: PersonaVersion,
+        anonymous: bool = False,
     ) -> dict[str, Any]:
-        """处理一轮合并后的私聊：读状态 → 评估 → 掷骰子 → 决定是否回复。"""
+        """处理一轮合并后的私聊：读状态 → 评估 → 掷骰子 → 决定是否回复。
+
+        匿名回合在第一步就分流：不读关系、不评估、不掷骰子。这些都属于
+        “记住这个人”，而匿名的定义就是什么都不留。
+        """
         content = "\n".join(texts)
+        if anonymous:
+            return await self._run_chat_turn(
+                incoming,
+                content,
+                binding=binding,
+                is_admin=is_admin,
+                is_private=True,
+                anonymous=True,
+            )
         dynamics = persona.dynamics
         crisis = any(
             word and word in content for word in dynamics.safety.crisis_keywords
@@ -928,6 +988,7 @@ class QQAdapter:
         dynamics: Any = None,
         state_context: str | None = None,
         baseline_affection: bool = True,
+        anonymous: bool = False,
     ) -> dict[str, Any]:
         """额度 → 记忆 → agent → 入库 → 发送；群聊和私聊共用。
 
@@ -935,36 +996,61 @@ class QQAdapter:
         回复本身不再叠加通用的“聊天好感/心情”加成，避免双重计数。
         """
         key = (incoming.group_id, incoming.user_id)
+        runtime = self._runtime_settings()
+        copy = QQCopy.from_runtime(runtime, place=self.settings.wp_site_url)
 
-        # 额度：管理员不计数；用尽时回固定文案，不调模型。
-        status, usage = self._reserve(
-            qq_uin=str(incoming.user_id),
-            user_id=getattr(binding, "user_id", None),
-            tier=getattr(binding, "tier", "user"),
-            is_admin=is_admin,
-        )
-        if status == "user_exhausted":
-            return await self._send(
-                incoming, commands.QUOTA_USER, reason="quota_exhausted"
+        anonymous_free: AnonymousReservation | None = None
+        usage: QQUsage | None = None
+        if anonymous:
+            # 匿名走独立额度：某个通道关掉是 limit=0，全站不限量也是 0。
+            status, anonymous_free = self._reserve_anonymous(
+                f"qq:{incoming.user_id}",
+                runtime.anonymous_qq_daily_quota,
+                runtime.anonymous_global_daily_quota,
             )
-        if status == "global_exhausted":
-            return await self._send(
-                incoming, commands.QUOTA_GLOBAL, reason="quota_exhausted"
+            if status == "user_exhausted":
+                return await self._send(
+                    incoming, copy.anon_quota_user, reason="anonymous_quota"
+                )
+            if status == "global_exhausted":
+                return await self._send(
+                    incoming, copy.anon_quota_global, reason="anonymous_quota"
+                )
+        else:
+            # 额度：管理员不计数；用尽时回固定文案，不调模型。
+            status, usage = self._reserve(
+                qq_uin=str(incoming.user_id),
+                user_id=getattr(binding, "user_id", None),
+                tier=getattr(binding, "tier", "user"),
+                is_admin=is_admin,
             )
+            if status == "user_exhausted":
+                return await self._send(
+                    incoming, commands.QUOTA_USER, reason="quota_exhausted"
+                )
+            if status == "global_exhausted":
+                return await self._send(
+                    incoming, commands.QUOTA_GLOBAL, reason="quota_exhausted"
+                )
 
         try:
             # 取这一轮要注入的记忆。失败时为空字符串，回复照常。
-            try:
-                memory_context = await asyncio.to_thread(
-                    pipeline.qq_memory_context,
-                    incoming.user_id,
-                    incoming.group_id or None,
-                    binding,
-                    content,
-                )
-            except Exception:  # noqa: BLE001 - 记忆只是增强
-                logger.warning("QQ 记忆检索失败 qq=%s", incoming.user_id, exc_info=True)
-                memory_context = ""
+            # 匿名不读记忆：读得到就意味着“她记得一个不该记得的人”。
+            memory_context = ""
+            if not anonymous:
+                try:
+                    memory_context = await asyncio.to_thread(
+                        pipeline.qq_memory_context,
+                        incoming.user_id,
+                        incoming.group_id or None,
+                        binding,
+                        content,
+                    )
+                except Exception:  # noqa: BLE001 - 记忆只是增强
+                    logger.warning(
+                        "QQ 记忆检索失败 qq=%s", incoming.user_id, exc_info=True
+                    )
+                    memory_context = ""
 
             reply, messages_for_history, produced, ok = await self._reply(
                 key,
@@ -977,14 +1063,14 @@ class QQAdapter:
         except asyncio.CancelledError:
             # 被新消息打断的回合什么都没发出去（半截回复只留在上下文里），
             # 额度要退回；否则用户多说两句就会白白烧掉当天的限额。
-            self._refund(usage)
+            self._refund_turn(usage, anonymous_free, anonymous=anonymous)
             raise
 
         normal_reply = produced and ok
         if produced:
             # 已经输出过正文就说明用户看到了内容，不退款；但报错（可能是
             # 半截之后报错）的回合不能入库，否则残句会被当成完整回答提炼。
-            if ok:
+            if ok and not anonymous:
                 if messages_for_history:
                     self._history[key] = messages_for_history
                 # QQ 侧在回复产出后一次性写两条事件：这一轮整体入库。
@@ -1008,12 +1094,15 @@ class QQAdapter:
                     )
         else:
             # 没产出正文（模型报错/断流）：这次不算，退款，也别污染上下文。
-            self._refund(usage)
+            self._refund_turn(usage, anonymous_free, anonymous=anonymous)
             reply = commands.AGENT_ERROR
 
-        return await self._send(
+        result = await self._send(
             incoming, reply, reason=None if normal_reply else "agent_error"
         )
+        if anonymous and normal_reply:
+            await self._send_anonymous_hint(incoming, content, copy, runtime)
+        return result
 
     @staticmethod
     def _record_reply_safe(
@@ -1138,6 +1227,117 @@ class QQAdapter:
             self._quota_gate().refund(usage)
         except Exception:  # noqa: BLE001 - 退款失败只影响计数，不影响回复
             logger.exception("QQ 额度退款失败")
+
+    # ------------------------------------------------------------------
+    # 匿名
+    # ------------------------------------------------------------------
+    def _runtime_settings(self) -> RuntimeSettings:
+        """运行时开关：注入优先；生产每次都重读，后台改完立刻生效。"""
+        if self._runtime_source is not None:
+            return self._runtime_source()
+        return get_runtime_store().load()
+
+    def _anonymous_quota(self) -> AnonymousQuotaStore:
+        """惰性取匿名额度存储：导入时就建库会让 --help 之类也写文件。"""
+        if self.anonymous_quota is None:
+            self.anonymous_quota = get_anonymous_quota_store()
+        return self.anonymous_quota
+
+    def _reserve_anonymous(
+        self, scope: str, limit: int, global_limit: int
+    ) -> tuple[str, AnonymousReservation | None]:
+        """占一次匿名额度；额度库故障时放行，配额不是可用性的前提。"""
+        try:
+            result = self._anonymous_quota().reserve(
+                scope, limit, global_limit=global_limit
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("匿名额度预占失败，本次放行")
+            return "ok", None
+        return result.status, result.free
+
+    def _refund_anonymous(self, free: AnonymousReservation | None) -> None:
+        if free is None:
+            return
+        try:
+            self._anonymous_quota().refund(free)
+        except Exception:  # noqa: BLE001
+            logger.exception("匿名额度退款失败")
+
+    def _refund_turn(
+        self,
+        usage: QQUsage | None,
+        anonymous_free: AnonymousReservation | None,
+        *,
+        anonymous: bool,
+    ) -> None:
+        if anonymous:
+            self._refund_anonymous(anonymous_free)
+        else:
+            self._refund(usage)
+
+    async def _send_anonymous_hint(
+        self,
+        incoming: Incoming,
+        content: str,
+        copy: QQCopy,
+        runtime: RuntimeSettings,
+    ) -> None:
+        """匿名回复后补一句提示；提示失败不能影响已经发出的回复。"""
+        try:
+            hint = await asyncio.to_thread(
+                self._pick_anonymous_hint, incoming, content, copy, runtime
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("匿名提示生成失败 qq=%s", incoming.user_id, exc_info=True)
+            return
+        if not hint:
+            return
+        try:
+            if incoming.message_type == "private":
+                await self.sender.send_private_message(incoming.user_id, hint)
+            else:
+                await self.sender.send_group_message(incoming.group_id, hint)
+        except Exception:  # noqa: BLE001
+            logger.warning("匿名提示发送失败 qq=%s", incoming.user_id, exc_info=True)
+
+    def _pick_anonymous_hint(
+        self,
+        incoming: Incoming,
+        content: str,
+        copy: QQCopy,
+        runtime: RuntimeSettings,
+    ) -> str:
+        """决定这一轮补不补提示、补哪一句。
+
+        提到“记得/忘”就用“我今晚记得、明天就忘”那句；否则私聊每七天
+        最多提示一次初次见面的引导。群里只在对方提到记忆时回一句
+        `anon_group_ask`，不追着整个群发引导。
+        """
+        if any(word in content for word in _ANON_MEMORY_WORDS):
+            if incoming.message_type == "group":
+                return copy.anon_group_ask
+            return copy.anon_memory_hint
+        if incoming.message_type != "private" or not runtime.anonymous_guide_enabled:
+            return ""
+
+        scope = f"qq:{incoming.user_id}"
+        conn = None
+        try:
+            conn = memory_db.connect()
+            memory_db.init_schema(conn)
+            if not anonymous_guide.should_send(conn, scope):
+                return ""
+            anonymous_guide.mark_sent(conn, scope)
+            return copy.anon_first_hint
+        except Exception:  # noqa: BLE001 - 记不住节奏就别提示，别打扰人
+            logger.warning(
+                "匿名提示节奏读取失败 qq=%s", incoming.user_id, exc_info=True
+            )
+            return ""
+        finally:
+            if conn is not None:
+                conn.close()
 
     # ------------------------------------------------------------------
     # 解析

@@ -262,6 +262,13 @@ CREATE TABLE IF NOT EXISTS qq_allowed_groups (
     group_id INTEGER PRIMARY KEY,
     added_at TEXT NOT NULL
 );
+
+-- 匿名用户最近一次收到“去图书馆登记”提示的时间。按 scope（QQ 号 / IP 哈希）
+-- 记，不记内容：匿名说过什么，一句都不留。
+CREATE TABLE IF NOT EXISTS anonymous_guide_log (
+    scope        TEXT PRIMARY KEY,
+    last_sent_at TEXT NOT NULL
+);
 """
 
 
