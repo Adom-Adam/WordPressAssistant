@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.deps import require_admin
 from app.auth import AuthUser
+from app.channels.qq.copy import QQCopy
 from app.config import get_settings
 from app.runtime_settings import get_runtime_store
 from app.schemas import RuntimeSettingsUpdate
@@ -71,6 +72,11 @@ def _snapshot() -> dict[str, object]:
     return {
         "settings": asdict(runtime),
         "defaults": asdict(store.defaults),
+        # `defaults.copy_*` 是 .env 里的值（通常是空串），不是真正兜底的
+        # 那句话。后台要能看见“留空时会发什么”，所以单独解析一份。
+        "copy_defaults": asdict(
+            QQCopy.from_runtime(store.defaults, place=settings.wp_site_url)
+        ),
         "backend": {
             # 只告诉管理员“有没有 Key”，绝不返回 Key 的内容。
             "api_key_configured": bool(settings.deepseek_api_key.strip()),

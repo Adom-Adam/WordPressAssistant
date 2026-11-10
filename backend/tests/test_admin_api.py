@@ -268,3 +268,18 @@ def test_proactive_tick_out_of_range_is_rejected(client):
     )
 
     assert response.status_code == 422
+
+
+def test_admin_settings_expose_builtin_copy(client: TestClient) -> None:
+    """后台文案编辑区要显示“留空时会发哪句”，不能只给一个空框。
+
+    `defaults.copy_*` 来自 .env，通常是空串；真正的兜底文案是代码里的
+    模板，所以单独给一份 `copy_defaults`。
+    """
+    data = client.get("/api/admin/settings", headers=auth_header()).json()
+
+    copy_defaults = data["copy_defaults"]
+    assert "图书馆" in copy_defaults["private_guide"]
+    assert copy_defaults["anon_quota_user"]
+    # {place} 已经在默认文案里替换成站点地址，管理员看到的是一句成品。
+    assert "{place}" not in copy_defaults["private_guide"]

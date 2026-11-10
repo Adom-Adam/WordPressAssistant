@@ -28,6 +28,10 @@ require_once __DIR__ . '/includes/class-l2d-ai-account.php';
 require_once __DIR__ . '/includes/class-l2d-ai-email-verification.php';
 // 每日对账：清理 WP-CLI 等非登录态删除用户后遗留的后端绑定与记忆。
 require_once __DIR__ . '/includes/class-l2d-ai-reconcile.php';
+// 关系角色 / QQ 白名单 / QQ 群：三张后台管理页，各自独立成文件。
+require_once __DIR__ . '/includes/class-l2d-ai-roles.php';
+require_once __DIR__ . '/includes/class-l2d-ai-qq-whitelist.php';
+require_once __DIR__ . '/includes/class-l2d-ai-groups.php';
 
 final class L2D_AI_Plugin {
 
@@ -47,6 +51,22 @@ final class L2D_AI_Plugin {
 	 * 不必每次都去请求后端就知道“访客要不要先登录”。
 	 */
 	const OPTION_ANONYMOUS_WEB = 'l2d_ai_anonymous_web';
+
+	/**
+	 * 后台可编辑的七段文案：运行时设置名 => [默认文案字段名, 页面上的说明]。
+	 *
+	 * 默认文案不在 WordPress 里，而在后端代码里；`[{place}]` 会替换成站点地址。
+	 * 保存和渲染都用这一份清单，避免两边字段名写歪。
+	 */
+	const COPY_FIELDS = array(
+		'copy_private_guide'     => array( 'private_guide', '私聊：没登记过的人' ),
+		'copy_group_guide'       => array( 'group_guide', '群聊：没登记过的人' ),
+		'copy_anon_first_hint'   => array( 'anon_first_hint', '匿名：第一次聊完的提示' ),
+		'copy_anon_memory_hint'  => array( 'anon_memory_hint', '匿名：说到“记得”时的提示' ),
+		'copy_anon_quota_user'   => array( 'anon_quota_user', '匿名：个人次数用完' ),
+		'copy_anon_quota_global' => array( 'anon_quota_global', '匿名：全站次数用完' ),
+		'copy_anon_group_ask'    => array( 'anon_group_ask', '匿名：群里被叫到' ),
+	);
 	/** 没有单独设置时使用的人设名字。改人设时只需改这里或后台设置。 */
 	const DEFAULT_NAME     = '梅林';
 	const SETTINGS_GROUP   = 'l2d_ai_settings';
@@ -93,6 +113,12 @@ final class L2D_AI_Plugin {
 		L2D_AI_Email_Verification::init();
 		// 每日对账：兜底清理已删除账号的后端数据。
 		L2D_AI_Reconcile::init();
+		// 关系角色：谁对我有多重要。
+		L2D_AI_Roles::init();
+		// QQ 白名单：没注册博客的熟人也能被记住。
+		L2D_AI_QQ_Whitelist::init();
+		// QQ 群：哪些群允许她说话，以及每个群里怎么说话。
+		L2D_AI_Groups::init();
 	}
 
 	/**
@@ -1119,6 +1145,11 @@ final class L2D_AI_Plugin {
 			'proactive_global_daily_limit'  => array( 0, 100000 ),
 			'proactive_group_interval_minutes' => array( 0, 10080 ),
 			'proactive_group_daily_limit'   => array( 0, 100 ),
+			// 匿名额度与登录额度是两套账：0 表示这个入口关闭。
+			'anonymous_web_daily_quota'     => array( 0, 1000 ),
+			'anonymous_qq_daily_quota'      => array( 0, 1000 ),
+			// 全站匿名总量要覆盖所有访客，上限比单人高两个数量级。
+			'anonymous_global_daily_quota'  => array( 0, 1000000 ),
 		);
 
 		$patch = array();
@@ -1142,6 +1173,19 @@ final class L2D_AI_Plugin {
 		$patch['qq_unlimited']    = ! empty( $_POST['qq_unlimited'] );
 		$patch['appraisal_enabled'] = ! empty( $_POST['appraisal_enabled'] );
 		$patch['proactive_enabled'] = ! empty( $_POST['proactive_enabled'] );
+		$patch['anonymous_web_enabled']   = ! empty( $_POST['anonymous_web_enabled'] );
+		$patch['anonymous_qq_enabled']    = ! empty( $_POST['anonymous_qq_enabled'] );
+		$patch['anonymous_guide_enabled'] = ! empty( $_POST['anonymous_guide_enabled'] );
+
+		// 七段文案：空串是合法值，意思是“用代码里的默认文案”，所以不参与下面的
+		// 类型转换，也不校验非空。只在字段确实提交过时才写进 patch——别的表单
+		// 复用这个 action 时不会把文案清空。
+		foreach ( self::COPY_FIELDS as $field_key => $field_meta ) {
+			if ( ! isset( $_POST[ $field_key ] ) ) {
+				continue;
+			}
+			$patch[ $field_key ] = sanitize_textarea_field( wp_unslash( $_POST[ $field_key ] ) );
+		}
 
 		// 两个主动消息阈值是小数，校验方式同关系评估超时。
 		foreach ( array( 'proactive_think_threshold', 'proactive_speak_threshold' ) as $threshold_key ) {
@@ -1521,6 +1565,7 @@ final class L2D_AI_Plugin {
 				<?php
 				$settings = isset( $snapshot['settings'] ) && is_array( $snapshot['settings'] ) ? $snapshot['settings'] : array();
 				$defaults = isset( $snapshot['defaults'] ) && is_array( $snapshot['defaults'] ) ? $snapshot['defaults'] : array();
+				$copy_defaults = isset( $snapshot['copy_defaults'] ) && is_array( $snapshot['copy_defaults'] ) ? $snapshot['copy_defaults'] : array();
 				$backend  = isset( $snapshot['backend'] ) && is_array( $snapshot['backend'] ) ? $snapshot['backend'] : array();
 
 				$get = static function ( $array, $key, $fallback = '' ) {
@@ -2057,6 +2102,145 @@ final class L2D_AI_Plugin {
 								<p class="description">0 = 不限。每个检查周期最多在一个群里开口。</p>
 							</td>
 						</tr>
+						<tr>
+							<th colspan="2">
+								<h2 style="margin:16px 0 4px;">匿名模式</h2>
+								<p class="description" style="margin:0;">
+									匿名的人能聊天，但不会留下任何痕迹：不读记忆、不写记忆、不进入关系，
+									也不会触发主动消息。网页和 QQ 分开开关——可以一边开着一边关着。
+								</p>
+							</th>
+						</tr>
+						<tr>
+							<th scope="row">允许匿名聊天</th>
+							<td>
+								<fieldset>
+									<label for="l2d-ai-anonymous-web">
+										<input
+											type="checkbox"
+											id="l2d-ai-anonymous-web"
+											name="anonymous_web_enabled"
+											value="1"
+											<?php checked( '1', (string) $get( $settings, 'anonymous_web_enabled', false ) ); ?>
+										/>
+										网页访客
+									</label>
+									<br />
+									<label for="l2d-ai-anonymous-qq">
+										<input
+											type="checkbox"
+											id="l2d-ai-anonymous-qq"
+											name="anonymous_qq_enabled"
+											value="1"
+											<?php checked( '1', (string) $get( $settings, 'anonymous_qq_enabled', false ) ); ?>
+										/>
+										QQ 陌生人（私聊与白名单内的群）
+									</label>
+									<br />
+									<label for="l2d-ai-anonymous-guide">
+										<input
+											type="checkbox"
+											id="l2d-ai-anonymous-guide"
+											name="anonymous_guide_enabled"
+											value="1"
+											<?php checked( '1', (string) $get( $settings, 'anonymous_guide_enabled', false ) ); ?>
+										/>
+										顺带提示去登记（七天最多一次）
+									</label>
+								</fieldset>
+								<p class="description">
+									关掉网页这项后，访客会重新看到登录提示。QQ 白名单里的人不受匿名开关影响。
+								</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-anonymous-web-quota">网页匿名每日上限</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-anonymous-web-quota"
+									name="anonymous_web_daily_quota"
+									value="<?php echo esc_attr( $get( $settings, 'anonymous_web_daily_quota', 0 ) ); ?>"
+									min="0"
+									max="1000"
+									step="1"
+									class="small-text"
+								/>
+								条 / 每个访客
+								<p class="description">按 IP 哈希计数，不保存原始 IP。0 = 关闭网页匿名通道。</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-anonymous-qq-quota">QQ 匿名每日上限</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-anonymous-qq-quota"
+									name="anonymous_qq_daily_quota"
+									value="<?php echo esc_attr( $get( $settings, 'anonymous_qq_daily_quota', 0 ) ); ?>"
+									min="0"
+									max="1000"
+									step="1"
+									class="small-text"
+								/>
+								条 / 每个 QQ
+								<p class="description">只统计没有登记过的 QQ。0 = 关闭 QQ 匿名通道。</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-anonymous-global-quota">匿名全站每日上限</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-anonymous-global-quota"
+									name="anonymous_global_daily_quota"
+									value="<?php echo esc_attr( $get( $settings, 'anonymous_global_daily_quota', 0 ) ); ?>"
+									min="0"
+									max="1000000"
+									step="1"
+									class="regular-text"
+								/>
+								条 / 天（网页 + QQ 合计）
+								<p class="description">
+									和登录用户的额度分开记账，匿名的人吃不掉会员的份。0 = 全站不限量。
+								</p>
+							</td>
+						</tr>
+						<tr>
+							<th colspan="2">
+								<h2 style="margin:16px 0 4px;">提示文案</h2>
+								<p class="description" style="margin:0;">
+									留空 = 使用默认文案（灰字就是默认那句）。
+									文案里的 <code>{place}</code> 会替换成站点地址，其余花括号原样保留。
+								</p>
+							</th>
+						</tr>
+						<?php
+						foreach ( self::COPY_FIELDS as $field_key => $field_meta ) :
+							$field_default = isset( $copy_defaults[ $field_meta[0] ] ) ? (string) $copy_defaults[ $field_meta[0] ] : '';
+							?>
+							<tr>
+								<th scope="row">
+									<label for="l2d-ai-<?php echo esc_attr( $field_key ); ?>"><?php echo esc_html( $field_meta[1] ); ?></label>
+								</th>
+								<td>
+									<textarea
+										id="l2d-ai-<?php echo esc_attr( $field_key ); ?>"
+										name="<?php echo esc_attr( $field_key ); ?>"
+										rows="2"
+										maxlength="500"
+										class="large-text"
+										placeholder="<?php echo esc_attr( $field_default ); ?>"
+									><?php echo esc_textarea( (string) $get( $settings, $field_key, '' ) ); ?></textarea>
+								</td>
+							</tr>
+						<?php endforeach; ?>
 					</table>
 					<?php submit_button( '保存后端参数' ); ?>
 				</form>
