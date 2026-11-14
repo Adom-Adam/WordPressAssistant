@@ -33,12 +33,24 @@ def _cap(role: str, dynamics: object) -> int | float:
     return int(cap) if float(cap).is_integer() else float(cap)
 
 
-def _serialize(conn, row, dynamics: object) -> dict[str, object]:
+def _initial(role: str, dynamics: object) -> int | float:
+    value = role_config(role, dynamics).initial
+    return int(value) if float(value).is_integer() else float(value)
+
+
+def _serialize(
+    conn, row, dynamics: object, persona_key: str
+) -> dict[str, object]:
     uin = str(row["qq_uin"])
     # 角色以 `persons` 为准，不是以名单行为准：`role_for` 顺手把脏数据
     # 归一到 normal，和实际判定保持一致。
     role = role_for(conn, f"qq:{uin}")
     binding = get_credit_store().binding_of_qq(uin)
+    state = conn.execute(
+        """SELECT affection FROM relationship_state
+            WHERE persona_key = ? AND person_key = ?""",
+        (persona_key, f"qq:{uin}"),
+    ).fetchone()
     return {
         "qq_uin": uin,
         "role": role,
@@ -47,6 +59,9 @@ def _serialize(conn, row, dynamics: object) -> dict[str, object]:
         "added_by": str(row["added_by"] or ""),
         "added_at": str(row["added_at"]),
         "bound_user_id": binding.user_id if binding is not None else None,
+        # 还没聊过时是 None，页面显示角色的初始好感。
+        "affection": None if state is None else float(state["affection"]),
+        "affection_initial": _initial(role, dynamics),
     }
 
 
@@ -57,24 +72,27 @@ def _connect():
 
 
 def _read() -> dict[str, object]:
+    persona = get_persona_store().load_active()
     conn = _connect()
     try:
         rows = list_entries(conn)
-        dynamics = get_persona_store().load_active().dynamics
-        entries = [_serialize(conn, row, dynamics) for row in rows]
+        entries = [
+            _serialize(conn, row, persona.dynamics, persona.state_key)
+            for row in rows
+        ]
     finally:
         conn.close()
     return {"entries": entries}
 
 
 def _one(qq_uin: str) -> dict[str, object]:
+    persona = get_persona_store().load_active()
     conn = _connect()
     try:
         row = entry_for(conn, qq_uin)
         if row is None:
             raise HTTPException(status_code=404, detail="QQ 不在白名单里")
-        dynamics = get_persona_store().load_active().dynamics
-        return _serialize(conn, row, dynamics)
+        return _serialize(conn, row, persona.dynamics, persona.state_key)
     finally:
         conn.close()
 

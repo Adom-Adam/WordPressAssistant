@@ -194,6 +194,27 @@ def test_remove_keeps_data_and_purge_deletes_it(client) -> None:
     assert _count("SELECT COUNT(*) FROM persons WHERE person_key = 'qq:123456'") == 0
 
 
+def test_list_includes_affection(client) -> None:
+    _add(client, "123456", role="special")
+
+    conn = memory_db.connect()
+    try:
+        memory_db.init_schema(conn)
+        conn.execute(
+            """INSERT INTO relationship_state
+                   (persona_key, person_key, affection, updated_at)
+               VALUES ('merlin', 'qq:123456', 8.5, '2026-11-10T00:00:00+00:00')"""
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    data = client.get("/api/admin/qq-whitelist", headers=_headers(99, admin=True)).json()
+    entry = next(item for item in data["entries"] if item["qq_uin"] == "123456")
+    assert entry["affection"] == pytest.approx(8.5)
+    assert entry["affection_initial"] == 0
+
+
 def test_invalid_qq_number_is_rejected(client) -> None:
     response = _add(client, "12ab")
 

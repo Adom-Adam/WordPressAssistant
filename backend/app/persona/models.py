@@ -152,11 +152,15 @@ class ReplyDynamics(BaseModel):
     debt_increment: float = Field(default=0.1, ge=0.0, le=1.0)
     debt_half_life_hours: float = Field(default=8.0, gt=0.0, le=720.0)
     debt_lambda: float = Field(default=1.5, gt=0.0, le=10.0)
-    affinity_mid: float = Field(default=0.70, ge=0.0, le=2.0)
-    affinity_amp: float = Field(default=0.60, ge=0.0, le=2.0)
+    # 好感 0 的陌生人按“正常礼貌”对待（1.5），不先打折。
+    # 疲惫、心情、耐心、冲突都由别的乘数压低，这里只负责“对这个人
+    # 愿意投入多少”，所以中心点放在 1.5 而不是 0.7。
+    affinity_mid: float = Field(default=1.50, ge=0.0, le=2.5)
+    affinity_amp: float = Field(default=0.75, ge=0.0, le=2.0)
     affinity_scale: float = Field(default=60.0, gt=0.0, le=1_000.0)
-    affinity_min: float = Field(default=0.10, ge=0.0, le=2.0)
-    affinity_max: float = Field(default=1.20, ge=0.0, le=2.0)
+    affinity_min: float = Field(default=0.10, ge=0.0, le=2.5)
+    # 上限留到 2.2：好感到 100 时曲线仍在上升，不会在 40 分就饱和。
+    affinity_max: float = Field(default=2.20, ge=0.0, le=2.5)
     # 耐心/安全感低时，回复概率最多被压到这两个下限。
     patience_multiplier_min: float = Field(default=0.80, ge=0.0, le=1.0)
     security_multiplier_min: float = Field(default=0.85, ge=0.0, le=1.0)

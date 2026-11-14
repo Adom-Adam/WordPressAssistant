@@ -239,10 +239,11 @@ async def test_high_roll_stays_silent_but_records(tmp_path: Any) -> None:
 
 @async_test
 async def test_warm_state_almost_always_replies(tmp_path: Any) -> None:
-    """好感正常时，即使规则算出来的 p 不高，群下限也会把它抬到 0.90。
+    """好感正常时被点名几乎必回：公式给多少，最少也抬到群下限 0.90。
 
-    普通一句“你好”的规则概率只有 0.55 左右（没有问句、没有叫名字），
-    换成私聊只有一半机会接；在群里被点名，下限把它抬到 0.90。
+    公式里的精力跟时钟走，所以 p0 会随一天里的时间浮动（约 0.82–0.95）。
+    这里断言的是“下限把它托住”，不是某个固定值；关系状态很差时
+    p0 低于下限，同样被托住，见 test_extreme_state_replies_at_floor。
     """
     store = seed_person(tmp_path)  # 好感 60、正常阶段
     sender = FakeSender()
@@ -254,8 +255,8 @@ async def test_warm_state_almost_always_replies(tmp_path: Any) -> None:
 
     assert len(sender.group) == 1
     row = decision_rows()[0]
-    assert row["p0"] < 0.90
-    assert row["p"] == pytest.approx(0.90)
+    assert row["p"] == pytest.approx(max(row["p0"], 0.90))
+    assert row["p"] >= 0.90
 
 
 @async_test

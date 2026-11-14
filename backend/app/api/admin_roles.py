@@ -38,7 +38,15 @@ def _cap(role: str, dynamics: object) -> int | float:
     return int(cap) if float(cap).is_integer() else float(cap)
 
 
-def _serialize(row, dynamics: object) -> dict[str, object]:
+def _initial(role: str, dynamics: object) -> int | float:
+    """这个角色的起始好感。没有关系档案时，后台显示的就是它。"""
+    value = role_config(role, dynamics).initial
+    return int(value) if float(value).is_integer() else float(value)
+
+
+def _serialize(
+    row, dynamics: object, *, affection: float | None
+) -> dict[str, object]:
     role = str(row["role"] or "normal")
     if role not in ROLE_NAMES:  # 脏数据按 normal 展示，和实际行为一致
         role = "normal"
@@ -48,6 +56,10 @@ def _serialize(row, dynamics: object) -> dict[str, object]:
         "display_name": str(row["display_name"] or ""),
         "role": role,
         "cap": _cap(role, dynamics),
+        # None 表示“还没有关系状态”，页面上显示角色的初始好感，
+        # 不能显示 0——那看起来像好感被清空了。
+        "affection": None if affection is None else float(affection),
+        "affection_initial": _initial(role, dynamics),
     }
 
 
@@ -66,39 +78,47 @@ def _promote_admin(conn, admin_user_id: int) -> None:
 
 
 def _read(query: str, admin_user_id: int) -> dict[str, object]:
+    persona = get_persona_store().load_active()
     conn = memory_db.connect()
     try:
         memory_db.init_schema(conn)
         _promote_admin(conn, admin_user_id)
 
         sql = """
-            SELECT person_key, display_name, wp_user_id, role, last_seen_at
-              FROM persons
-             WHERE wp_user_id IS NOT NULL
+            SELECT p.person_key, p.display_name, p.wp_user_id, p.role,
+                   p.last_seen_at, rs.affection
+              FROM persons p
+              LEFT JOIN relationship_state rs
+                     ON rs.persona_key = ? AND rs.person_key = p.person_key
+             WHERE p.wp_user_id IS NOT NULL
         """
-        params: list[object] = []
+        params: list[object] = [persona.state_key]
         text = (query or "").strip()
         if text:
             # 昵称模糊、ID 精确：站长一般记得其中一种。
-            sql += " AND (display_name LIKE ? OR CAST(wp_user_id AS TEXT) = ?)"
+            sql += " AND (p.display_name LIKE ? OR CAST(p.wp_user_id AS TEXT) = ?)"
             params.extend([f"%{text}%", text])
-        sql += " ORDER BY last_seen_at DESC"
+        sql += " ORDER BY p.last_seen_at DESC"
         rows = conn.execute(sql, params).fetchall()
     finally:
         conn.close()
 
-    dynamics = get_persona_store().load_active().dynamics
-    roles = [_serialize(row, dynamics) for row in rows]
+    dynamics = persona.dynamics
+    roles = [
+        _serialize(row, dynamics, affection=row["affection"]) for row in rows
+    ]
     # SQL 已经按最近活跃排好；这里再按角色稳定排序，就是“重要的在前，
     # 同角色里最近来过的在前”。
     roles.sort(key=lambda item: _ROLE_RANK.get(str(item["role"]), 0), reverse=True)
     return {
         "roles": roles,
         "role_caps": {name: _cap(name, dynamics) for name in ROLE_NAMES},
+        "role_initials": {name: _initial(name, dynamics) for name in ROLE_NAMES},
     }
 
 
 def _write(wp_user_id: int, role: str) -> dict[str, object]:
+    persona = get_persona_store().load_active()
     conn = memory_db.connect()
     try:
         memory_db.init_schema(conn)
@@ -109,15 +129,18 @@ def _write(wp_user_id: int, role: str) -> dict[str, object]:
         )
         conn.commit()
         row = conn.execute(
-            """SELECT person_key, display_name, wp_user_id, role
-                 FROM persons WHERE person_key = ?""",
-            (person_key,),
+            """SELECT p.person_key, p.display_name, p.wp_user_id, p.role,
+                      rs.affection
+                 FROM persons p
+                 LEFT JOIN relationship_state rs
+                        ON rs.persona_key = ? AND rs.person_key = p.person_key
+                WHERE p.person_key = ?""",
+            (persona.state_key, person_key),
         ).fetchone()
     finally:
         conn.close()
 
-    dynamics = get_persona_store().load_active().dynamics
-    return _serialize(row, dynamics)
+    return _serialize(row, persona.dynamics, affection=row["affection"])
 
 
 def _reset(wp_user_id: int) -> None:

@@ -17,7 +17,7 @@ from app.proactive.candidates import generate_thoughts, pick_thought, score_targ
 
 def test_score_weights_are_exact() -> None:
     full = score_target(
-        affinity=1.2,
+        closeness=1.0,
         missing=100,
         gap_hours=72,
         quality=1.0,
@@ -29,7 +29,7 @@ def test_score_weights_are_exact() -> None:
     assert full == pytest.approx(0.95)
 
     cold = score_target(
-        affinity=0.0,
+        closeness=0.0,
         missing=0,
         gap_hours=0,
         quality=0.0,
@@ -43,7 +43,7 @@ def test_score_weights_are_exact() -> None:
 
 def test_score_is_clamped() -> None:
     full = score_target(
-        affinity=9,
+        closeness=9,
         missing=999,
         gap_hours=9999,
         quality=9,

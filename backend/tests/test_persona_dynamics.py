@@ -44,7 +44,7 @@ def test_partial_dynamics_merges_with_defaults():
         }
     )
     assert persona.dynamics.reply.base == 0.8
-    assert persona.dynamics.reply.affinity_mid == 0.70
+    assert persona.dynamics.reply.affinity_mid == 1.50
     assert persona.dynamics.relationship.affection_unit == 1.0
     assert persona.state_key == "merlin-v2"
     assert persona.memory_key == "merlin"

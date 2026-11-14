@@ -23,8 +23,8 @@ from app.relationship.conflict import stage_multiplier
 from app.relationship.state import (
     DEFAULT_TIMEZONE,
     RelationshipState,
-    affinity_for,
     clamp,
+    closeness_for,
     decay_state,
     now_iso,
     parse_iso,
@@ -96,7 +96,7 @@ def _clamp01(value: float) -> float:
 
 def score_target(
     *,
-    affinity: float,
+    closeness: float,
     missing: float,
     gap_hours: float,
     quality: float,
@@ -107,7 +107,7 @@ def score_target(
 ) -> float:
     """基础分：只看“关系本身”有没有到该想起的程度。"""
     score = (
-        WEIGHTS["closeness"] * _clamp01(affinity / 1.2)
+        WEIGHTS["closeness"] * _clamp01(closeness)
         + WEIGHTS["missing"] * _clamp01(missing / 100.0)
         + WEIGHTS["gap"] * _clamp01(gap_hours / _GAP_FULL_HOURS)
         + WEIGHTS["quality"] * _clamp01(quality)
@@ -266,7 +266,7 @@ def candidates(
             state.reply_debt / 0.5 + (0.5 if has_pending else 0.0), 0.0, 1.0
         )
         base = score_target(
-            affinity=affinity_for(state.affection, dynamics),
+            closeness=closeness_for(state.affection, dynamics),
             missing=state.missing,
             gap_hours=_gap_hours(state, stamp),
             quality=recent_quality(conn, persona_key, person_key),

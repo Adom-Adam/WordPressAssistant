@@ -27,6 +27,7 @@ final class L2D_AI_QQ_Whitelist {
 
 	const PAGE_SLUG = 'l2d-ai-qq-whitelist';
 	const TRANSIENT = 'l2d_ai_qq_whitelist_notice_';
+	const PER_PAGE  = 20;
 
 	/** 与后端 `QQWhitelistAdd.role` 的默认值保持一致。 */
 	const DEFAULT_ROLE = 'special';
@@ -60,7 +61,7 @@ final class L2D_AI_QQ_Whitelist {
 		return self::TRANSIENT . get_current_user_id();
 	}
 
-	private static function redirect_with_notice( $message, $is_error = false ) {
+	private static function redirect_with_notice( $message, $is_error = false, array $extra = array() ) {
 		set_transient(
 			self::notice_transient(),
 			array(
@@ -69,8 +70,33 @@ final class L2D_AI_QQ_Whitelist {
 			),
 			60
 		);
-		wp_safe_redirect( self::page_url() );
+		wp_safe_redirect( self::page_url( $extra ) );
 		exit;
+	}
+
+	/** 当前搜索词。空串表示不过滤。 */
+	private static function search() {
+		return isset( $_GET['s'] ) ? sanitize_text_field( wp_unslash( $_GET['s'] ) ) : '';
+	}
+
+	/**
+	 * 跳转时把搜索和页码带回去，避免改完一个人就回到第一页。
+	 *
+	 * 表单提交到 admin-post.php，那个请求里没有本页的查询参数，
+	 * 所以搜索词和页码由表单的隐藏字段带过来。
+	 */
+	private static function back_args() {
+		$args = array();
+		if ( isset( $_POST['back_s'] ) && '' !== $_POST['back_s'] ) {
+			$args['s'] = sanitize_text_field( wp_unslash( $_POST['back_s'] ) );
+		}
+		if ( isset( $_POST['back_paged'] ) ) {
+			$paged = absint( $_POST['back_paged'] );
+			if ( $paged > 1 ) {
+				$args['paged'] = $paged;
+			}
+		}
+		return $args;
 	}
 
 	/** 后端的 409 要翻译成“去角色名单里设置”，否则站长不知道下一步去哪。 */
@@ -115,10 +141,10 @@ final class L2D_AI_QQ_Whitelist {
 			)
 		);
 		if ( is_wp_error( $result ) ) {
-			self::redirect_with_notice( self::error_message( $result ), true );
+			self::redirect_with_notice( self::error_message( $result ), true, self::back_args() );
 		}
 
-		self::redirect_with_notice( sprintf( 'QQ %s 已加入白名单。', $qq ) );
+		self::redirect_with_notice( sprintf( 'QQ %s 已加入白名单。', $qq ), false, self::back_args() );
 	}
 
 	public static function handle_update() {
@@ -141,10 +167,10 @@ final class L2D_AI_QQ_Whitelist {
 			)
 		);
 		if ( is_wp_error( $result ) ) {
-			self::redirect_with_notice( self::error_message( $result ), true );
+			self::redirect_with_notice( self::error_message( $result ), true, self::back_args() );
 		}
 
-		self::redirect_with_notice( sprintf( 'QQ %s 已更新。', $qq ) );
+		self::redirect_with_notice( sprintf( 'QQ %s 已更新。', $qq ), false, self::back_args() );
 	}
 
 	public static function handle_remove() {
@@ -159,11 +185,13 @@ final class L2D_AI_QQ_Whitelist {
 			'/admin/qq-whitelist/' . rawurlencode( $qq )
 		);
 		if ( is_wp_error( $result ) ) {
-			self::redirect_with_notice( $result->get_error_message(), true );
+			self::redirect_with_notice( $result->get_error_message(), true, self::back_args() );
 		}
 
 		self::redirect_with_notice(
-			sprintf( 'QQ %s 已移出名单，历史记忆保留；再加回来还能接着聊。', $qq )
+			sprintf( 'QQ %s 已移出名单，历史记忆保留；再加回来还能接着聊。', $qq ),
+			false,
+			self::back_args()
 		);
 	}
 
@@ -179,20 +207,114 @@ final class L2D_AI_QQ_Whitelist {
 			'/admin/qq-whitelist/' . rawurlencode( $qq ) . '/data'
 		);
 		if ( is_wp_error( $result ) ) {
-			self::redirect_with_notice( $result->get_error_message(), true );
+			self::redirect_with_notice( $result->get_error_message(), true, self::back_args() );
 		}
 
-		self::redirect_with_notice( sprintf( 'QQ %s 的全部数据已删除，且已移出名单。', $qq ) );
+		self::redirect_with_notice(
+			sprintf( 'QQ %s 的全部数据已删除，且已移出名单。', $qq ),
+			false,
+			self::back_args()
+		);
 	}
 
 	// ------------------------------------------------------------------
 	// 页面
 	// ------------------------------------------------------------------
 
+	/** 当前搜索词和页码，供表单的隐藏字段使用。 */
+	private static $current = array(
+		's'     => '',
+		'paged' => 1,
+	);
+
+	private static function hidden_back_fields() {
+		printf(
+			'<input type="hidden" name="back_s" value="%s" />',
+			esc_attr( self::$current['s'] )
+		);
+		printf(
+			'<input type="hidden" name="back_paged" value="%d" />',
+			(int) self::$current['paged']
+		);
+	}
+
+	/** 给每条名单补上已绑定账号的用户名和昵称（未绑定就是空串）。 */
+	private static function with_bound_accounts( array $entries ) {
+		foreach ( $entries as $index => $entry ) {
+			$login = '';
+			$name  = '';
+			$bound = isset( $entry['bound_user_id'] ) ? (int) $entry['bound_user_id'] : 0;
+			if ( $bound > 0 ) {
+				$user = get_userdata( $bound );
+				if ( $user ) {
+					$login = (string) $user->user_login;
+					$name  = (string) $user->display_name;
+				}
+			}
+			$entries[ $index ]['bound_user_login']   = $login;
+			$entries[ $index ]['bound_display_name'] = $name;
+		}
+		return $entries;
+	}
+
+	/** 模糊匹配：任意一个字段包含搜索词就算命中。 */
+	private static function any_contains( array $values, $search ) {
+		foreach ( $values as $value ) {
+			if ( false !== stripos( (string) $value, $search ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static function filter_entries( array $entries, $search ) {
+		if ( '' === $search ) {
+			return $entries;
+		}
+		$filtered = array();
+		foreach ( $entries as $entry ) {
+			if ( self::any_contains(
+				array(
+					isset( $entry['qq_uin'] ) ? $entry['qq_uin'] : '',
+					isset( $entry['note'] ) ? $entry['note'] : '',
+					isset( $entry['bound_user_login'] ) ? $entry['bound_user_login'] : '',
+					isset( $entry['bound_display_name'] ) ? $entry['bound_display_name'] : '',
+				),
+				$search
+			) ) {
+				$filtered[] = $entry;
+			}
+		}
+		return $filtered;
+	}
+
+	/** 好感显示：有状态就显示数值，没有就标明是角色的初始值。 */
+	private static function affection_text( array $entry ) {
+		if ( isset( $entry['affection'] ) && null !== $entry['affection'] ) {
+			return number_format_i18n( (float) $entry['affection'], 1 );
+		}
+		$initial = isset( $entry['affection_initial'] ) ? $entry['affection_initial'] : '—';
+		return '初始 ' . $initial;
+	}
+
 	public static function render_page() {
+		$search = self::search();
+		$paged  = isset( $_GET['paged'] ) ? max( 1, absint( $_GET['paged'] ) ) : 1;
+
 		$data       = L2D_AI_Plugin::request_backend( 'GET', '/admin/qq-whitelist' );
 		$backend_ok = ! is_wp_error( $data );
 		$entries    = $backend_ok && isset( $data['entries'] ) ? (array) $data['entries'] : array();
+
+		$entries = self::filter_entries( self::with_bound_accounts( $entries ), $search );
+		$total   = count( $entries );
+		$pages   = max( 1, (int) ceil( $total / self::PER_PAGE ) );
+		$paged   = min( $paged, $pages );
+		$rows    = array_slice( $entries, ( $paged - 1 ) * self::PER_PAGE, self::PER_PAGE );
+
+		self::$current = array(
+			's'     => $search,
+			'paged' => $paged,
+		);
 
 		$notice = get_transient( self::notice_transient() );
 		delete_transient( self::notice_transient() );
@@ -221,6 +343,7 @@ final class L2D_AI_QQ_Whitelist {
 			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
 				<input type="hidden" name="action" value="l2d_ai_qq_whitelist_add" />
 				<?php wp_nonce_field( 'l2d_ai_qq_whitelist' ); ?>
+				<?php self::hidden_back_fields(); ?>
 				<table class="form-table" role="presentation">
 					<tr>
 						<th scope="row"><label for="l2d-ai-whitelist-qq">QQ 号</label></th>
@@ -242,11 +365,21 @@ final class L2D_AI_QQ_Whitelist {
 			</form>
 
 			<h2>名单</h2>
+
+			<form method="get" action="<?php echo esc_url( admin_url( 'options-general.php' ) ); ?>" style="margin: 1em 0;">
+				<input type="hidden" name="page" value="<?php echo esc_attr( self::PAGE_SLUG ); ?>" />
+				<input type="search" name="s" value="<?php echo esc_attr( $search ); ?>" placeholder="搜索 QQ 号 / 备注 / 绑定账号" />
+				<?php submit_button( '搜索', 'secondary', '', false ); ?>
+			</form>
+
 			<table class="widefat striped">
 				<thead>
 					<tr>
 						<th>QQ</th>
+						<th>用户名</th>
+						<th>昵称</th>
 						<th>角色</th>
+						<th>好感</th>
 						<th>好感上限</th>
 						<th>备注</th>
 						<th>添加时间</th>
@@ -255,10 +388,10 @@ final class L2D_AI_QQ_Whitelist {
 					</tr>
 				</thead>
 				<tbody>
-				<?php if ( empty( $entries ) ) : ?>
-					<tr><td colspan="7"><?php echo $backend_ok ? '名单里还没有人。' : '—'; ?></td></tr>
+				<?php if ( empty( $rows ) ) : ?>
+					<tr><td colspan="10"><?php echo $backend_ok ? ( '' !== $search ? '没有匹配的白名单条目。' : '名单里还没有人。' ) : '—'; ?></td></tr>
 				<?php endif; ?>
-				<?php foreach ( $entries as $entry ) : ?>
+				<?php foreach ( $rows as $entry ) : ?>
 					<?php
 					$qq       = isset( $entry['qq_uin'] ) ? (string) $entry['qq_uin'] : '';
 					$role     = isset( $entry['role'] ) ? (string) $entry['role'] : 'normal';
@@ -266,10 +399,15 @@ final class L2D_AI_QQ_Whitelist {
 					$note     = isset( $entry['note'] ) ? (string) $entry['note'] : '';
 					$added_at = isset( $entry['added_at'] ) ? (string) $entry['added_at'] : '';
 					$bound    = isset( $entry['bound_user_id'] ) ? $entry['bound_user_id'] : null;
+					$login    = isset( $entry['bound_user_login'] ) ? (string) $entry['bound_user_login'] : '';
+					$name     = isset( $entry['bound_display_name'] ) ? (string) $entry['bound_display_name'] : '';
 					?>
 					<tr>
 						<td><code><?php echo esc_html( $qq ); ?></code></td>
+						<td><?php echo '' !== $login ? esc_html( $login ) : '没有'; ?></td>
+						<td><?php echo '' !== $name ? esc_html( $name ) : '没有'; ?></td>
 						<td><?php echo esc_html( L2D_AI_Roles::role_label( $role ) ); ?></td>
+						<td><?php echo esc_html( self::affection_text( $entry ) ); ?></td>
 						<td><?php echo esc_html( (string) $cap ); ?></td>
 						<td><?php echo '' !== $note ? esc_html( $note ) : '—'; ?></td>
 						<td><?php echo '' !== $added_at ? esc_html( $added_at ) : '—'; ?></td>
@@ -287,6 +425,7 @@ final class L2D_AI_QQ_Whitelist {
 								<input type="hidden" name="action" value="l2d_ai_qq_whitelist_update" />
 								<input type="hidden" name="qq_uin" value="<?php echo esc_attr( $qq ); ?>" />
 								<?php wp_nonce_field( 'l2d_ai_qq_whitelist' ); ?>
+								<?php self::hidden_back_fields(); ?>
 								<?php L2D_AI_Roles::render_role_select( $role ); ?>
 								<input type="text" name="note" value="<?php echo esc_attr( $note ); ?>" placeholder="备注" class="regular-text" />
 								<button type="submit" class="button button-small">保存</button>
@@ -296,6 +435,7 @@ final class L2D_AI_QQ_Whitelist {
 								<input type="hidden" name="action" value="l2d_ai_qq_whitelist_remove" />
 								<input type="hidden" name="qq_uin" value="<?php echo esc_attr( $qq ); ?>" />
 								<?php wp_nonce_field( 'l2d_ai_qq_whitelist' ); ?>
+								<?php self::hidden_back_fields(); ?>
 								<button type="submit" class="button button-small">移出名单</button>
 							</form>
 
@@ -303,6 +443,7 @@ final class L2D_AI_QQ_Whitelist {
 								<input type="hidden" name="action" value="l2d_ai_qq_whitelist_purge" />
 								<input type="hidden" name="qq_uin" value="<?php echo esc_attr( $qq ); ?>" />
 								<?php wp_nonce_field( 'l2d_ai_qq_whitelist' ); ?>
+								<?php self::hidden_back_fields(); ?>
 								<button type="submit" class="button button-small button-link-delete" onclick="return confirm('这会删除这个 QQ 的全部记忆和关系，无法恢复。确定吗？');">彻底删除数据</button>
 							</form>
 						</td>
@@ -310,6 +451,21 @@ final class L2D_AI_QQ_Whitelist {
 				<?php endforeach; ?>
 				</tbody>
 			</table>
+
+			<?php if ( $pages > 1 ) : ?>
+				<p class="tablenav-pages">
+					<?php if ( $paged > 1 ) : ?>
+						<a class="button" href="<?php echo esc_url( add_query_arg( array( 'page' => self::PAGE_SLUG, 's' => $search, 'paged' => $paged - 1 ), admin_url( 'options-general.php' ) ) ); ?>">上一页</a>
+					<?php endif; ?>
+					<span class="description">
+						第 <?php echo esc_html( (string) $paged ); ?> / <?php echo esc_html( (string) $pages ); ?> 页，
+						共 <?php echo esc_html( (string) $total ); ?> 条
+					</span>
+					<?php if ( $paged < $pages ) : ?>
+						<a class="button" href="<?php echo esc_url( add_query_arg( array( 'page' => self::PAGE_SLUG, 's' => $search, 'paged' => $paged + 1 ), admin_url( 'options-general.php' ) ) ); ?>">下一页</a>
+					<?php endif; ?>
+				</p>
+			<?php endif; ?>
 		</div>
 		<?php
 	}

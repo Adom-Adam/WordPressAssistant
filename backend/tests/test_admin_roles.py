@@ -136,6 +136,38 @@ def test_search_filters_by_display_name(client) -> None:
     assert [item["wp_user_id"] for item in data["roles"]] == [7]
 
 
+def test_list_includes_affection_and_role_initials(client) -> None:
+    conn = memory_db.connect()
+    try:
+        memory_db.init_schema(conn)
+        identity.touch_person(conn, "wp:7", display_name="阿东", wp_user_id=7)
+        conn.execute(
+            """INSERT INTO relationship_state
+                   (persona_key, person_key, affection, updated_at)
+               VALUES ('merlin', 'wp:7', 12.5, '2026-11-10T00:00:00+00:00')"""
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    data = client.get("/api/admin/roles", headers=_headers(99, admin=True)).json()
+
+    assert data["role_initials"] == {
+        "owner": 60,
+        "exception": 0,
+        "special": 0,
+        "normal": 0,
+    }
+    entry = next(item for item in data["roles"] if item["wp_user_id"] == 7)
+    assert entry["affection"] == pytest.approx(12.5)
+    assert entry["affection_initial"] == 0
+    # 管理员自己只有 persons 行、还没有关系状态：好感要给“初始”，
+    # 否则后台看起来像好感被清零了。
+    me = next(item for item in data["roles"] if item["wp_user_id"] == 99)
+    assert me["affection"] is None
+    assert me["affection_initial"] == 60
+
+
 def test_non_admin_is_rejected(client) -> None:
     assert client.get("/api/admin/roles", headers=_headers(7)).status_code == 403
     assert (

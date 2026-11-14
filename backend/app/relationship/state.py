@@ -72,6 +72,17 @@ def affinity_for(affection: float, dynamics: Dynamics) -> float:
     return clamp(value, cfg.affinity_min, cfg.affinity_max)
 
 
+def closeness_for(affection: float, dynamics: Dynamics) -> float:
+    """把好感换算成 0–1 的亲近度，给主动消息打分用。
+
+    回复概率用的 `affinity_for` 是“愿不愿意投入”的倍率，中心在 1.5；
+    主动消息关心的是“这个人离我多近”，0.5 表示刚认识。两者分开，
+    调回复概率时不会把陌生人连带算成亲密对象。
+    """
+    scale = dynamics.reply.affinity_scale
+    return clamp(0.5 + 0.5 * math.tanh(affection / scale), 0.0, 1.0)
+
+
 def role_config(role: str, dynamics: Dynamics) -> RoleDynamics:
     """未知角色回退到 normal，避免脏数据把对话打挂。"""
     return dynamics.relationship.roles.get(role) or dynamics.relationship.roles[

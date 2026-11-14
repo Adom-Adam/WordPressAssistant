@@ -76,7 +76,7 @@ def test_load_signals_derives_affinity(conn):
     d = dynamics()
     signals = load_signals(conn, "merlin", "wp:7", role="normal", dynamics=d)
     assert signals.state.affection == 0
-    assert signals.affinity == pytest.approx(0.70, abs=0.01)
+    assert signals.affinity == pytest.approx(1.50, abs=0.01)
 
 
 def test_record_reply_grows_affection_and_sets_last_reply(conn):

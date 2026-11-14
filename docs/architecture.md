@@ -423,11 +423,11 @@ QQ 有两种计法，由后台开关 `qq_quota_shared` 选择：
 后台接口（都需要管理员 JWT，由插件服务器端签发）：
 
 ```
-GET    /admin/roles?query=       列出关系角色 + 当前四档上限
+GET    /admin/roles?query=       列出关系角色 + 当前四档上限 + 好感/角色初始好感
 PUT    /admin/roles              设置某人的角色
 DELETE /admin/roles/{wp_id}      恢复普通人
 
-GET    /admin/qq-whitelist       名单 + 每行的绑定状态
+GET    /admin/qq-whitelist       名单 + 每行的绑定状态与好感
 POST   /admin/qq-whitelist       加号（已绑定的号返回 409）
 PUT    /admin/qq-whitelist/{qq}
 DELETE /admin/qq-whitelist/{qq}          移出名单，数据休眠

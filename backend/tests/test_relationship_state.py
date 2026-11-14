@@ -10,6 +10,7 @@ from app.persona.models import PersonaVersion
 from app.relationship.state import (
     affinity_for,
     apply_event,
+    closeness_for,
     decay_state,
     energy_at,
     get_or_create_state,
@@ -61,16 +62,27 @@ def test_invalid_timezone_falls_back_to_utc():
 
 
 def test_affinity_matches_default_curve():
+    # 0 分是“正常礼貌”而不是打折：她不会因为不认识就先少回一半。
     d = dynamics()
-    assert affinity_for(-100, d) == pytest.approx(0.14, abs=0.01)
-    assert affinity_for(-60, d) == pytest.approx(0.24, abs=0.01)
-    assert affinity_for(-20, d) == pytest.approx(0.51, abs=0.01)
-    assert affinity_for(0, d) == pytest.approx(0.70, abs=0.01)
-    assert affinity_for(20, d) == pytest.approx(0.89, abs=0.01)
-    assert affinity_for(40, d) == pytest.approx(1.05, abs=0.01)
-    assert affinity_for(60, d) == pytest.approx(1.16, abs=0.01)
-    assert affinity_for(85, d) == pytest.approx(1.20, abs=0.01)
-    assert affinity_for(100, d) == pytest.approx(1.20)
+    assert affinity_for(-100, d) == pytest.approx(0.80, abs=0.01)
+    assert affinity_for(-60, d) == pytest.approx(0.93, abs=0.01)
+    assert affinity_for(-20, d) == pytest.approx(1.26, abs=0.01)
+    assert affinity_for(0, d) == pytest.approx(1.50, abs=0.01)
+    assert affinity_for(20, d) == pytest.approx(1.74, abs=0.01)
+    assert affinity_for(40, d) == pytest.approx(1.94, abs=0.01)
+    assert affinity_for(60, d) == pytest.approx(2.07, abs=0.01)
+    assert affinity_for(85, d) == pytest.approx(2.17, abs=0.01)
+    assert affinity_for(100, d) == pytest.approx(2.20, abs=0.01)
+
+
+def test_closeness_for_is_neutral_at_zero():
+    # 主动消息用 0–1 的亲近度，0.5 表示“刚认识、不亲也不远”。
+    d = dynamics()
+    assert closeness_for(0, d) == pytest.approx(0.50, abs=0.01)
+    assert closeness_for(60, d) == pytest.approx(0.88, abs=0.01)
+    assert closeness_for(-60, d) == pytest.approx(0.12, abs=0.01)
+    assert closeness_for(-100, d) == pytest.approx(0.03, abs=0.01)
+    assert closeness_for(100, d) == pytest.approx(0.97, abs=0.01)
 
 
 def test_affinity_uses_custom_curve():
