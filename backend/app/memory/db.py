@@ -191,6 +191,24 @@ CREATE TABLE IF NOT EXISTS appraisal_usage (
     PRIMARY KEY (scope, day)
 );
 
+-- QQ 聊天图片理解的每日用量。结构和 appraisal_usage 相同：
+-- scope 是 'global' 或 'person:<person_key>'。
+CREATE TABLE IF NOT EXISTS qq_image_usage (
+    scope TEXT NOT NULL,
+    day TEXT NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (scope, day)
+);
+
+-- 图片理解的文字缓存，按图片内容哈希命中：同一张表情包只花一次钱。
+-- 只存模型生成的短描述，不存原图。
+CREATE TABLE IF NOT EXISTS qq_image_cache (
+    key         TEXT PRIMARY KEY,
+    description TEXT NOT NULL,
+    model       TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+
 -- 每次主动决策的审计：念头、分数、阈值、结果。
 CREATE TABLE IF NOT EXISTS proactive_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

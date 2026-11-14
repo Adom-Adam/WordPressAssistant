@@ -131,6 +131,7 @@ def make_adapter(
     wp_site_url: str = "",
     policy: str = "always",
     persona: PersonaVersion | None = None,
+    image_describer: Any = None,
 ) -> tuple[QQAdapter, FakeSender, CreditStore]:
     settings = Settings(
         qq_enabled=True,
@@ -150,6 +151,7 @@ def make_adapter(
         gate=AllowAllGate(),
         persona=persona or make_persona(),
         rng=random.Random(0),
+        image_describer=image_describer,
     )
     return adapter, sender, store
 

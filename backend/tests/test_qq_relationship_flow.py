@@ -238,6 +238,38 @@ async def test_new_message_interrupts_generation_and_merges(tmp_path: Any) -> No
 
 
 @async_test
+async def test_interrupted_partial_is_not_kept_in_history(tmp_path: Any) -> None:
+    """打断时没发出去的那半句不能进历史。
+
+    用户从没看到它；如果写进历史，下一轮模型会以为第一句已经答过，
+    只接着最后一句说。
+    """
+    seen: list[list[tuple[str, str]]] = []
+    started = asyncio.Event()
+
+    async def partial_then_block(messages: Any, **kwargs: Any) -> Any:
+        seen.append([(message.role, message.content) for message in messages])
+        if len(seen) == 1:
+            yield {"type": "delta", "content": "我在"}
+            started.set()
+            await asyncio.sleep(30)
+        yield {"type": "delta", "content": "在的"}
+
+    adapter, sender, _ = make_adapter(
+        tmp_path, stream=partial_then_block, policy="always"
+    )
+
+    first = asyncio.create_task(adapter.handle_event(private_event(10001, "第一句", 1)))
+    await started.wait()
+    second = asyncio.create_task(adapter.handle_event(private_event(10001, "第二句", 2)))
+
+    await asyncio.gather(first, second)
+
+    assert seen[1] == [("user", "第一句\n第二句")]
+    assert sender.private == [(10001, "在的")]
+
+
+@async_test
 async def test_relationship_failure_still_replies(tmp_path: Any, monkeypatch: Any) -> None:
     def broken_connect(*args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("memory db is down")

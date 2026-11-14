@@ -441,9 +441,22 @@ DELETE /admin/qq-groups/{gid}    只关第一层，策略行保留
 
 删除一个人的数据要覆盖：`persons`、`person_aliases`、`events`、`memories`、
 `memories_vec`、`relationship_state`、`relationship_events`、`decision_log`、
-`appraisal_log`、`appraisal_usage`、`pending_topics`、`proactive_log`。
+`appraisal_log`、`appraisal_usage`、`qq_image_usage`、`pending_topics`、`proactive_log`。
 `relationship_state` 不在“按 person_key 直接删”的通用清单里（它按 persona 逐行合并），
 单独一条 DELETE——漏了它会让主动消息继续找一个已经被删掉的人。
+`qq_image_cache` 是全局的图片描述缓存（按内容哈希），不属于某个人，因此不随删除清理。
+
+### QQ 图片与表情包
+
+解析层把 OneBot 的分段消息转成文本：`face` 直接翻成 `[微笑]` 这类文字，
+`image` / `mface` 留占位符并把 URL 记进附件。回合合并时附件随文本一起排队，
+不会因为防抖或打断丢失。
+
+理解只在会调用模型的路径上进行：私聊、匿名私聊、被指名的群消息、
+`trigger=every` 的群消息。视觉调用复用 `deepseek-flash`，结果按内容哈希
+写入 `qq_image_cache`；每日预算记在 `qq_image_usage`（`global` / `person:<key>`），
+和聊天额度、评估预算互不占用。下载失败、超时或超预算时退回
+`[图片：加载失败]`；功能整体关闭才保留普通占位符，不影响回复。
 
 ### 匿名路径的边界
 

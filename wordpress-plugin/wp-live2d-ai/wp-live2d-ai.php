@@ -1139,6 +1139,8 @@ final class L2D_AI_Plugin {
 			'agent_max_seconds'     => array( 5, 300 ),
 			'appraisal_global_daily_budget' => array( 0, 1000000 ),
 			'appraisal_per_user_daily_budget' => array( 0, 1000 ),
+			'qq_vision_global_daily_budget' => array( 0, 1000000 ),
+			'qq_vision_per_user_daily_budget' => array( 0, 1000 ),
 			'proactive_tick_minutes'        => array( 5, 120 ),
 			'proactive_min_interval_minutes' => array( 0, 10080 ),
 			'proactive_per_user_daily_limit' => array( 0, 100 ),
@@ -1172,6 +1174,7 @@ final class L2D_AI_Plugin {
 		$patch['qq_quota_shared'] = ! empty( $_POST['qq_quota_shared'] );
 		$patch['qq_unlimited']    = ! empty( $_POST['qq_unlimited'] );
 		$patch['appraisal_enabled'] = ! empty( $_POST['appraisal_enabled'] );
+		$patch['qq_vision_enabled'] = ! empty( $_POST['qq_vision_enabled'] );
 		$patch['proactive_enabled'] = ! empty( $_POST['proactive_enabled'] );
 		$patch['anonymous_web_enabled']   = ! empty( $_POST['anonymous_web_enabled'] );
 		$patch['anonymous_qq_enabled']    = ! empty( $_POST['anonymous_qq_enabled'] );
@@ -1923,6 +1926,69 @@ final class L2D_AI_Plugin {
 								/>
 								次
 								<p class="description">0 = 不限。按本地日（QUOTA_TIMEZONE）重置。</p>
+							</td>
+						</tr>
+						<tr>
+							<th colspan="2">
+								<h2 style="margin:16px 0 4px;">QQ 图片理解</h2>
+								<p class="description" style="margin:0;">
+									把 QQ 里的图片和表情包交给视觉模型，转成一句中文描述再参与对话。
+									图片会发送到与建站图片索引相同的视觉服务；关掉后只保留「[图片]」占位符。
+								</p>
+							</th>
+						</tr>
+						<tr>
+							<th scope="row">启用图片理解</th>
+							<td>
+								<label for="l2d-ai-qq-vision-enabled">
+									<input
+										type="checkbox"
+										id="l2d-ai-qq-vision-enabled"
+										name="qq_vision_enabled"
+										value="1"
+										<?php checked( '1', (string) $get( $settings, 'qq_vision_enabled', true ) ); ?>
+									/>
+									让梅林看懂图片和表情包
+								</label>
+								<p class="description">群聊只理解叫到她的消息；私聊里一条消息最多理解前 4 张图。</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-qq-vision-global">全站每日图片预算</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-qq-vision-global"
+									name="qq_vision_global_daily_budget"
+									value="<?php echo esc_attr( $get( $settings, 'qq_vision_global_daily_budget', 300 ) ); ?>"
+									min="0"
+									max="1000000"
+									step="1"
+									class="regular-text"
+								/>
+								张
+								<p class="description">0 = 不限。缓存命中的图片不计数；失败会退还名额。</p>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row">
+								<label for="l2d-ai-qq-vision-user">每人每日图片预算</label>
+							</th>
+							<td>
+								<input
+									type="number"
+									id="l2d-ai-qq-vision-user"
+									name="qq_vision_per_user_daily_budget"
+									value="<?php echo esc_attr( $get( $settings, 'qq_vision_per_user_daily_budget', 30 ) ); ?>"
+									min="0"
+									max="1000"
+									step="1"
+									class="small-text"
+								/>
+								张
+								<p class="description">0 = 不限。按本地日（QUOTA_TIMEZONE）重置，不扣用户聊天额度。</p>
 							</td>
 						</tr>
 						<tr>

@@ -6,7 +6,7 @@ QQ 私聊的现实是：人打字很快，一句话会拆成好几条；上一�
 
 这里按会话（key）维护一个小队列：
 
-    submit(text) ──▶ 队列 ──▶ 防抖窗口 ──▶ handler([texts])
+    submit(text, payload) ──▶ 队列 ──▶ 防抖窗口 ──▶ handler([messages])
 
 - 防抖：最后一条到达后再等 `debounce` 秒，总等待不超过 `max_debounce`；
 - 合并：窗口内的多条消息交给 handler 一次处理；
@@ -24,15 +24,24 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
-Handler = Callable[[list[str]], Awaitable[dict]]
+@dataclass(frozen=True, slots=True)
+class QueuedMessage:
+    """排队中的一条消息：文本，以及随行数据（目前是图片附件）。"""
+
+    text: str
+    payload: Any = None
+
+
+Handler = Callable[[list[QueuedMessage]], Awaitable[dict]]
 
 
 @dataclass
 class _Conversation:
-    queue: list[str] = field(default_factory=list)
+    queue: list[QueuedMessage] = field(default_factory=list)
     waiters: list[asyncio.Future] = field(default_factory=list)
     first_at: float | None = None
     last_at: float = 0.0
@@ -63,8 +72,13 @@ class ConversationCoordinator:
         handler: Handler,
         debounce: float,
         max_debounce: float,
+        payload: Any = None,
     ) -> dict:
-        """把一条消息放进会话，等待它所在回合的结果。"""
+        """把一条消息放进会话，等待它所在回合的结果。
+
+        `payload` 随文本一起排队，合并/打断时不会丢；目前用来携带
+        图片和表情包附件。
+        """
         loop = asyncio.get_running_loop()
         conversation = self._conversations.get(key)
         if conversation is None or (
@@ -74,7 +88,7 @@ class ConversationCoordinator:
             self._conversations[key] = conversation
 
         now = loop.time()
-        conversation.queue.append(str(text))
+        conversation.queue.append(QueuedMessage(text=str(text), payload=payload))
         conversation.last_at = now
         if conversation.first_at is None:
             conversation.first_at = now
@@ -127,23 +141,23 @@ class ConversationCoordinator:
             while conversation.queue:
                 await self._wait_window(conversation, debounce, max_debounce)
 
-                texts = conversation.queue
+                messages = conversation.queue
                 waiters = conversation.waiters
                 conversation.queue = []
                 conversation.waiters = []
                 conversation.first_at = None
-                if not texts:
+                if not messages:
                     break
 
-                conversation.round_task = loop.create_task(handler(texts))
+                conversation.round_task = loop.create_task(handler(messages))
                 try:
                     result = await conversation.round_task
                 except asyncio.CancelledError:
                     current = asyncio.current_task()
                     if current is not None and current.cancelling():
                         raise
-                    # 这一轮被新消息打断：文本放回队首，等待者立刻返回。
-                    conversation.queue[:0] = texts
+                    # 这一轮被新消息打断：文本和附件放回队首，等待者立刻返回。
+                    conversation.queue[:0] = messages
                     conversation.round_task = None
                     for waiter in waiters:
                         if not waiter.done():

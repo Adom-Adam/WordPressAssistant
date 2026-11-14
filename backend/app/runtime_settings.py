@@ -92,6 +92,11 @@ class RuntimeSettings:
     copy_anon_quota_user: str
     copy_anon_quota_global: str
     copy_anon_group_ask: str
+    # 后加的字段放在末尾并给默认值：旧测试手工构造 RuntimeSettings 时
+    # 不需要逐个补齐，生产值仍由 _defaults_from_settings 注入。
+    qq_vision_enabled: bool = True
+    qq_vision_global_daily_budget: int = 300
+    qq_vision_per_user_daily_budget: int = 30
 
 
 # 每个字段的合法范围。管理员接口和读取文件时都会用同一套规则，
@@ -108,6 +113,8 @@ _INT_RANGES: dict[str, tuple[int, int]] = {
     "agent_max_tool_calls": (1, 20),
     "appraisal_global_daily_budget": (0, 1_000_000),
     "appraisal_per_user_daily_budget": (0, 1000),
+    "qq_vision_global_daily_budget": (0, 1_000_000),
+    "qq_vision_per_user_daily_budget": (0, 1000),
     "proactive_tick_minutes": (5, 120),
     "proactive_min_interval_minutes": (0, 10_080),
     "proactive_per_user_daily_limit": (0, 100),
@@ -123,6 +130,7 @@ _BOOL_FIELDS = {
     "qq_quota_shared",
     "qq_unlimited",
     "appraisal_enabled",
+    "qq_vision_enabled",
     "proactive_enabled",
     "anonymous_web_enabled",
     "anonymous_qq_enabled",
@@ -169,6 +177,9 @@ def _defaults_from_settings(settings: Settings) -> RuntimeSettings:
         appraisal_timeout_seconds=settings.appraisal_timeout_seconds,
         appraisal_global_daily_budget=settings.appraisal_global_daily_budget,
         appraisal_per_user_daily_budget=settings.appraisal_per_user_daily_budget,
+        qq_vision_enabled=settings.qq_vision_enabled,
+        qq_vision_global_daily_budget=settings.qq_vision_global_daily_budget,
+        qq_vision_per_user_daily_budget=settings.qq_vision_per_user_daily_budget,
         proactive_enabled=settings.proactive_enabled,
         proactive_tick_minutes=settings.proactive_tick_minutes,
         proactive_think_threshold=settings.proactive_think_threshold,

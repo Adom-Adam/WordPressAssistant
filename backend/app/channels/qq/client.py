@@ -36,6 +36,10 @@ class OneBotTransport(Protocol):
 
     用 Protocol 而不是继承某个基类：测试时传一个普通对象，
     只要它有 `send_group_message` 方法就能用，不需要导入 httpx。
+
+    预留：OneBot 的 `message` 字段本来就接受 segment 数组，将来让她
+    发图片/表情包时，新增 `send_*_segments` 即可，文本方法保持不变——
+    适配器的多气泡节奏只关心“发出去一段”，不关心那段是文字还是图片。
     """
 
     async def send_group_message(self, group_id: int, message: str) -> Any:

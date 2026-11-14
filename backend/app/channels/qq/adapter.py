@@ -39,8 +39,10 @@ from app.anonymous_quota import (
 from app.channels.qq import anonymous_guide, commands, group_allowlist
 from app.channels.qq.client import OneBotError, OneBotTransport
 from app.channels.qq.commands import CommandContext, dispatch, parse_command
-from app.channels.qq.conversation import ConversationCoordinator
+from app.channels.qq.conversation import ConversationCoordinator, QueuedMessage
 from app.channels.qq.copy import QQCopy
+from app.channels.qq.faces import face_text
+from app.channels.qq.image_understanding import describe_image
 from app.channels.qq.group_policy import (
     GroupPolicy,
     TriggerMatch,
@@ -102,6 +104,28 @@ MAX_SEEN_MESSAGES = 500
 GROUP_ATTENTION_WINDOW_MINUTES = 12 * 60
 GROUP_ATTENTION_CONFIDENCE = 0.6
 
+# 一个回合最多理解几张图。超出部分保留 [图片]/[表情包] 占位符，
+# 防止有人连发几十张把视觉预算一次烧光。
+MAX_IMAGES_PER_ROUND = 4
+
+# 尝试理解但失败（下载失败、超时、预算用尽）时告诉模型图片没加载出来。
+# 和“根本没尝试理解”（开关关闭）区分开：后者保留普通 [图片] 占位符。
+IMAGE_LOAD_FAILED = "加载失败"
+
+
+@dataclass(frozen=True, slots=True)
+class Attachment:
+    """消息里需要视觉理解的一段媒体。
+
+    文本里已经放了 `[图片]` / `[表情包]` 占位符；这里按出现顺序保存
+    媒体本身，视觉理解完成后按顺序把占位符替换成描述。
+    """
+
+    kind: str  # "image" | "sticker"
+    url: str = ""
+    file: str = ""
+    summary: str = ""
+
 
 @dataclass(frozen=True, slots=True)
 class Incoming:
@@ -114,6 +138,37 @@ class Incoming:
     text: str
     at_self: bool
     message_id: int | None
+    attachments: tuple[Attachment, ...] = ()
+
+
+_MEDIA_PLACEHOLDERS = {"image": "[图片]", "sticker": "[表情包]"}
+_MEDIA_LABELS = {"image": "图片", "sticker": "表情包"}
+
+
+def render_media(
+    text: str,
+    attachments: tuple[Attachment, ...] | list[Attachment],
+    descriptions: list[str | None],
+) -> str:
+    """按出现顺序把占位符换成视觉描述。
+
+    同一种占位符可能出现多次，`zip` 的顺序就是解析时记录的顺序。
+    没有描述的媒体保持原占位符，绝不因为视觉失败让消息变空。
+    """
+    if not attachments:
+        return text
+    by_kind: dict[str, list[str | None]] = {kind: [] for kind in _MEDIA_PLACEHOLDERS}
+    for attachment, description in zip(attachments, descriptions):
+        by_kind.setdefault(attachment.kind, []).append(description)
+
+    result = text
+    for kind, placeholder in _MEDIA_PLACEHOLDERS.items():
+        for description in by_kind.get(kind, []):
+            label = _MEDIA_LABELS[kind]
+            described = (description or "").strip()
+            replacement = f"[{label}：{described}]" if described else placeholder
+            result = result.replace(placeholder, replacement, 1)
+    return result
 
 
 class QQAdapter:
@@ -133,6 +188,7 @@ class QQAdapter:
         appraiser: Any | None = None,
         anonymous_quota: AnonymousQuotaStore | None = None,
         runtime: Callable[[], RuntimeSettings] | None = None,
+        image_describer: Callable[..., str | None] | None = None,
     ) -> None:
         self.settings = settings
         self.sender = sender
@@ -156,6 +212,10 @@ class QQAdapter:
         # 每轮私聊的同步模型评估。默认 None：不评估、不花钱，
         # 现有测试和离线运行都不会误调真实模型；生产入口显式注入 Appraiser。
         self._appraiser = appraiser
+
+        # 图片理解。测试注入一个固定描述的假函数，避免联网；
+        # 生产默认走 DeepSeek 视觉模型，失败时退化成占位符。
+        self._image_describer = image_describer or describe_image
 
         # 匿名额度与运行时开关都可注入：测试要固定的开关组合，
         # 生产不传时惰性取全局实例。
@@ -286,6 +346,9 @@ class QQAdapter:
                     # 匿名群里不掷骰子、不记时间线；silent 策略仍然只沉默。
                     if policy is not None and policy.reply_policy == "silent":
                         return {"handled": True, "reason": "silent"}
+                    content = await self._enrich_content(
+                        content, incoming.attachments, f"qq:{incoming.user_id}"
+                    )
                     return await self._run_chat_turn(
                         incoming,
                         content,
@@ -323,6 +386,9 @@ class QQAdapter:
                         binding=binding,
                         is_admin=is_admin,
                     )
+                content = await self._enrich_content(
+                    content, incoming.attachments, f"qq:{incoming.user_id}"
+                )
                 return await self._run_chat_turn(
                     incoming,
                     content,
@@ -338,10 +404,10 @@ class QQAdapter:
         return await self._coordinator.submit(
             key,
             content,
-            handler=lambda texts: self._private_round(
+            handler=lambda messages: self._private_round(
                 incoming,
                 key,
-                texts,
+                messages,
                 store=store,
                 binding=binding,
                 is_admin=is_admin,
@@ -350,6 +416,7 @@ class QQAdapter:
             ),
             debounce=pacing.debounce_seconds,
             max_debounce=pacing.debounce_max_seconds,
+            payload=incoming.attachments,
         )
 
     # ------------------------------------------------------------------
@@ -368,6 +435,9 @@ class QQAdapter:
         和私聊不同，这里**不**记 `record_silence`，回复后也**不**写关系：
         群聊只是“在场说了句话”，不积累回复债、不涨好感。
         """
+        content = await self._enrich_content(
+            content, incoming.attachments, f"qq:{incoming.user_id}"
+        )
         persona = self._persona()
         decisions = await asyncio.to_thread(
             self._group_decide_and_record,
@@ -522,7 +592,7 @@ class QQAdapter:
         self,
         incoming: Incoming,
         key: tuple[int, int],
-        texts: list[str],
+        messages: list[QueuedMessage],
         *,
         store: CreditStore,
         binding: object | None,
@@ -535,8 +605,17 @@ class QQAdapter:
         匿名回合在第一步就分流：不读关系、不评估、不掷骰子。这些都属于
         “记住这个人”，而匿名的定义就是什么都不留。
         """
+        texts = [message.text for message in messages]
+        attachments = tuple(
+            attachment
+            for message in messages
+            for attachment in (message.payload or ())
+        )
         content = "\n".join(texts)
         if anonymous:
+            content = await self._enrich_content(
+                content, attachments, f"qq:{incoming.user_id}"
+            )
             return await self._run_chat_turn(
                 incoming,
                 content,
@@ -555,6 +634,9 @@ class QQAdapter:
         )
         if loaded is None:
             # 关系库不可用：fail-open，直接回复，不写关系。
+            content = await self._enrich_content(
+                content, attachments, f"qq:{incoming.user_id}"
+            )
             return await self._run_chat_turn(
                 incoming,
                 content,
@@ -563,6 +645,7 @@ class QQAdapter:
                 is_private=True,
             )
         person_key, role, signals = loaded
+        content = await self._enrich_content(content, attachments, person_key)
 
         runtime = get_runtime_store().load()
         policy = self.settings.qq_private_policy
@@ -631,6 +714,46 @@ class QQAdapter:
             state_context=render_state_context(state) if state is not None else None,
             baseline_affection=not appraisal_ok,
         )
+
+    async def _enrich_content(
+        self,
+        content: str,
+        attachments: tuple[Attachment, ...] | list[Attachment],
+        subject: str,
+    ) -> str:
+        """把 [图片]/[表情包] 换成视觉描述。
+
+        失败、超预算或开关关闭时保留占位符——理解图片是增强，
+        不能让它挡住回复。一次回合最多理解前几张，避免有人连发刷图。
+        """
+        if not attachments:
+            return content
+
+        runtime = self._runtime_settings()
+        descriptions: list[str | None] = [None] * len(attachments)
+        if runtime.qq_vision_enabled:
+            day = local_day(None, self.settings.quota_timezone)
+            for index, attachment in enumerate(attachments):
+                if index >= MAX_IMAGES_PER_ROUND or not attachment.url:
+                    continue
+                try:
+                    description = await asyncio.to_thread(
+                        self._image_describer,
+                        attachment.url,
+                        person_key=subject,
+                        day=day,
+                        global_limit=runtime.qq_vision_global_daily_budget,
+                        user_limit=runtime.qq_vision_per_user_daily_budget,
+                    )
+                    # 尝试过但没拿到描述：下载失败、超时或预算用尽。
+                    # 让模型知道“这张图没加载出来”，而不是以为她收到了空消息。
+                    descriptions[index] = description or IMAGE_LOAD_FAILED
+                except Exception:  # noqa: BLE001 - 单张图失败不影响回复
+                    logger.warning(
+                        "QQ 图片理解失败 url=%s", attachment.url[:80], exc_info=True
+                    )
+                    descriptions[index] = IMAGE_LOAD_FAILED
+        return render_media(content, attachments, descriptions)
 
     def _load_private_signals(
         self,
@@ -1061,8 +1184,8 @@ class QQAdapter:
                 state_context=state_context,
             )
         except asyncio.CancelledError:
-            # 被新消息打断的回合什么都没发出去（半截回复只留在上下文里），
-            # 额度要退回；否则用户多说两句就会白白烧掉当天的限额。
+            # 被新消息打断的回合什么都没发出去；文本会回到队列，用合并后的
+            # 完整输入重答。额度要退回，否则用户多说两句就会白白烧掉当天的限额。
             self._refund_turn(usage, anonymous_free, anonymous=anonymous)
             raise
 
@@ -1131,21 +1254,6 @@ class QQAdapter:
         finally:
             if conn is not None:
                 conn.close()
-
-    def _remember_interrupted(
-        self, key: tuple[int, int], content: str, partial: str
-    ) -> None:
-        """被打断时把半截回复写进历史；没有正文就不写。"""
-        if not partial:
-            return
-        history = self._history.get(key, [])
-        new_history = [
-            *history,
-            ChatMessage(role="user", content=content[:8000]),
-            ChatMessage(role="assistant", content=partial[:8000]),
-        ]
-        max_messages = max(0, self.settings.qq_history_turns) * 2
-        self._history[key] = new_history[-max_messages:] if max_messages else []
 
     async def _send(
         self, incoming: Incoming, reply: str, *, reason: str | None = None
@@ -1384,6 +1492,7 @@ class QQAdapter:
             return None
 
         parts: list[str] = []
+        attachments: list[Attachment] = []
         at_self = False
         for segment in message:
             if not isinstance(segment, dict):
@@ -1394,6 +1503,29 @@ class QQAdapter:
                 continue
             if segment_type == "text":
                 parts.append(str(data.get("text") or ""))
+            elif segment_type == "face":
+                # QQ 自带小黄脸：直接翻成文字，不需要视觉模型。
+                parts.append(face_text(str(data.get("id") or "")))
+            elif segment_type == "image":
+                parts.append(_MEDIA_PLACEHOLDERS["image"])
+                attachments.append(
+                    Attachment(
+                        kind="image",
+                        url=str(data.get("url") or ""),
+                        file=str(data.get("file") or ""),
+                        summary=str(data.get("summary") or ""),
+                    )
+                )
+            elif segment_type == "mface":
+                parts.append(_MEDIA_PLACEHOLDERS["sticker"])
+                attachments.append(
+                    Attachment(
+                        kind="sticker",
+                        url=str(data.get("url") or ""),
+                        file=str(data.get("file") or ""),
+                        summary=str(data.get("summary") or ""),
+                    )
+                )
             elif segment_type == "at" and self_id:
                 if str(data.get("qq") or "") == str(self_id):
                     at_self = True
@@ -1412,6 +1544,7 @@ class QQAdapter:
             text="".join(parts).strip(),
             at_self=at_self,
             message_id=message_id,
+            attachments=tuple(attachments),
         )
 
     def _match_trigger(
@@ -1522,9 +1655,9 @@ class QQAdapter:
                 elif event_type == "error":
                     error_message = str(event.get("message") or "AI 服务暂时不可用。")
         except asyncio.CancelledError:
-            # 生成中被新消息打断：已经产出的半截正文留在上下文里，
-            # 下一轮模型知道“刚才那句话没说完”。
-            self._remember_interrupted(key, content, "".join(parts).strip())
+            # 被打断的回合什么都没发出去。文本会被调用方放回队列、用合并后的
+            # 完整输入重答，所以这里不能留下半截回复——用户没看到它，模型
+            # 却会以为前面那句已经答过了。
             raise
         except Exception:  # noqa: BLE001 - agent 内部已经会捕获大部分异常
             logger.exception("QQ 通道调用 agent 失败")

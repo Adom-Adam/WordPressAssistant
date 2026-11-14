@@ -28,8 +28,8 @@ async def test_debounce_merges_messages_into_one_round():
     coordinator = ConversationCoordinator()
     seen: list[list[str]] = []
 
-    async def handler(texts):
-        seen.append(texts)
+    async def handler(messages):
+        seen.append([message.text for message in messages])
         return {"handled": True, "round": len(seen)}
 
     first = asyncio.create_task(
@@ -51,8 +51,8 @@ async def test_new_message_interrupts_running_round_and_merges():
     seen: list[list[str]] = []
     started = asyncio.Event()
 
-    async def handler(texts):
-        seen.append(texts)
+    async def handler(messages):
+        seen.append([message.text for message in messages])
         if len(seen) == 1:
             started.set()
             await asyncio.sleep(10)  # 会被打断
@@ -70,6 +70,38 @@ async def test_new_message_interrupts_running_round_and_merges():
     assert first_result["reason"] == "interrupted"
     assert seen[-1] == ["长回复", "新消息"]
     assert second_result["handled"] is True
+
+
+@async_test
+async def test_attachments_survive_interrupt_and_merge():
+    """图片附件要跟文本一起排队，打断重答时不能丢。"""
+    coordinator = ConversationCoordinator()
+    seen: list[list[list[str]]] = []
+    started = asyncio.Event()
+
+    async def handler(messages):
+        seen.append([list(message.payload or ()) for message in messages])
+        if len(seen) == 1:
+            started.set()
+            await asyncio.sleep(10)
+        return {"handled": True}
+
+    first = asyncio.create_task(
+        coordinator.submit(
+            "k", "第一句", handler=handler, debounce=0, max_debounce=0,
+            payload=["img-1"],
+        )
+    )
+    await started.wait()
+    second = asyncio.create_task(
+        coordinator.submit(
+            "k", "第二句", handler=handler, debounce=0, max_debounce=0,
+            payload=["img-2"],
+        )
+    )
+    await asyncio.gather(first, second)
+
+    assert seen[-1] == [["img-1"], ["img-2"]]
 
 
 @async_test

@@ -222,22 +222,22 @@ def _merge_persons_row(
     return True
 
 
-def _merge_appraisal_usage(
-    conn: sqlite3.Connection, source: str, target: str
+def _merge_usage(
+    conn: sqlite3.Connection, table: str, source: str, target: str
 ) -> None:
-    """评估预算按人记账：把源身份当天用掉的量累加到目标身份。"""
+    """预算表按人记账：把源身份当天用掉的量累加到目标身份。"""
     rows = conn.execute(
-        "SELECT day, used FROM appraisal_usage WHERE scope = ?",
+        f"SELECT day, used FROM {table} WHERE scope = ?",
         (f"person:{source}",),
     ).fetchall()
     for row in rows:
         conn.execute(
-            """INSERT INTO appraisal_usage (scope, day, used) VALUES (?, ?, ?)
-               ON CONFLICT(scope, day) DO UPDATE SET used = used + excluded.used""",
+            f"""INSERT INTO {table} (scope, day, used) VALUES (?, ?, ?)
+                ON CONFLICT(scope, day) DO UPDATE SET used = used + excluded.used""",
             (f"person:{target}", row["day"], int(row["used"])),
         )
         conn.execute(
-            "DELETE FROM appraisal_usage WHERE scope = ? AND day = ?",
+            f"DELETE FROM {table} WHERE scope = ? AND day = ?",
             (f"person:{source}", row["day"]),
         )
 
@@ -341,7 +341,8 @@ def merge_person(
         for row in rows:
             _merge_state_row(conn, row, target, state_columns)
             moved["relationship_state"] = moved.get("relationship_state", 0) + 1
-        _merge_appraisal_usage(conn, source, target)
+        for usage_table in ("appraisal_usage", "qq_image_usage"):
+            _merge_usage(conn, usage_table, source, target)
 
     for source in sources:
         if _merge_persons_row(conn, source, target):
@@ -395,11 +396,12 @@ def delete_person_data(
     )
     deleted[_TARGET_KEY_TABLE] = max(cursor.rowcount, 0)
 
-    cursor = conn.execute(
-        f"DELETE FROM appraisal_usage WHERE scope IN ({placeholders})",
-        [f"person:{item}" for item in keys],
-    )
-    deleted["appraisal_usage"] = max(cursor.rowcount, 0)
+    for usage_table in ("appraisal_usage", "qq_image_usage"):
+        cursor = conn.execute(
+            f"DELETE FROM {usage_table} WHERE scope IN ({placeholders})",
+            [f"person:{item}" for item in keys],
+        )
+        deleted[usage_table] = max(cursor.rowcount, 0)
 
     # 别名两边都清：既要删掉“别人并进了这组”的记录，也要删掉
     # “这组并进了别人”的记录（否则目标身份仍会顺着别名找回已删数据）。

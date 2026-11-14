@@ -64,6 +64,13 @@ class RuntimeSettingsUpdate(BaseModel):
     appraisal_per_user_daily_budget: int | None = Field(
         default=None, ge=0, le=1000
     )
+    qq_vision_enabled: bool | None = None
+    qq_vision_global_daily_budget: int | None = Field(
+        default=None, ge=0, le=1_000_000
+    )
+    qq_vision_per_user_daily_budget: int | None = Field(
+        default=None, ge=0, le=1000
+    )
     proactive_enabled: bool | None = None
     proactive_tick_minutes: int | None = Field(default=None, ge=5, le=120)
     proactive_think_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
