@@ -333,6 +333,14 @@ def merge_person(
     )
     moved[_TARGET_KEY_TABLE] = max(cursor.rowcount, 0)
 
+    # 从这个人那里收藏的表情，来源跟着身份一起迁移；素材本身不属于个人。
+    cursor = conn.execute(
+        f"""UPDATE stickers SET source_person = ?
+             WHERE source_person IN ({_placeholders(sources)})""",
+        [target, *sources],
+    )
+    moved["stickers"] = max(cursor.rowcount, 0)
+
     state_columns = _state_columns(conn)
     for source in sources:
         rows = conn.execute(
@@ -389,6 +397,13 @@ def delete_person_data(
             f"DELETE FROM {table} WHERE person_key IN ({placeholders})", keys
         )
         deleted[table] = max(cursor.rowcount, 0)
+
+    # 表情素材是全局的梗图，不跟着人删除；但“谁发来的”这层关联要清掉。
+    cursor = conn.execute(
+        f"UPDATE stickers SET source_person = NULL WHERE source_person IN ({placeholders})",
+        keys,
+    )
+    deleted["stickers_source"] = max(cursor.rowcount, 0)
 
     cursor = conn.execute(
         f"DELETE FROM {_TARGET_KEY_TABLE} WHERE target_key IN ({placeholders})",

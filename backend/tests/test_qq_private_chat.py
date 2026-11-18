@@ -132,6 +132,7 @@ def make_adapter(
     policy: str = "always",
     persona: PersonaVersion | None = None,
     image_describer: Any = None,
+    sticker_collector: Any = None,
 ) -> tuple[QQAdapter, FakeSender, CreditStore]:
     settings = Settings(
         qq_enabled=True,
@@ -152,6 +153,7 @@ def make_adapter(
         persona=persona or make_persona(),
         rng=random.Random(0),
         image_describer=image_describer,
+        sticker_collector=sticker_collector,
     )
     return adapter, sender, store
 

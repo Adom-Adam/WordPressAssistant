@@ -159,7 +159,11 @@ def _release_budget(person_key: str, day: str) -> None:
 
 
 def _compose(description: str, text: str, mood: str) -> str:
-    parts = [description.strip()]
+    description = description.strip()
+    # 后面还要接“；语气：…”，先去掉描述自己的收尾标点，避免「。；」。
+    if text.strip() or mood.strip():
+        description = description.rstrip("。；;，, ")
+    parts = [description]
     if text.strip():
         parts.append(f"图中文字「{text.strip()}」")
     if mood.strip():
@@ -174,6 +178,7 @@ def describe_image(
     day: str,
     global_limit: int = 0,
     user_limit: int = 0,
+    hint: str = "",
 ) -> str | None:
     """返回图片的一句话描述；任何失败都返回 None（调用方退回占位符）。"""
     settings = get_settings()
@@ -204,6 +209,12 @@ def describe_image(
         return None
 
     try:
+        prompt = _PROMPT
+        if hint.strip():
+            prompt += (
+                f"\n\nQQ 给这张表情包附带的标签是「{hint.strip()}」，"
+                "仅供参考；若与图片不符以图片为准。"
+            )
         encoded = base64.b64encode(data).decode("ascii")
         response = openai_client().chat.completions.create(
             model=settings.vision_model,
@@ -211,7 +222,7 @@ def describe_image(
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": _PROMPT},
+                        {"type": "text", "text": prompt},
                         {
                             "type": "image_url",
                             "image_url": {
@@ -243,3 +254,18 @@ def describe_image(
         logger.warning("理解聊天图片失败：%s（%s: %s）", url[:80], type(exc).__name__, exc)
         _release_budget(person_key, day)
         return None
+
+
+def allowed_url(url: str) -> bool:
+    """给别的模块复用的域名检查。"""
+    return _allowed_url(url)
+
+
+def reserve_image_budget(
+    person_key: str, day: str, global_limit: int, user_limit: int
+) -> bool:
+    return _reserve_budget(person_key, day, global_limit, user_limit)
+
+
+def release_image_budget(person_key: str, day: str) -> None:
+    _release_budget(person_key, day)

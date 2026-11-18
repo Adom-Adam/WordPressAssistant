@@ -24,6 +24,11 @@ def memory_isolation(tmp_path: Any, monkeypatch: Any) -> Any:
     get_settings.cache_clear()
 
 
+def test_compose_does_not_double_punctuation() -> None:
+    """描述结尾的句号和拼接用的分号不能叠成「。；」。"""
+    assert iu._compose("一张角色图。", "", "俏皮") == "一张角色图；语气：俏皮"
+
+
 def test_only_qq_image_hosts_are_allowed() -> None:
     assert iu._allowed_url("https://gchat.qpic.cn/gchatpic_new/1/2")
     assert iu._allowed_url("https://multimedia.nt.qq.com.cn/download?appid=1407")

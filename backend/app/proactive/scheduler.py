@@ -15,7 +15,9 @@
 
 from __future__ import annotations
 
+import base64
 import logging
+import random
 import sqlite3
 from dataclasses import dataclass
 from datetime import timedelta
@@ -48,7 +50,9 @@ from app.proactive.store import (
 )
 from app.relationship.appraisal_budget import day_start_iso
 from app.relationship.context import render_state_context
-from app.relationship.state import now_iso, parse_iso
+from app.relationship.state import closeness_for, now_iso, parse_iso
+from app.stickers import files as sticker_files
+from app.stickers import selection as sticker_selection
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +64,10 @@ _MAX_CANDIDATES = 5
 _GROUP_TOPIC_HOURS = 24
 _GROUP_TOPIC_LIMIT = 10
 
+# 只有这几类念头有机会“只发一张表情”。followup 需要文字承接话题，
+# care 通常需要安慰的话，都不在这里。
+STICKER_KINDS = {"missing", "companionship", "spontaneous"}
+
 
 @dataclass(frozen=True, slots=True)
 class SendResult:
@@ -70,6 +78,7 @@ class SendResult:
     kind: str
     status: str  # sent | skipped | failed
     reason: str
+    format: str = "text"
 
 
 class ProactiveScheduler:
@@ -82,6 +91,7 @@ class ProactiveScheduler:
         writer: Any = None,
         persona: Any = None,
         now_fn: Any = None,
+        rng: random.Random | None = None,
     ) -> None:
         self.settings = settings
         self.sender = sender
@@ -89,6 +99,7 @@ class ProactiveScheduler:
         self.writer = writer or ProactiveWriter()
         self._persona = persona
         self._now = now_fn or now_iso
+        self._rng = rng or random.Random()
 
     def _load_persona(self) -> Any:
         if self._persona is not None:
@@ -219,6 +230,22 @@ class ProactiveScheduler:
             if thought is None:
                 # 念头不够强烈：这是“想过但没说”，不留日志。
                 continue
+
+            # 主动表情：由她自己的状态决定，不设时段 / 间隔 / 每日上限。
+            # 没有合适的素材时继续走文字路径。
+            if thought.kind in STICKER_KINDS:
+                if await self._try_sticker(
+                    conn,
+                    cand=cand,
+                    thought=thought,
+                    runtime=runtime,
+                    dynamics=dynamics,
+                    persona_key=persona_key,
+                    channel=channel,
+                    now=now,
+                    results=results,
+                ):
+                    break
 
             if in_quiet_hours(now, dynamics.safety.quiet_hours, timezone_name):
                 skip("quiet_hours", kind=thought.kind, score=thought.score)
@@ -373,6 +400,141 @@ class ProactiveScheduler:
             break
 
         return results
+
+    def _sticker_urge(self, state: Any, kind: str, dynamics: Any) -> float:
+        """她这一刻有多想发个表情：亲近、心情、想念各占一点。"""
+        closeness = closeness_for(float(state.affection), dynamics)
+        urge = (
+            0.12
+            + 0.35 * closeness
+            + 0.25 * max(float(state.valence), 0.0)
+            + 0.15 * min(float(state.missing) / 100.0, 1.0)
+        )
+        urge += 0.10 if kind == "missing" else 0.05
+        return max(0.0, min(0.95, urge))
+
+    async def _try_sticker(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        cand: Any,
+        thought: Any,
+        runtime: Any,
+        dynamics: Any,
+        persona_key: str,
+        channel: str,
+        now: str,
+        results: list[SendResult],
+    ) -> bool:
+        """尝试只发一张表情；返回 True 表示这一轮已经处理完（发送或失败）。
+
+        返回 False 表示“没有这个念头/没有合适素材”，调用方继续走文字。
+        主动表情不检查 quiet_hours / 间隔 / 每日上限——这是产品决定：
+        发不发只取决于她自己的意愿。
+        """
+        if self._rng.random() > self._sticker_urge(cand.state, thought.kind, dynamics):
+            return False
+
+        tones = sticker_selection.tones_for_state(
+            str(cand.state.conflict_stage), float(cand.state.valence)
+        )
+        sticker = None
+        for tone in tones:
+            sticker = sticker_selection.pick_for_thought(
+                conn,
+                tone=tone,
+                kind=thought.kind,
+                target_key=cand.person_key,
+                rng=self._rng,
+            )
+            if sticker is not None:
+                break
+        if sticker is None:
+            return False
+
+        try:
+            data = sticker_files.read_bytes(sticker.file_name)
+        except (OSError, ValueError):
+            logger.warning("主动表情文件读不到，回退文字 sticker=%s", sticker.id)
+            return False
+
+        segment = {
+            "type": "image",
+            "data": {
+                "file": "base64://" + base64.b64encode(data).decode("ascii"),
+            },
+        }
+        sender = getattr(self.sender, "send_private_segments", None)
+        if sender is None:
+            return False
+
+        try:
+            await sender(int(cand.qq_uin), [segment])
+        except Exception as exc:  # noqa: BLE001 - 发送失败不重试
+            reason = str(exc)[:200]
+            record_proactive(
+                conn,
+                persona_key=persona_key,
+                target_key=cand.person_key,
+                channel_id=channel,
+                kind=thought.kind,
+                score=thought.score,
+                threshold=runtime.proactive_speak_threshold,
+                status="failed",
+                reason=reason,
+                format="sticker",
+                sticker_id=sticker.id,
+                now=now,
+            )
+            results.append(
+                SendResult(
+                    cand.person_key,
+                    channel,
+                    thought.kind,
+                    "failed",
+                    reason,
+                    format="sticker",
+                )
+            )
+            return True
+
+        content = f"[表情包：{sticker.description or sticker.file_name}]"[:500]
+        event_id = record_proactive_event(
+            conn,
+            person_key=cand.person_key,
+            channel_id=channel,
+            scope="personal",
+            audience=[cand.person_key],
+            content=content,
+            now=now,
+        )
+        record_proactive(
+            conn,
+            persona_key=persona_key,
+            target_key=cand.person_key,
+            channel_id=channel,
+            kind=thought.kind,
+            thought=content,
+            score=thought.score,
+            threshold=runtime.proactive_speak_threshold,
+            status="sent",
+            event_id=event_id,
+            format="sticker",
+            sticker_id=sticker.id,
+            now=now,
+        )
+        touch_last_proactive(conn, persona_key, cand.person_key, now=now)
+        results.append(
+            SendResult(
+                cand.person_key,
+                channel,
+                thought.kind,
+                "sent",
+                "",
+                format="sticker",
+            )
+        )
+        return True
 
     async def _group_pass(
         self,

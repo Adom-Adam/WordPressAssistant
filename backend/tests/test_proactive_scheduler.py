@@ -52,9 +52,13 @@ def isolation(tmp_path, monkeypatch):
 class FakeSender:
     def __init__(self):
         self.private, self.group = [], []
+        self.private_segments = []
 
     async def send_private_message(self, uid, text):
         self.private.append((uid, text))
+
+    async def send_private_segments(self, uid, segments):
+        self.private_segments.append((uid, segments))
 
     async def send_group_message(self, gid, text):
         self.group.append((gid, text))
@@ -136,7 +140,7 @@ def seed_person(tmp_path, *, qq="10001", user_id=7, **state_overrides):
     return store
 
 
-def make_scheduler(tmp_path, *, sender=None, writer=None, store=None):
+def make_scheduler(tmp_path, *, sender=None, writer=None, store=None, rng=None):
     settings = Settings(
         qq_enabled=True, qq_mock_mode=True, quota_timezone="Asia/Shanghai"
     )
@@ -146,7 +150,39 @@ def make_scheduler(tmp_path, *, sender=None, writer=None, store=None):
         credits=store or CreditStore(str(tmp_path / "q.sqlite3")),
         writer=writer or FakeWriter(),
         persona=persona(),
+        rng=rng,
     )
+
+
+class ZeroRandom:
+    """始终返回 0：让“发不发”的掷骰和加权选择都必中。"""
+
+    def random(self):
+        return 0.0
+
+
+def seed_sticker(tmp_path, *, data, tone, tags=(), monkeypatch=None):
+    from app.stickers import files, store
+
+    monkeypatch.setenv("STICKER_DIR", str(tmp_path / "stickers"))
+    get_settings.cache_clear()
+    content_hash, file_name, detected = files.save_bytes(data)
+    conn = memory_db.connect()
+    try:
+        memory_db.init_schema(conn)
+        sticker_id = store.add_sticker(
+            conn,
+            content_hash=content_hash,
+            file_name=file_name,
+            format=detected,
+            description=f"{tone} 表情",
+            tone=tone,
+            tags=list(tags),
+        )
+        conn.commit()
+        return sticker_id, file_name
+    finally:
+        conn.close()
 
 
 @async_test
@@ -301,3 +337,90 @@ async def test_one_private_message_per_tick(tmp_path):
     results = await scheduler.run_once(now=NOW)
     assert len([r for r in results if r.status == "sent"]) == 1
     assert len(sender.private) == 1
+
+
+PNG_BYTES = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+    "1f15c4890000000d4944415478da63f8cfc0500f000485018084a98c21"
+    "0000000049454e44ae426082"
+)
+GIF_BYTES = b"GIF89a" + b"\x00" * 32
+
+
+@async_test
+async def test_proactive_sticker_bypasses_quiet_hours(tmp_path, monkeypatch):
+    store = seed_person(tmp_path, reply_debt=0.0)
+    enable_runtime(proactive_think_threshold=0.0, proactive_speak_threshold=0.6)
+    sticker_id, _ = seed_sticker(
+        tmp_path, data=PNG_BYTES, tone="warm", tags=("想念",), monkeypatch=monkeypatch
+    )
+    sender = FakeSender()
+    scheduler = make_scheduler(
+        tmp_path, sender=sender, store=store, rng=ZeroRandom()
+    )
+
+    results = await scheduler.run_once(now="2026-11-08T17:30:00+00:00")  # 北京 01:30
+
+    assert len(results) == 1
+    assert results[0].status == "sent", results
+    assert results[0].format == "sticker"
+    assert len(sender.private_segments) == 1
+    assert sender.private == []
+
+    conn = memory_db.connect()
+    try:
+        log = conn.execute("SELECT * FROM proactive_log").fetchone()
+        assert log["format"] == "sticker"
+        assert log["sticker_id"] == sticker_id
+        event = conn.execute(
+            "SELECT content FROM events WHERE source='proactive'"
+        ).fetchone()
+        assert event["content"].startswith("[表情包：")
+    finally:
+        conn.close()
+
+
+@async_test
+async def test_conflict_only_uses_cold_stickers(tmp_path, monkeypatch):
+    store = seed_person(tmp_path, conflict_stage="cold", valence=-0.6, reply_debt=0.0)
+    enable_runtime(proactive_think_threshold=0.0, proactive_speak_threshold=0.0)
+    seed_sticker(
+        tmp_path, data=PNG_BYTES, tone="warm", tags=("开心",), monkeypatch=monkeypatch
+    )
+    cold_id, _ = seed_sticker(
+        tmp_path, data=GIF_BYTES, tone="cold", tags=("冷漠",), monkeypatch=monkeypatch
+    )
+    sender = FakeSender()
+    scheduler = make_scheduler(
+        tmp_path, sender=sender, store=store, rng=ZeroRandom()
+    )
+
+    results = await scheduler.run_once(now=NOW)
+
+    assert results[0].format == "sticker", results
+    conn = memory_db.connect()
+    try:
+        log = conn.execute("SELECT sticker_id FROM proactive_log").fetchone()
+        assert log["sticker_id"] == cold_id
+    finally:
+        conn.close()
+
+
+@async_test
+async def test_no_cold_sticker_falls_back_to_text(tmp_path, monkeypatch):
+    store = seed_person(tmp_path, conflict_stage="cold", valence=-0.6, reply_debt=0.0)
+    enable_runtime(proactive_think_threshold=0.0, proactive_speak_threshold=0.0)
+    seed_sticker(
+        tmp_path, data=PNG_BYTES, tone="warm", tags=("开心",), monkeypatch=monkeypatch
+    )
+    writer = FakeWriter()
+    sender = FakeSender()
+    scheduler = make_scheduler(
+        tmp_path, sender=sender, store=store, writer=writer, rng=ZeroRandom()
+    )
+
+    results = await scheduler.run_once(now=NOW)
+
+    assert results[0].format == "text", results
+    assert sender.private_segments == []
+    assert sender.private == [(10001, "在忙吗？")]

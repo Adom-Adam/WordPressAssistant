@@ -71,6 +71,7 @@ class RuntimeSettingsUpdate(BaseModel):
     qq_vision_per_user_daily_budget: int | None = Field(
         default=None, ge=0, le=1000
     )
+    sticker_library_max: int | None = Field(default=None, ge=0, le=100_000)
     proactive_enabled: bool | None = None
     proactive_tick_minutes: int | None = Field(default=None, ge=5, le=120)
     proactive_think_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
@@ -253,3 +254,43 @@ class QQWhitelistUpdate(BaseModel):
 
     role: RoleName
     note: str | None = Field(default=None, max_length=200)
+
+
+# ----------------------------------------------------------------------
+# 表情库（后台）
+# ----------------------------------------------------------------------
+StickerTone = Literal["warm", "neutral", "cold"]
+
+
+class StickerUpload(BaseModel):
+    """上传一张表情。图片以 base64 传，插件负责读文件。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    content_base64: str = Field(min_length=1)
+    filename: str = Field(default="", max_length=200)
+    description: str = Field(default="", max_length=500)
+    tone: StickerTone = "neutral"
+    origin: str | None = Field(default=None, max_length=100)
+    tags: list[str] = Field(default_factory=list, max_length=30)
+
+
+class StickerUpdate(BaseModel):
+    """修改素材；没传的字段保持不变，`origin=None` 表示清空出处。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    description: str | None = Field(default=None, max_length=500)
+    tone: StickerTone | None = None
+    origin: str | None = Field(default=None, max_length=100)
+    tags: list[str] | None = Field(default=None, max_length=30)
+    enabled: bool | None = None
+
+
+class StickerOriginPayload(BaseModel):
+    """新增或修改出处词条。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=100)
+    aliases: list[str] = Field(default_factory=list, max_length=30)

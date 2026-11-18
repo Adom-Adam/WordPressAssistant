@@ -222,6 +222,9 @@ CREATE TABLE IF NOT EXISTS proactive_log (
     status TEXT NOT NULL,
     reason TEXT NOT NULL DEFAULT '',
     event_id INTEGER,
+    -- text / sticker：主动消息这条是文字还是只发一张表情。
+    format TEXT NOT NULL DEFAULT 'text',
+    sticker_id INTEGER,
     created_at TEXT NOT NULL
 );
 
@@ -286,6 +289,59 @@ CREATE TABLE IF NOT EXISTS qq_allowed_groups (
 CREATE TABLE IF NOT EXISTS anonymous_guide_log (
     scope        TEXT PRIMARY KEY,
     last_sent_at TEXT NOT NULL
+);
+
+-- 表情包的出处词表（原神、星穹铁道……）。模型只能提议，后台负责合并别名。
+CREATE TABLE IF NOT EXISTS sticker_origins (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL UNIQUE,
+    aliases    TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
+-- 表情包素材。`file_name` 是 library 目录下的文件名（内容哈希 + 扩展名）。
+-- tone 是感情色彩：warm / neutral / cold，冲突时只会选 cold。
+CREATE TABLE IF NOT EXISTS stickers (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    content_hash  TEXT NOT NULL UNIQUE,
+    file_name     TEXT NOT NULL,
+    format        TEXT NOT NULL,
+    description   TEXT NOT NULL DEFAULT '',
+    tone          TEXT NOT NULL DEFAULT 'neutral',
+    origin_id     INTEGER,
+    -- 模型提议但还没进出处词表的出处，后台可以确认或忽略。
+    proposed_origin TEXT NOT NULL DEFAULT '',
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    source        TEXT NOT NULL DEFAULT 'manual',
+    source_person TEXT,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_stickers_origin
+    ON stickers(origin_id);
+
+CREATE INDEX IF NOT EXISTS idx_stickers_enabled
+    ON stickers(enabled, tone);
+
+-- 表情的标签，多对多。情绪词和自由标签都放这里；出处用 origin_id 单独存。
+CREATE TABLE IF NOT EXISTS sticker_tags (
+    sticker_id INTEGER NOT NULL,
+    tag        TEXT NOT NULL,
+    weight     REAL NOT NULL DEFAULT 1.0,
+    PRIMARY KEY (sticker_id, tag)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sticker_tags_tag
+    ON sticker_tags(tag);
+
+-- 表情识别的结构化结果缓存（按内容哈希）。导入和自动收藏都先查这里，
+-- 同一张图只调用一次视觉模型。
+CREATE TABLE IF NOT EXISTS sticker_analysis_cache (
+    content_hash TEXT PRIMARY KEY,
+    payload      TEXT NOT NULL,
+    model        TEXT NOT NULL,
+    created_at   TEXT NOT NULL
 );
 """
 
@@ -380,6 +436,20 @@ def _ensure_decision_log_appraisal_columns(conn: sqlite3.Connection) -> None:
         )
 
 
+def _ensure_proactive_log_sticker_columns(conn: sqlite3.Connection) -> None:
+    """给主动表情之前的旧库补 format / sticker_id。"""
+    columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(proactive_log)")
+    }
+    if "format" not in columns:
+        conn.execute(
+            "ALTER TABLE proactive_log "
+            "ADD COLUMN format TEXT NOT NULL DEFAULT 'text'"
+        )
+    if "sticker_id" not in columns:
+        conn.execute("ALTER TABLE proactive_log ADD COLUMN sticker_id INTEGER")
+
+
 def init_schema(conn: sqlite3.Connection | None = None) -> None:
     """建表。可以反复调用；每次调用都很轻。"""
     own = conn is None
@@ -392,6 +462,7 @@ def init_schema(conn: sqlite3.Connection | None = None) -> None:
         _ensure_relationship_state_conflict_columns(conn)
         _ensure_decision_log_appraisal_columns(conn)
         _ensure_decision_log_stage_column(conn)
+        _ensure_proactive_log_sticker_columns(conn)
         MEMORIES_VEC.ensure(conn, getattr(get_settings(), "embedding_dim", 512))
         conn.commit()
     finally:

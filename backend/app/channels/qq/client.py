@@ -48,6 +48,9 @@ class OneBotTransport(Protocol):
     async def send_private_message(self, user_id: int, message: str) -> Any:
         """向某个人发私聊文本，返回 OneBot 的 data 字段。"""
 
+    async def send_private_segments(self, user_id: int, segments: list) -> Any:
+        """发私聊多段消息（文本 + 图片）；主动表情用这个。"""
+
 
 @dataclass(frozen=True, slots=True)
 class OneBotClient:
@@ -110,6 +113,13 @@ class OneBotClient:
         return await self.call(
             "send_private_msg",
             {"user_id": user_id, "message": message},
+        )
+
+    async def send_private_segments(self, user_id: int, segments: list) -> Any:
+        """发送私聊多段消息；`segments` 是 OneBot 的 message 数组。"""
+        return await self.call(
+            "send_private_msg",
+            {"user_id": user_id, "message": segments},
         )
 
     async def get_status(self) -> Any:

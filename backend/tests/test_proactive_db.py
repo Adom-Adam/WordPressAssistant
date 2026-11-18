@@ -51,6 +51,8 @@ def test_proactive_log_columns(conn):
         "status",
         "reason",
         "event_id",
+        "format",
+        "sticker_id",
         "created_at",
     }
 

@@ -455,8 +455,33 @@ DELETE /admin/qq-groups/{gid}    只关第一层，策略行保留
 理解只在会调用模型的路径上进行：私聊、匿名私聊、被指名的群消息、
 `trigger=every` 的群消息。视觉调用复用 `deepseek-flash`，结果按内容哈希
 写入 `qq_image_cache`；每日预算记在 `qq_image_usage`（`global` / `person:<key>`），
-和聊天额度、评估预算互不占用。下载失败、超时或超预算时退回
-`[图片：加载失败]`；功能整体关闭才保留普通占位符，不影响回复。
+和聊天额度、评估预算互不占用。表情包自带的 `summary`（如 `[暗中观察]`）
+会作为视觉线索，并在失败/关闭时直接当描述；没有有效 summary 又理解失败时
+才退回 `[图片：加载失败]`。任何情况都不影响回复。
+
+### 表情库与主动表情
+
+`stickers` / `sticker_tags` / `sticker_origins` 三张表存素材、标签和出处；
+文件在 `data/stickers/library/`，按内容哈希去重。`data/stickers/inbox/` 是
+手工批量导入区，`python -m app.stickers.sync` 负责识别和打标。
+
+后台接口：
+
+```
+GET    /admin/stickers                  素材 + 出处 + 标签 + 容量设置
+POST   /admin/stickers                  上传（base64）
+PUT    /admin/stickers/{id}             改标签 / tone / 出处 / 启用
+DELETE /admin/stickers/{id}             删素材和文件
+GET    /stickers/{id}/image             图片预览（无需登录）
+POST   /admin/sticker-origins           新增出处
+PUT    /admin/sticker-origins/{id}      改名 / 别名
+DELETE /admin/sticker-origins/{id}
+```
+
+自动收藏：消息是表情包、她当时评估为正面/玩闹、`collect_score` 过阈值，
+才下载入库；来源和身份一起合并，彻底删除一个人时只清 `source_person`，
+不删素材。主动发表情复用 `proactive_log`，`format=sticker` +
+`sticker_id`；不检查 quiet hours / 间隔 / 每日上限，由状态算出的冲动值决定。
 
 ### 匿名路径的边界
 

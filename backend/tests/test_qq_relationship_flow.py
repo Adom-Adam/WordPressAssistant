@@ -237,6 +237,57 @@ async def test_new_message_interrupts_generation_and_merges(tmp_path: Any) -> No
     assert sender.private == [(10001, "我在")]
 
 
+def test_burst_votes_use_reply_on_tie() -> None:
+    """连续消息的多次掷骰：回复数 >= 不回复数 就算回复。"""
+    from app.channels.qq.adapter import burst_reply_verdict
+
+    assert burst_reply_verdict([True]) is True
+    assert burst_reply_verdict([False]) is False
+    assert burst_reply_verdict([True, False]) is True
+    assert burst_reply_verdict([False, True]) is True
+    assert burst_reply_verdict([False, False]) is False
+    assert burst_reply_verdict([True, False, False]) is False
+
+
+@async_test
+async def test_interrupted_burst_tie_still_replies(tmp_path: Any) -> None:
+    """第一轮判回、被打断后第二轮判不回：一票对一票，最终仍然回。"""
+    started = asyncio.Event()
+
+    async def blocking_stream(messages: Any, **kwargs: Any) -> Any:
+        if not started.is_set():
+            started.set()
+            await asyncio.sleep(30)
+        yield {"type": "delta", "content": "我在"}
+
+    adapter, sender, _ = make_adapter(
+        tmp_path,
+        stream=blocking_stream,
+        persona=make_persona(floor=0.5, ceiling=0.5),
+        rng=SequenceRandom([0.1, 0.9]),
+    )
+
+    first = asyncio.create_task(adapter.handle_event(private_event(10001, "第一句", 1)))
+    await started.wait()
+    second = asyncio.create_task(
+        adapter.handle_event(private_event(10001, "第二句", 2))
+    )
+    first_result, _ = await asyncio.gather(first, second)
+
+    assert first_result["reason"] == "interrupted"
+    assert sender.private == [(10001, "我在")]
+
+    conn = memory_db.connect()
+    try:
+        rows = conn.execute(
+            "SELECT verdict, reason FROM decision_log ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert [row["verdict"] for row in rows] == ["reply", "reply"]
+    assert "burst_majority" in rows[-1]["reason"]
+
+
 @async_test
 async def test_interrupted_partial_is_not_kept_in_history(tmp_path: Any) -> None:
     """打断时没发出去的那半句不能进历史。

@@ -97,6 +97,8 @@ class RuntimeSettings:
     qq_vision_enabled: bool = True
     qq_vision_global_daily_budget: int = 300
     qq_vision_per_user_daily_budget: int = 30
+    # 表情库容量：自动收藏到上限后停止；后台表情库页可改。
+    sticker_library_max: int = 2000
 
 
 # 每个字段的合法范围。管理员接口和读取文件时都会用同一套规则，
@@ -115,6 +117,7 @@ _INT_RANGES: dict[str, tuple[int, int]] = {
     "appraisal_per_user_daily_budget": (0, 1000),
     "qq_vision_global_daily_budget": (0, 1_000_000),
     "qq_vision_per_user_daily_budget": (0, 1000),
+    "sticker_library_max": (0, 100_000),
     "proactive_tick_minutes": (5, 120),
     "proactive_min_interval_minutes": (0, 10_080),
     "proactive_per_user_daily_limit": (0, 100),
@@ -180,6 +183,7 @@ def _defaults_from_settings(settings: Settings) -> RuntimeSettings:
         qq_vision_enabled=settings.qq_vision_enabled,
         qq_vision_global_daily_budget=settings.qq_vision_global_daily_budget,
         qq_vision_per_user_daily_budget=settings.qq_vision_per_user_daily_budget,
+        sticker_library_max=settings.sticker_library_max,
         proactive_enabled=settings.proactive_enabled,
         proactive_tick_minutes=settings.proactive_tick_minutes,
         proactive_think_threshold=settings.proactive_think_threshold,

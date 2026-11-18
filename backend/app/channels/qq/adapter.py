@@ -26,7 +26,7 @@ import logging
 import random
 import re
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -57,6 +57,7 @@ from app.memory import db as memory_db
 from app.memory import pipeline
 from app.persona.models import PersonaVersion
 from app.persona.store import get_persona_store
+from app.stickers.collect import POSITIVE_EVENTS, maybe_collect
 from app.proactive import pending as pending_topic
 from app.proactive.checks import too_soon
 from app.proactive.store import last_sent_at
@@ -125,6 +126,8 @@ class Attachment:
     url: str = ""
     file: str = ""
     summary: str = ""
+    # QQ 表情包常以 image 段出现，但会带 emoji_id/package；普通照片没有。
+    emoji_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +146,42 @@ class Incoming:
 
 _MEDIA_PLACEHOLDERS = {"image": "[图片]", "sticker": "[表情包]"}
 _MEDIA_LABELS = {"image": "图片", "sticker": "表情包"}
+
+# 这些 summary 等于没说，不能当表情包含义用。
+_GENERIC_MEDIA_SUMMARIES = {
+    "[图片]",
+    "[动画表情]",
+    "[表情]",
+    "[贴图]",
+    "图片",
+    "动画表情",
+    "表情",
+    "贴图",
+}
+
+
+def burst_reply_verdict(votes: Sequence[bool]) -> bool:
+    """连续消息里多次掷骰的合并规则：回复数 >= 不回复数 就回复。
+
+    一轮对话因为连发/打断会掷不止一次骰子。只采用最后一次会让
+    “前面已经判回、后面被打断重掷”变成不回；这里按多数票合并，
+    平票偏向回复。
+    """
+    return sum(1 for vote in votes if vote) * 2 >= len(votes)
+
+
+def summary_meaning(summary: str) -> str:
+    """取出表情包自带含义，比如 `[暗中观察]` → `暗中观察`。
+
+    QQ 的 image/mface 段经常带一个 summary。普通图片是 `[图片]`、
+    表情包是 `[动画表情]`，这类通用词没有信息量，按空串处理。
+    """
+    text = (summary or "").strip()
+    if not text or text.lower() in _GENERIC_MEDIA_SUMMARIES:
+        return ""
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1].strip()
+    return text[:40]
 
 
 def render_media(
@@ -189,6 +228,7 @@ class QQAdapter:
         anonymous_quota: AnonymousQuotaStore | None = None,
         runtime: Callable[[], RuntimeSettings] | None = None,
         image_describer: Callable[..., str | None] | None = None,
+        sticker_collector: Callable[..., int | None] | None = None,
     ) -> None:
         self.settings = settings
         self.sender = sender
@@ -206,6 +246,10 @@ class QQAdapter:
         # 概率采样和气泡切分的随机源。固定种子能让测试复现同一次掷骰子。
         self._rng = rng or random.Random()
 
+        # 连发/打断期间每一轮掷骰的结果。只采用最后一次会让“第一轮判回、
+        # 第二轮被打断重掷成不回”变成沉默；这里按多数票合并，平票偏回。
+        self._burst_votes: dict[tuple[int, int], list[bool]] = {}
+
         # 私聊防抖/打断状态。群聊仍走原来的同步路径。
         self._coordinator = coordinator or ConversationCoordinator()
 
@@ -216,6 +260,9 @@ class QQAdapter:
         # 图片理解。测试注入一个固定描述的假函数，避免联网；
         # 生产默认走 DeepSeek 视觉模型，失败时退化成占位符。
         self._image_describer = image_describer or describe_image
+        # 她自己收藏表情。默认走真实视觉+落盘；测试注入假函数。
+        self._sticker_collector = sticker_collector or maybe_collect
+        self._sticker_tasks: set[asyncio.Task] = set()
 
         # 匿名额度与运行时开关都可注入：测试要固定的开关组合，
         # 生产不传时惰性取全局实例。
@@ -613,6 +660,7 @@ class QQAdapter:
         )
         content = "\n".join(texts)
         if anonymous:
+            self._burst_votes.pop(key, None)
             content = await self._enrich_content(
                 content, attachments, f"qq:{incoming.user_id}"
             )
@@ -634,6 +682,7 @@ class QQAdapter:
         )
         if loaded is None:
             # 关系库不可用：fail-open，直接回复，不写关系。
+            self._burst_votes.pop(key, None)
             content = await self._enrich_content(
                 content, attachments, f"qq:{incoming.user_id}"
             )
@@ -679,11 +728,19 @@ class QQAdapter:
             role=role,
             signals=signals,
             call=call,
+            prior_votes=tuple(self._burst_votes.get(key, ())),
         )
         decision, state = decided
 
+        if decision is None:
+            # 决策层出错：按“照常回复”处理（fail-open），这一串投票作废。
+            self._burst_votes.pop(key, None)
+        else:
+            self._burst_votes.setdefault(key, []).append(decision.reply)
+
         if decision is not None and not decision.reply:
             # 沉默是合法结果：不占额度、不调模型，但用户这条仍进时间线。
+            self._burst_votes.pop(key, None)
             await asyncio.to_thread(
                 pipeline.record_qq_ignored,
                 incoming.user_id,
@@ -693,7 +750,6 @@ class QQAdapter:
             )
             return {"handled": True, "reason": "silent", "reply": ""}
 
-        # 决策层出错时 decision 为 None，按“照常回复”处理（fail-open）。
         relationship = (
             (persona.state_key, person_key, role) if decision is not None else None
         )
@@ -703,7 +759,7 @@ class QQAdapter:
             and call.result is not None
             and call.result.confidence >= dynamics.appraisal.confidence_min
         )
-        return await self._run_chat_turn(
+        result = await self._run_chat_turn(
             incoming,
             content,
             binding=binding,
@@ -714,6 +770,65 @@ class QQAdapter:
             state_context=render_state_context(state) if state is not None else None,
             baseline_affection=not appraisal_ok,
         )
+        # 回复已经发出。她心情不错时，顺便看看这张表情包值不值得收藏；
+        # 放到后台线程，不拖慢这一轮。
+        self._schedule_sticker_collection(
+            incoming,
+            attachments,
+            person_key=person_key,
+            appraisal_event=decision.appraisal_event if decision else None,
+            runtime=runtime,
+        )
+        # 回复成功发出，这一串连续消息的投票到此结束；如果生成中途被
+        # 打断，上面的 await 会抛 CancelledError，不会清空投票。
+        self._burst_votes.pop(key, None)
+        return result
+
+    def _schedule_sticker_collection(
+        self,
+        incoming: Incoming,
+        attachments: tuple[Attachment, ...],
+        *,
+        person_key: str,
+        appraisal_event: str | None,
+        runtime: RuntimeSettings,
+    ) -> None:
+        """把“要不要收藏表情”扔到后台；失败不影响聊天。"""
+        if not attachments or appraisal_event not in POSITIVE_EVENTS:
+            return
+        candidates = [
+            attachment
+            for attachment in attachments
+            if attachment.url
+            and (
+                attachment.kind == "sticker"
+                or attachment.emoji_id
+                or summary_meaning(attachment.summary)
+            )
+        ]
+        if not candidates:
+            return
+        day = local_day(None, self.settings.quota_timezone)
+        for attachment in candidates[:2]:
+            task = asyncio.create_task(
+                asyncio.to_thread(
+                    self._sticker_collector,
+                    attachment.url,
+                    source_person=person_key,
+                    appraisal_event=appraisal_event,
+                    library_max=runtime.sticker_library_max,
+                    day=day,
+                    global_limit=runtime.qq_vision_global_daily_budget,
+                    user_limit=runtime.qq_vision_per_user_daily_budget,
+                )
+            )
+            self._sticker_tasks.add(task)
+            task.add_done_callback(self._sticker_tasks.discard)
+
+    async def drain_sticker_collectors(self) -> None:
+        """等待后台收藏结束；测试和优雅退出用。"""
+        if self._sticker_tasks:
+            await asyncio.gather(*list(self._sticker_tasks), return_exceptions=True)
 
     async def _enrich_content(
         self,
@@ -730,12 +845,16 @@ class QQAdapter:
             return content
 
         runtime = self._runtime_settings()
-        descriptions: list[str | None] = [None] * len(attachments)
+        # 表情包自带的含义本身就是一条有效信息：视觉关掉或失败时也能用。
+        descriptions: list[str | None] = [
+            summary_meaning(attachment.summary) or None for attachment in attachments
+        ]
         if runtime.qq_vision_enabled:
             day = local_day(None, self.settings.quota_timezone)
             for index, attachment in enumerate(attachments):
                 if index >= MAX_IMAGES_PER_ROUND or not attachment.url:
                     continue
+                hint = summary_meaning(attachment.summary)
                 try:
                     description = await asyncio.to_thread(
                         self._image_describer,
@@ -744,15 +863,16 @@ class QQAdapter:
                         day=day,
                         global_limit=runtime.qq_vision_global_daily_budget,
                         user_limit=runtime.qq_vision_per_user_daily_budget,
+                        hint=hint,
                     )
                     # 尝试过但没拿到描述：下载失败、超时或预算用尽。
-                    # 让模型知道“这张图没加载出来”，而不是以为她收到了空消息。
-                    descriptions[index] = description or IMAGE_LOAD_FAILED
+                    # 有表情包含义就显示含义，否则告诉模型“这张图没加载出来”。
+                    descriptions[index] = description or hint or IMAGE_LOAD_FAILED
                 except Exception:  # noqa: BLE001 - 单张图失败不影响回复
                     logger.warning(
                         "QQ 图片理解失败 url=%s", attachment.url[:80], exc_info=True
                     )
-                    descriptions[index] = IMAGE_LOAD_FAILED
+                    descriptions[index] = hint or IMAGE_LOAD_FAILED
         return render_media(content, attachments, descriptions)
 
     def _load_private_signals(
@@ -909,6 +1029,7 @@ class QQAdapter:
         role: str,
         signals: Any,
         call: AppraisalCall | None,
+        prior_votes: tuple[bool, ...] = (),
     ) -> tuple[Decision | None, Any]:
         """掷骰子并落账；任何异常返回 `(None, None)` 让调用方 fail-open。
 
@@ -962,6 +1083,20 @@ class QQAdapter:
                     appraisal_event=appraisal.event if appraisal else None,
                     stage=signals.state.conflict_stage,
                 )
+
+            # 连续消息的多次掷骰按多数票合并。策略性的强制沉默不参与投票。
+            if prior_votes and decision.reason != "policy_silent":
+                aggregated = burst_reply_verdict([*prior_votes, decision.reply])
+                if aggregated != decision.reply:
+                    decision = replace(
+                        decision,
+                        reply=aggregated,
+                        reason=(
+                            f"{decision.reason}+burst_majority"
+                            if decision.reason
+                            else "burst_majority"
+                        ),
+                    )
 
             record_decision(
                 conn,
@@ -1514,6 +1649,7 @@ class QQAdapter:
                         url=str(data.get("url") or ""),
                         file=str(data.get("file") or ""),
                         summary=str(data.get("summary") or ""),
+                        emoji_id=str(data.get("emoji_id") or ""),
                     )
                 )
             elif segment_type == "mface":
@@ -1524,6 +1660,7 @@ class QQAdapter:
                         url=str(data.get("url") or ""),
                         file=str(data.get("file") or ""),
                         summary=str(data.get("summary") or ""),
+                        emoji_id=str(data.get("emoji_id") or ""),
                     )
                 )
             elif segment_type == "at" and self_id:

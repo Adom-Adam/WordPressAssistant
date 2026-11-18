@@ -56,14 +56,21 @@ def text_segment(text: str) -> dict[str, Any]:
     return {"type": "text", "data": {"text": text}}
 
 
-def image_segment(url: str = "https://gchat.qpic.cn/a.image") -> dict[str, Any]:
-    return {"type": "image", "data": {"url": url, "file": "a.image"}}
+def image_segment(
+    url: str = "https://gchat.qpic.cn/a.image", summary: str = ""
+) -> dict[str, Any]:
+    data: dict[str, Any] = {"url": url, "file": "a.image"}
+    if summary:
+        data["summary"] = summary
+    return {"type": "image", "data": data}
 
 
-def mface_segment(url: str = "https://gchat.qpic.cn/b.image") -> dict[str, Any]:
+def mface_segment(
+    url: str = "https://gchat.qpic.cn/b.image", summary: str = "[动画表情]"
+) -> dict[str, Any]:
     return {
         "type": "mface",
-        "data": {"summary": "[动画表情]", "url": url, "file": "b.image"},
+        "data": {"summary": summary, "url": url, "file": "b.image"},
     }
 
 
@@ -183,6 +190,66 @@ async def test_failed_sticker_description_is_marked(tmp_path: Any) -> None:
 
 
 @async_test
+async def test_failed_description_with_summary_uses_meaning(tmp_path: Any) -> None:
+    """表情包自带含义时，失败也要显示含义，而不是“加载失败”。"""
+    seen: list[list[tuple[str, str]]] = []
+    adapter, _, store = make_adapter(
+        tmp_path, stream=capture_stream(seen), image_describer=fake_describer(None)
+    )
+    bind(store)
+
+    await adapter.handle_event(
+        private_media_event(image_segment(summary="[暗中观察]"))
+    )
+
+    assert seen == [[("user", "[图片：暗中观察]")]]
+
+
+@async_test
+async def test_generic_summary_is_ignored_on_failure(tmp_path: Any) -> None:
+    seen: list[list[tuple[str, str]]] = []
+    adapter, _, store = make_adapter(
+        tmp_path, stream=capture_stream(seen), image_describer=fake_describer(None)
+    )
+    bind(store)
+
+    await adapter.handle_event(private_media_event(image_segment(summary="[图片]")))
+
+    assert seen == [[("user", "[图片：加载失败]")]]
+
+
+@async_test
+async def test_summary_is_passed_to_vision_as_hint(tmp_path: Any) -> None:
+    seen: list[list[tuple[str, str]]] = []
+    describer = fake_describer("一张角色图")
+    adapter, _, store = make_adapter(
+        tmp_path, stream=capture_stream(seen), image_describer=describer
+    )
+    bind(store)
+
+    await adapter.handle_event(private_media_event(image_segment(summary="[暗中观察]")))
+
+    assert describer.calls[0]["hint"] == "暗中观察"
+
+
+@async_test
+async def test_vision_switch_off_uses_summary_when_available(tmp_path: Any) -> None:
+    seen: list[list[tuple[str, str]]] = []
+    adapter, _, store = make_adapter(
+        tmp_path, stream=capture_stream(seen), image_describer=fake_describer()
+    )
+    bind(store)
+    real_runtime = adapter._runtime_settings
+    adapter._runtime_settings = lambda: replace(  # type: ignore[method-assign]
+        real_runtime(), qq_vision_enabled=False
+    )
+
+    await adapter.handle_event(private_media_event(image_segment(summary="[暗中观察]")))
+
+    assert seen == [[("user", "[图片：暗中观察]")]]
+
+
+@async_test
 async def test_vision_switch_off_keeps_placeholders(tmp_path: Any) -> None:
     seen: list[list[tuple[str, str]]] = []
     describer = fake_describer()
@@ -199,6 +266,60 @@ async def test_vision_switch_off_keeps_placeholders(tmp_path: Any) -> None:
 
     assert seen == [[("user", "[图片]")]]
     assert describer.calls == []
+
+
+@async_test
+async def test_positive_round_schedules_sticker_collection(tmp_path: Any) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def collector(url: str, **kwargs: Any) -> int:
+        calls.append({"url": url, **kwargs})
+        return 1
+
+    adapter, _, _ = make_adapter(tmp_path, sticker_collector=collector)
+    incoming = adapter._parse_message(
+        private_media_event(image_segment(summary="[暗中观察]"))
+    )
+    assert incoming is not None
+
+    adapter._schedule_sticker_collection(
+        incoming,
+        incoming.attachments,
+        person_key="wp:7",
+        appraisal_event="smalltalk",
+        runtime=adapter._runtime_settings(),
+    )
+    await adapter.drain_sticker_collectors()
+
+    assert len(calls) == 1
+    assert calls[0]["url"] == "https://gchat.qpic.cn/a.image"
+    assert calls[0]["source_person"] == "wp:7"
+
+
+@async_test
+async def test_negative_round_does_not_schedule_collection(tmp_path: Any) -> None:
+    calls: list[str] = []
+
+    def collector(url: str, **kwargs: Any) -> int:
+        calls.append(url)
+        return 1
+
+    adapter, _, _ = make_adapter(tmp_path, sticker_collector=collector)
+    incoming = adapter._parse_message(
+        private_media_event(image_segment(summary="[暗中观察]"))
+    )
+    assert incoming is not None
+
+    adapter._schedule_sticker_collection(
+        incoming,
+        incoming.attachments,
+        person_key="wp:7",
+        appraisal_event="hostility",
+        runtime=adapter._runtime_settings(),
+    )
+    await adapter.drain_sticker_collectors()
+
+    assert calls == []
 
 
 @async_test

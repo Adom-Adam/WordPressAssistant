@@ -32,6 +32,7 @@ require_once __DIR__ . '/includes/class-l2d-ai-reconcile.php';
 require_once __DIR__ . '/includes/class-l2d-ai-roles.php';
 require_once __DIR__ . '/includes/class-l2d-ai-qq-whitelist.php';
 require_once __DIR__ . '/includes/class-l2d-ai-groups.php';
+require_once __DIR__ . '/includes/class-l2d-ai-stickers.php';
 
 final class L2D_AI_Plugin {
 
@@ -119,6 +120,8 @@ final class L2D_AI_Plugin {
 		L2D_AI_QQ_Whitelist::init();
 		// QQ 群：哪些群允许她说话，以及每个群里怎么说话。
 		L2D_AI_Groups::init();
+		// 表情库：主动发表情用的素材、标签和出处。
+		L2D_AI_Stickers::init();
 	}
 
 	/**
@@ -857,6 +860,11 @@ final class L2D_AI_Plugin {
 	 * `/ai-api` 这种相对地址走 Nginx 反代；也允许管理员直接填完整地址。
 	 * 这里由 WordPress 服务器自己发请求，所以完整地址必须是服务器能访问到的。
 	 */
+	public static function backend_public_url( $path ) {
+		// 浏览器也要访问的地址（比如后台预览表情图），和服务器端请求用同一套 api_base。
+		return self::backend_url( $path );
+	}
+
 	private static function backend_url( $path ) {
 		$base = self::api_base();
 		if ( preg_match( '#^https?://#i', $base ) ) {

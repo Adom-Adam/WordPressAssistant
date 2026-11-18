@@ -26,6 +26,8 @@ def record_proactive(
     status: str,
     reason: str = "",
     event_id: int | None = None,
+    format: str = "text",
+    sticker_id: int | None = None,
     now: str | None = None,
     commit: bool = True,
 ) -> int:
@@ -33,8 +35,8 @@ def record_proactive(
     cursor = conn.execute(
         """INSERT INTO proactive_log (
                persona_key, target_key, channel_id, kind, thought, score,
-               threshold, status, reason, event_id, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               threshold, status, reason, event_id, format, sticker_id, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             persona_key,
             target_key,
@@ -46,6 +48,8 @@ def record_proactive(
             status,
             (reason or "")[:200],
             event_id,
+            format,
+            sticker_id,
             now or now_iso(),
         ),
     )
