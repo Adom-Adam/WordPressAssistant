@@ -351,6 +351,7 @@ final class L2D_AI_Users {
 			<thead>
 				<tr>
 					<th>ID</th>
+					<th>头像</th>
 					<th>用户名</th>
 					<th>昵称</th>
 					<th>邮箱</th>
@@ -367,7 +368,7 @@ final class L2D_AI_Users {
 			</thead>
 			<tbody>
 			<?php if ( empty( $users ) ) : ?>
-				<tr><td colspan="13">没有符合条件的用户。</td></tr>
+				<tr><td colspan="14">没有符合条件的用户。</td></tr>
 			<?php endif; ?>
 			<?php foreach ( $users as $user ) : ?>
 				<?php
@@ -385,6 +386,7 @@ final class L2D_AI_Users {
 				?>
 				<tr>
 					<td><?php echo esc_html( (string) $user_id ); ?></td>
+					<td><?php echo get_avatar( $user_id, 32 ); ?></td>
 					<td><?php echo esc_html( $user->user_login ); ?></td>
 					<td><?php echo esc_html( $user->display_name ); ?></td>
 					<td><?php echo esc_html( $user->user_email ); ?></td>

@@ -33,6 +33,7 @@ require_once __DIR__ . '/includes/class-l2d-ai-roles.php';
 require_once __DIR__ . '/includes/class-l2d-ai-qq-whitelist.php';
 require_once __DIR__ . '/includes/class-l2d-ai-groups.php';
 require_once __DIR__ . '/includes/class-l2d-ai-stickers.php';
+require_once __DIR__ . '/includes/class-l2d-ai-avatars.php';
 
 final class L2D_AI_Plugin {
 
@@ -122,6 +123,8 @@ final class L2D_AI_Plugin {
 		L2D_AI_Groups::init();
 		// 表情库：主动发表情用的素材、标签和出处。
 		L2D_AI_Stickers::init();
+		// 用户头像：国内镜像 + 用户自己上传。
+		L2D_AI_Avatars::init();
 	}
 
 	/**
