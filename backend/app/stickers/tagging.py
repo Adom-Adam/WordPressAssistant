@@ -63,6 +63,16 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _build_prompt(emotions: list[str], origins: list[str]) -> str:
+    """填词表。
+
+    不能用 `str.format`：提示词本身就含 JSON 的 `{}`，会被当成占位符。
+    """
+    return _PROMPT.replace("{emotions}", "、".join(emotions)).replace(
+        "{origins}", "、".join(origins) if origins else "（没有已知出处，可自由提议）"
+    )
+
+
 def _cache_get(content_hash: str) -> dict[str, Any] | None:
     try:
         conn = memory_db.connect()
@@ -166,10 +176,7 @@ def analyze_bytes(
 
     settings = get_settings()
     origins = list(known_origins or [])
-    prompt = _PROMPT.format(
-        emotions="、".join(EMOTION_TAGS),
-        origins="、".join(origins) if origins else "（没有已知出处，可自由提议）",
-    )
+    prompt = _build_prompt(list(EMOTION_TAGS), origins)
     encoded = base64.b64encode(data).decode("ascii")
     model = settings.vision_model
     try:
