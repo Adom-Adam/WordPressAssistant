@@ -861,8 +861,18 @@ final class L2D_AI_Plugin {
 	 * 这里由 WordPress 服务器自己发请求，所以完整地址必须是服务器能访问到的。
 	 */
 	public static function backend_public_url( $path ) {
-		// 浏览器也要访问的地址（比如后台预览表情图），和服务器端请求用同一套 api_base。
-		return self::backend_url( $path );
+		// 浏览器也要访问的地址（比如后台预览表情图）。
+		// api_base 映射的是后端的 /api/（nginx 把 /ai-api/ 转发到 /api/），
+		// 所以这里要把路径开头的 /api 去掉，否则会变成 /ai-api/api/...
+		$relative = '/' . ltrim( (string) $path, '/' );
+		if ( 0 === strpos( $relative, '/api/' ) ) {
+			$relative = substr( $relative, 4 );
+		}
+		$base = self::api_base();
+		if ( preg_match( '#^https?://#i', $base ) ) {
+			return untrailingslashit( $base ) . $relative;
+		}
+		return home_url( '/' . ltrim( $base, '/' ) . $relative );
 	}
 
 	private static function backend_url( $path ) {
