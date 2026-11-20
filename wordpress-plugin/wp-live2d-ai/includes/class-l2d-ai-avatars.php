@@ -35,6 +35,7 @@ final class L2D_AI_Avatars {
 		add_action( 'admin_post_l2d_ai_avatar_remove', array( __CLASS__, 'handle_remove' ) );
 		add_action( 'admin_post_l2d_ai_avatar_settings', array( __CLASS__, 'handle_settings' ) );
 		add_action( 'show_user_profile', array( __CLASS__, 'render_profile_section' ), 11 );
+		add_action( 'admin_footer', array( __CLASS__, 'render_profile_forms' ) );
 		add_action( 'deleted_user', array( __CLASS__, 'handle_deleted_user' ) );
 		add_filter( 'get_avatar_data', array( __CLASS__, 'filter_avatar_data' ), 999, 2 );
 	}
@@ -150,24 +151,69 @@ final class L2D_AI_Avatars {
 			</p>
 
 			<?php if ( self::upload_enabled() ) : ?>
-				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" enctype="multipart/form-data">
-					<input type="hidden" name="action" value="l2d_ai_avatar_upload">
-					<?php wp_nonce_field( self::NONCE_ACTION ); ?>
-					<input type="file" name="l2d_ai_avatar" accept="image/jpeg,image/png,image/gif,image/webp" required>
-					<button type="submit" class="button button-secondary">上传头像</button>
-					<p class="description">支持 JPG / PNG / GIF / WebP，2MB 以内。上传后会覆盖站点默认头像。</p>
-				</form>
+				<input
+					type="file"
+					id="l2d-ai-avatar-file"
+					name="l2d_ai_avatar"
+					accept="image/jpeg,image/png,image/gif,image/webp"
+					form="l2d-ai-avatar-form"
+					required
+				>
+				<button type="submit" class="button button-secondary" form="l2d-ai-avatar-form">上传头像</button>
+				<p class="description">支持 JPG / PNG / GIF / WebP，2MB 以内。上传后会覆盖站点默认头像。</p>
 				<?php if ( '' !== $custom_url ) : ?>
-					<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="margin-top:8px;">
-						<input type="hidden" name="action" value="l2d_ai_avatar_remove">
-						<?php wp_nonce_field( self::NONCE_ACTION ); ?>
-						<button type="submit" class="button button-link-delete">恢复默认头像</button>
-					</form>
+					<p style="margin-top:8px;">
+						<button type="submit" class="button button-link-delete" form="l2d-ai-avatar-remove-form">恢复默认头像</button>
+					</p>
 				<?php endif; ?>
 			<?php else : ?>
 				<p class="description">站长关闭了自定义头像，当前使用站点默认头像。</p>
 			<?php endif; ?>
 		</div>
+		<?php
+	}
+
+	/**
+	 * 资料页的「更新个人资料」本身是一个 `<form>`，头像表单不能再嵌进去，
+	 * 否则浏览器会提前关掉外层表单，点「上传」会变成提交整个资料页，
+	 * 还会触发“离开网站”的未保存提示。
+	 *
+	 * 真正的表单放在页面底部（外层表单之外），卡片里的文件框和按钮用
+	 * HTML5 的 `form="..."` 属性关联过去。
+	 */
+	public static function render_profile_forms() {
+		if ( ! is_admin() || ! function_exists( 'get_current_screen' ) ) {
+			return;
+		}
+		$screen = get_current_screen();
+		if ( ! $screen || 'profile' !== $screen->id ) {
+			return;
+		}
+		if ( get_current_user_id() <= 0 ) {
+			return;
+		}
+		?>
+		<?php if ( self::upload_enabled() ) : ?>
+			<form
+				id="l2d-ai-avatar-form"
+				method="post"
+				action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>"
+				enctype="multipart/form-data"
+				style="display:none;"
+			>
+				<input type="hidden" name="action" value="l2d_ai_avatar_upload">
+				<?php wp_nonce_field( self::NONCE_ACTION ); ?>
+			</form>
+		<?php endif; ?>
+		<form
+			id="l2d-ai-avatar-remove-form"
+			method="post"
+			action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>"
+			style="display:none;"
+		>
+			<input type="hidden" name="action" value="l2d_ai_avatar_remove">
+			<?php wp_nonce_field( self::NONCE_ACTION ); ?>
+		</form>
 		<?php
 	}
 
