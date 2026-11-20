@@ -26,6 +26,7 @@ final class L2D_AI_Avatars {
 
 	const NONCE_ACTION = 'l2d_ai_avatars';
 	const MAX_BYTES    = 2097152; // 2 MB
+	const AVATAR_SIZE  = 256;     // 上传后裁成 256×256 的 1:1
 
 	const TRANSIENT_NOTICE = 'l2d_ai_avatars_notice_';
 
@@ -160,7 +161,7 @@ final class L2D_AI_Avatars {
 					required
 				>
 				<button type="submit" class="button button-secondary" form="l2d-ai-avatar-form">上传头像</button>
-				<p class="description">支持 JPG / PNG / GIF / WebP，2MB 以内。上传后会覆盖站点默认头像。</p>
+				<p class="description">支持 JPG / PNG / GIF / WebP，2MB 以内；上传后会从中心自动裁成 1:1 的方形头像。</p>
 				<?php if ( '' !== $custom_url ) : ?>
 					<p style="margin-top:8px;">
 						<button type="submit" class="button button-link-delete" form="l2d-ai-avatar-remove-form">恢复默认头像</button>
@@ -264,11 +265,66 @@ final class L2D_AI_Avatars {
 			self::redirect( 'too_large' );
 		}
 
+		$stored_path = (string) $uploaded['file'];
+		$stored_url  = (string) $uploaded['url'];
+		$cropped     = self::crop_square( $stored_path, $stored_url );
+		if ( is_array( $cropped ) ) {
+			$stored_path = $cropped['path'];
+			$stored_url  = $cropped['url'];
+		}
+
 		$user_id = get_current_user_id();
 		self::delete_stored_file( $user_id );
-		update_user_meta( $user_id, self::META_URL, esc_url_raw( $uploaded['url'] ) );
-		update_user_meta( $user_id, self::META_PATH, (string) $uploaded['file'] );
+		update_user_meta( $user_id, self::META_URL, esc_url_raw( $stored_url ) );
+		update_user_meta( $user_id, self::META_PATH, $stored_path );
 		self::redirect( 'uploaded' );
+	}
+
+	/**
+	 * 把上传的图从中心裁成 1:1，并缩到 AVATAR_SIZE。
+	 *
+	 * 裁剪失败（服务器没有可用的图像编辑器）时返回 null，调用方继续用原图，
+	 * 至少头像还能换成功。GIF 会被裁成静态图，这是图像编辑器的限制。
+	 */
+	private static function crop_square( $path, $url ) {
+		if ( ! function_exists( 'wp_get_image_editor' ) ) {
+			return null;
+		}
+		$editor = wp_get_image_editor( $path );
+		if ( is_wp_error( $editor ) ) {
+			return null;
+		}
+
+		$size = $editor->get_size();
+		$width  = isset( $size['width'] ) ? (int) $size['width'] : 0;
+		$height = isset( $size['height'] ) ? (int) $size['height'] : 0;
+		if ( $width <= 0 || $height <= 0 ) {
+			return null;
+		}
+
+		$side   = min( $width, $height );
+		$target = min( self::AVATAR_SIZE, $side );
+		$x      = (int) floor( ( $width - $side ) / 2 );
+		$y      = (int) floor( ( $height - $side ) / 2 );
+
+		$editor->crop( $x, $y, $side, $side, $target, $target );
+
+		$info     = pathinfo( $path );
+		$extension = isset( $info['extension'] ) && '' !== $info['extension'] ? $info['extension'] : 'jpg';
+		$new_path = $info['dirname'] . '/' . $info['filename'] . '-avatar-' . $target . '.' . $extension;
+		$saved    = $editor->save( $new_path );
+		if ( is_wp_error( $saved ) || empty( $saved['path'] ) ) {
+			return null;
+		}
+
+		$final_path = (string) $saved['path'];
+		if ( $final_path !== $path ) {
+			@unlink( $path );
+		}
+		return array(
+			'path' => $final_path,
+			'url'  => dirname( $url ) . '/' . basename( $final_path ),
+		);
 	}
 
 	public static function handle_remove() {
@@ -417,7 +473,7 @@ final class L2D_AI_Avatars {
 								<input type="checkbox" name="upload_enabled" value="1" <?php checked( $upload ); ?>>
 								允许用户在资料页上传自己的头像
 							</label>
-							<p class="description">文件保存在 uploads 目录，只记用户 meta，不进媒体库；支持 JPG/PNG/GIF/WebP，2MB 以内。</p>
+							<p class="description">文件保存在 uploads 目录，只记用户 meta，不进媒体库；支持 JPG/PNG/GIF/WebP，2MB 以内。上传后会从中心裁成 256×256 的 1:1 头像（GIF 会变成静态图）。</p>
 						</td>
 					</tr>
 				</table>
